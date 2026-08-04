@@ -1,0 +1,19 @@
+# 1. Bỏ qua tệp cấu hình chứa đường dẫn tĩnh (TUYỆT ĐỐI KHÔNG ĐƯA LÊN GITHUB)
+.env
+
+# 2. Bỏ qua Môi trường ảo Python (Phòng trường hợp các thành viên đặt tên khác nhau)
+.venv
+env
+venv
+.venv/
+env/
+venv/
+
+# 3. Bỏ qua Gốc dữ liệu và các kho tra cứu khổng lồ
+raw/
+derived/
+index/
+
+# 4. Bỏ qua các tệp dịch tự động của Python
+__pycache__/
+*.pyc
