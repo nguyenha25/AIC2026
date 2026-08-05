@@ -1,42 +1,42 @@
-from src.aic2026.paths import DATA_ROOT, RAW_DIR, DERIVED_DIR, INDEX_DIR
+"""
+Tạo toàn bộ thư mục rỗng của gốc dữ liệu.
 
-def create_directories():
+Chạy:  python -m scripts.bootstrap_dirs   (đứng ở thư mục gốc dự án)
+
+Chạy lại nhiều lần vô hại: thư mục đã có thì bỏ qua, không xóa gì cả.
+"""
+
+from src.aic2026.paths import (
+    DATA_ROOT,
+    PROJECT_ROOT,
+    REQUIRED_DIRS,
+    free_space_gb,
+)
+
+
+def main() -> int:
+    # Chặn ngay trường hợp nguy hiểm nhất: để dữ liệu trong thư mục mã nguồn.
+    if DATA_ROOT.resolve() == PROJECT_ROOT.resolve() or PROJECT_ROOT.resolve() in DATA_ROOT.resolve().parents:
+        print("DỪNG: gốc dữ liệu đang nằm bên trong thư mục mã nguồn.")
+        print(f"  Mã nguồn : {PROJECT_ROOT}")
+        print(f"  Dữ liệu  : {DATA_ROOT}")
+        print("Sửa DATA_ROOT trong .env sang một chỗ khác rồi chạy lại.")
+        return 1
+
     print(f"Đang tạo cấu trúc dữ liệu tại: {DATA_ROOT}")
-    
-    # Danh sách các thư mục cần tạo theo chuẩn (Task 4 & Giai đoạn 1)
-    dirs_to_create = [
-        # Tầng RAW
-        RAW_DIR / "map-keyframes",
-        RAW_DIR / "clip-features-32",
-        RAW_DIR / "objects",
-        RAW_DIR / "media-info",
-        RAW_DIR / "keyframes",
-        RAW_DIR / "videos",
-        
-        # Tầng DERIVED
-        DERIVED_DIR / "thumbnails",
-        DERIVED_DIR / "ocr",
-        DERIVED_DIR / "asr",
-        DERIVED_DIR / "audio",
-        DERIVED_DIR / "frames_dense",
-        DERIVED_DIR / "captions",
-        
-        # Tầng INDEX
-        INDEX_DIR / "frame_map.parquet",
-        INDEX_DIR / "faiss",
-        INDEX_DIR / "fts",
-        
-        # Các thư mục lưu kết quả và bài nộp
-        DATA_ROOT / "dev",
-        DATA_ROOT / "runs",
-        DATA_ROOT / "submissions"
-    ]
-    
-    for d in dirs_to_create:
+    created = 0
+    for d in REQUIRED_DIRS:
+        if not d.exists():
+            created += 1
         d.mkdir(parents=True, exist_ok=True)
-        print(f"  + Đã tạo: {d.relative_to(DATA_ROOT)}")
-        
-    print("Hoàn tất tạo cấu trúc thư mục!")
+        print(f"  + {d.relative_to(DATA_ROOT)}")
+
+    print("-" * 60)
+    print(f"Xong. {len(REQUIRED_DIRS)} thư mục chuẩn, tạo mới {created}.")
+    print(f"Ổ đĩa còn trống: {free_space_gb(DATA_ROOT):.1f} GB")
+    print("Bước tiếp theo:  python -m scripts.verify_layout")
+    return 0
+
 
 if __name__ == "__main__":
-    create_directories()
+    raise SystemExit(main())

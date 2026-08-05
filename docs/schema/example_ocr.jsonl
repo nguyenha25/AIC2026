@@ -1,0 +1,3 @@
+{"video_id": "L21_V001", "n": 1, "frame_idx": 0, "text": "BẢN TIN THỜI SỰ 18H", "boxes": [{"text": "BẢN TIN THỜI SỰ 18H", "bbox": [120, 540, 860, 600], "conf": 0.97}], "engine": "easyocr-1.7.1"}
+{"video_id": "L21_V001", "n": 2, "frame_idx": 100, "text": "", "boxes": [], "engine": "easyocr-1.7.1"}
+{"video_id": "L21_V001", "n": 3, "frame_idx": 313, "text": "Phóng viên Nguyễn Văn A tường thuật", "boxes": [{"text": "Phóng viên Nguyễn Văn A", "bbox": [60, 880, 540, 930], "conf": 0.91}, {"text": "tường thuật", "bbox": [60, 935, 300, 975], "conf": 0.88}], "engine": "easyocr-1.7.1"}

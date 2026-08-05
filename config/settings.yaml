@@ -1,0 +1,32 @@
+# Tham số chạy. Đổi ở đây, KHÔNG sửa số trực tiếp trong mã nguồn.
+# Mỗi lần chạy chép tệp này vào runs/<tên lần chạy>/ để sau còn biết
+# lần đó chạy với tham số gì.
+
+nop_bai:
+  so_dong_toi_da: 100        # BTC cho tối đa 100 câu trả lời một truy vấn
+  bo_trung: true             # bắt buộc: trùng chỉ ăn điểm một lần
+  so_moc_trake: 4            # số khoảnh khắc mặc định của một truy vấn TRAKE
+
+tra_cuu:
+  so_ung_vien_moi_nguon: 500 # lấy dư rồi mới gộp và lọc, không lấy đúng 100
+  do_do: cosine
+  mo_hinh_nen: clip-ViT-B-32 # BTC phát sẵn. Giai đoạn 2 nâng lên SigLIP 2
+
+gop_ket_qua:
+  cach_gop: rrf              # Reciprocal Rank Fusion
+  rrf_k: 60
+  trong_so:
+    clip: 1.0
+    ocr: 0.6
+    asr: 0.6
+    object: 0.4
+
+loc_trung:
+  # Hai ảnh cùng video và cách nhau dưới ngần này khung hình thì coi là
+  # cùng một cảnh, chỉ giữ ảnh điểm cao hơn.
+  khoang_cach_toi_thieu: 250
+  so_anh_toi_da_moi_video: 3
+
+duong_dan:
+  # Để trống — mọi đường dẫn lấy từ src/aic2026/paths.py.
+  # Mục này chỉ để nhắc: KHÔNG viết đường dẫn vào tệp cấu hình.
