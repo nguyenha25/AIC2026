@@ -1,0 +1,33 @@
+# Ai giữ phần dữ liệu nặng nào (theo sheet "Danh sách tệp cần tải").
+# Bốn máy đều có ĐỦ bốn tệp nhẹ của Giai đoạn 0; chỉ keyframes và videos
+# mới chia nhau.
+#
+# Ai đổi phần của mình thì sửa ở đây và báo nhóm — chương trình đọc tệp
+# này để biết khi thiếu dữ liệu thì phải hỏi ai.
+
+nhe_ca_nhom_deu_co:
+  - map-keyframes
+  - clip-features-32
+  - objects
+  - media-info
+
+phan_chia:
+  Thi:
+    keyframes: [L21, L25, L26_a]
+    videos:    [L21, L25, L26_a]
+  Nghi:
+    keyframes: [L22, L24, L26_b, L26_c]
+    videos:    [L22, L24, L26_b, L26_c]
+  Nguyen:
+    keyframes: [L26_d, L26_e, L28, L29]
+    videos:    [L26_d, L26_e, L28, L29]
+  Ngan:
+    keyframes: [L23, L27, L30]
+    videos:    [L23, L27, L30]
+
+ghi_chu:
+  - "Ảnh thu nhỏ (thumbnails) làm xong thì chia cho CẢ NHÓM — mỗi người
+     thu nhỏ phần mình rồi đẩy lên kho chung. Cuối cùng bốn máy đều có
+     thumbnails của toàn bộ kho (~3 GB) dù chỉ giữ ảnh gốc phần mình."
+  - "Video: tách tiếng xong thì xóa video gốc. Âm thanh 16 kHz chỉ chiếm
+     khoảng 1/60 dung lượng video. Giữ lại vài video để thử TRAKE."

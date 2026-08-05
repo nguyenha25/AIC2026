@@ -1,46 +1,129 @@
-from src.aic2026.paths import DATA_ROOT, PROJECT_ROOT, RAW_DIR
+"""
+Kiểm tra máy này có đúng chuẩn nhóm không.
 
-def verify():
-    errors = []
-    
-    # 1. Kiểm tra đã khai báo đường dẫn chưa
+Chạy:  python -m scripts.verify_layout
+
+Bốn máy chạy lệnh này phải ra CÙNG số video ở cả bốn loại dữ liệu.
+Lệch một con số nghĩa là có người tải thiếu hoặc giải nén nhầm chỗ.
+
+Mã thoát: 0 = ĐẠT, 1 = KHÔNG ĐẠT (dùng được trong script tự động).
+"""
+
+from src.aic2026.paths import (
+    DATA_ROOT,
+    PHASE0_RAW_DIRS,
+    PROJECT_ROOT,
+    REQUIRED_DIRS,
+    free_space_gb,
+    list_video_ids,
+)
+
+ERROR_GB = 10.0
+WARN_GB = 30.0
+
+
+def main() -> int:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    print("=" * 62)
+    print("KIỂM TRA CẤU TRÚC MÁY NÀY")
+    print("=" * 62)
+    print(f"Mã nguồn : {PROJECT_ROOT}")
+    print(f"Dữ liệu  : {DATA_ROOT}")
+    print()
+
+    # --- 1. Đã khai báo đường dẫn và đường dẫn có thật chưa ---------------
     if not DATA_ROOT.exists():
-        errors.append(f"Lỗi: Không tìm thấy thư mục gốc dữ liệu tại {DATA_ROOT}.")
-        
-    # 2. Kiểm tra dữ liệu có nằm nhầm trong mã nguồn không
-    if PROJECT_ROOT in DATA_ROOT.parents or DATA_ROOT.resolve() == PROJECT_ROOT.resolve():
-        errors.append("Lỗi: Gốc dữ liệu đang nằm bên trong thư mục mã nguồn! Tuyệt đối nguy hiểm!")
-        
-    # 3. Kiểm tra đủ các thư mục chuẩn chưa
-    if not RAW_DIR.exists() or not (RAW_DIR / "map-keyframes").exists():
-        errors.append("Lỗi: Thiếu các thư mục chuẩn. Hãy chạy bootstrap_dirs.py trước.")
+        errors.append(
+            f"Không thấy gốc dữ liệu tại {DATA_ROOT}. "
+            "Kiểm tra lại DATA_ROOT trong .env, hoặc chạy bootstrap_dirs trước."
+        )
 
-    # 4. Đếm số lượng video và keyframes
-    # Danh sách các thư mục chứa dữ liệu giải nén thực tế
-    folders_to_count = ["clip-features-32", "objects", "media-info", "map-keyframes"]
-    counts = {}
-    
-    for folder_name in folders_to_count:
-        folder_path = RAW_DIR / folder_name
-        if folder_path.exists():
-            # rglob('*') sẽ chui vào từng thư mục con để đếm toàn bộ file
-            counts[folder_name] = sum(1 for f in folder_path.rglob('*') if f.is_file())
-        else:
-            counts[folder_name] = 0
+    # --- 2. Dữ liệu có nằm nhầm trong mã nguồn không ----------------------
+    if DATA_ROOT.resolve() == PROJECT_ROOT.resolve() or PROJECT_ROOT.resolve() in DATA_ROOT.resolve().parents:
+        errors.append(
+            "Gốc dữ liệu đang nằm BÊN TRONG thư mục mã nguồn. "
+            "Sớm muộn cũng có người đẩy hàng chục GB lên github."
+        )
 
-    # 5. Xuất kết quả
-    if errors:
-        for err in errors:
-            print(err)
-        print("\n=> KẾT LUẬN: KHÔNG ĐẠT")
+    # --- 3. Đủ thư mục chuẩn chưa ----------------------------------------
+    missing = [d for d in REQUIRED_DIRS if not d.is_dir()]
+    if missing:
+        errors.append(f"Thiếu {len(missing)}/{len(REQUIRED_DIRS)} thư mục chuẩn. Chạy bootstrap_dirs.")
+        for d in missing[:8]:
+            errors.append(f"    thiếu: {d}")
     else:
-        print("\n=> KẾT LUẬN: ĐẠT")
-        print("-" * 50)
-        print("THỐNG KÊ DỮ LIỆU ĐÃ GIẢI NÉN (TASK 4):")
-        # In kết quả đếm của từng thư mục ra màn hình
-        for folder_name, count in counts.items():
-            print(f"  + Thư mục raw/{folder_name:<18}: {count:>8,} files")
-        print("-" * 50)
+        print(f"[OK] Đủ {len(REQUIRED_DIRS)}/{len(REQUIRED_DIRS)} thư mục chuẩn")
+
+    # --- 4. Không còn tệp .zip sót lại ------------------------------------
+    if DATA_ROOT.exists():
+        leftovers = list(DATA_ROOT.rglob("*.zip"))
+        if leftovers:
+            warnings.append(
+                f"Còn {len(leftovers)} tệp .zip chưa xóa "
+                f"(vd: {leftovers[0].name}) — đang chiếm ổ gấp đôi."
+            )
+
+    # --- 5. Dung lượng trống ---------------------------------------------
+    if DATA_ROOT.exists():
+        free = free_space_gb(DATA_ROOT)
+        if free < ERROR_GB:
+            errors.append(f"Ổ chứa gốc dữ liệu chỉ còn {free:.1f} GB (dưới {ERROR_GB:.0f} GB).")
+        elif free < WARN_GB:
+            warnings.append(f"Ổ chứa gốc dữ liệu còn {free:.1f} GB (dưới {WARN_GB:.0f} GB) — sắp thiếu cho Giai đoạn 1.")
+        else:
+            print(f"[OK] Ổ đĩa còn trống {free:.1f} GB")
+
+    # --- 6. Đếm SỐ VIDEO từng loại ---------------------------------------
+    print()
+    print("SỐ VIDEO ĐÃ CÓ TRÊN MÁY NÀY (Task 4)")
+    print("-" * 62)
+    print(f"{'thư mục':<20}{'số video':>10}   {'đầu':<12}{'cuối':<12}")
+    print("-" * 62)
+
+    counts: dict[str, int] = {}
+    for name, (folder, suffix) in PHASE0_RAW_DIRS.items():
+        ids = list_video_ids(folder, suffix)
+        counts[name] = len(ids)
+        first = ids[0] if ids else "-"
+        last = ids[-1] if ids else "-"
+        print(f"raw/{name:<16}{len(ids):>10}   {first:<12}{last:<12}")
+
+    print("-" * 62)
+
+    # Ba tệp đầu phải phủ đúng cùng một tập video. media-info được phép thiếu.
+    core = {k: v for k, v in counts.items() if k != "media-info"}
+    if core and len(set(core.values())) > 1:
+        errors.append(
+            f"Ba loại dữ liệu cốt lõi không khớp số video: {core}. "
+            "Có tệp giải nén thiếu hoặc sai thư mục."
+        )
+    if counts.get("media-info", 0) and counts.get("map-keyframes", 0):
+        thieu = counts["map-keyframes"] - counts["media-info"]
+        print(f"Video KHÔNG có media-info: {thieu} "
+              f"({counts['media-info']}/{counts['map-keyframes']}) — BTC đã báo trước.")
+
+    print()
+    print("So con số 'số video' này với ba máy còn lại. Lệch là có người tải thiếu.")
+    print()
+
+    # --- Kết luận ---------------------------------------------------------
+    for w in warnings:
+        print(f"[CẢNH BÁO] {w}")
+    for e in errors:
+        print(f"[LỖI] {e}")
+
+    print()
+    print("=" * 62)
+    if errors:
+        print("=> KẾT LUẬN: KHÔNG ĐẠT")
+        print("=" * 62)
+        return 1
+    print("=> KẾT LUẬN: ĐẠT")
+    print("=" * 62)
+    return 0
+
 
 if __name__ == "__main__":
-    verify()
+    raise SystemExit(main())
