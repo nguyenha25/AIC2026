@@ -23,7 +23,7 @@ from pathlib import Path
 # Nếu paths.py export tên khác thì sửa ĐÚNG hai dòng import và gán dưới đây,
 # KHÔNG sửa paths.py (mục 5.1: không ai được sửa tệp đó).
 try:
-    from aic2026.paths import DATA_ROOT
+    from src.aic2026.paths import DATA_ROOT
 except ImportError as e:
     print("Không import được aic2026.paths.")
     print("Kiểm hai điều: đã chạy 'pip install -e .' chưa, và paths.py có export")
