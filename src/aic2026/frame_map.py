@@ -24,6 +24,8 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
+
 from .paths import MAP_KEYFRAMES_DIR, list_video_ids, map_keyframes_file
 
 EXPECTED_COLUMNS = ["n", "pts_time", "fps", "frame_idx"]
@@ -127,3 +129,62 @@ class FrameMap:
 def available_video_ids() -> list[str]:
     """Danh sách video có bảng đối chiếu trên máy này."""
     return list_video_ids(MAP_KEYFRAMES_DIR, ".csv")
+
+def load_frame_map() -> pd.DataFrame:
+    """
+    Đọc và gộp toàn bộ bảng map-keyframes của các video thành một DataFrame.
+
+    Mỗi dòng tương ứng với một keyframe và gồm các cột:
+    video_id, n, pts_time, fps, frame_idx.
+
+    Dữ liệu được đọc từ raw/map-keyframes/ thông qua paths.py,
+    không ghi hoặc thay đổi dữ liệu gốc trong raw/.
+    """
+    video_ids = available_video_ids()
+
+    if not video_ids:
+        raise FileNotFoundError("Không tìm thấy tệp map-keyframes nào.")
+
+    all_rows = []
+
+    for video_id in video_ids:
+        frame_map = FrameMap.load(video_id)
+
+        for row in frame_map.rows:
+            all_rows.append(
+                {
+                    "video_id" : row.video_id,
+                    "n" : row.n,
+                    "pts_time" : row.pts_time,
+                    "fps" : row.fps,
+                    "frame_idx" : row.frame_idx,
+                }
+            )
+
+    return pd.DataFrame(
+        all_rows,
+        columns = [
+            "video_id",
+            "n",
+            "pts_time",
+            "fps",
+            "frame_idx",
+        ],
+    )
+
+def lookup(video_id: str, n: int) -> tuple[int, float]:
+    """
+    Tra cứu vị trí khung hình và thời gian của một keyframe.
+
+    Tham số:
+        video_id: Mã video, ví dụ L21_V001.
+        n: Số thứ tự của ảnh trong video.
+
+    Trả về:
+        (frame_idx, pts_time), trong đó frame_idx là vị trí khung
+        hình được dùng khi tạo kết quả nộp bài.
+    """
+    frame_map = FrameMap.load(video_id)
+    row = frame_map.row_of(n)
+
+    return row.frame_idx, row.pts_time
