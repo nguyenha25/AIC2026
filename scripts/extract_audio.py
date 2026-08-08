@@ -7,10 +7,10 @@ và video còn cần cho TRAKE, frames_dense/ và VideoQA ở Giai đoạn 2.
 Cờ --purge chỉ dùng khi thật sự chật ổ.
 
 Cách chạy:
-    python scripts/extract_audio.py --dry-run       # xem sẽ làm gì, không đụng tệp nào
-    python scripts/extract_audio.py                 # tách tiếng, GIỮ video
-    python scripts/extract_audio.py --limit 1       # chỉ 1 video, dùng cho việc 13
-    python scripts/extract_audio.py --purge         # tách tiếng RỒI XOÁ video (chỉ khi chật ổ)
+    python -m scripts.extract_audio --dry-run       # xem sẽ làm gì, không đụng tệp nào
+    python -m scripts.extract_audio                 # tách tiếng, GIỮ video
+    python -m scripts.extract_audio --limit 1       # chỉ 1 video, dùng cho việc 13
+    python -m scripts.extract_audio --purge         # tách tiếng RỒI XOÁ video (chỉ khi chật ổ)
 """
 
 import argparse
