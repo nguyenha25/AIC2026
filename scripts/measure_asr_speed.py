@@ -54,8 +54,10 @@ def tach_tieng(duong_dan_video: str) -> float:
 
 def chay_asr_thu(duong_dan_audio: Path) -> tuple[float, str]:
     """Chay faster-whisper tren tep audio, tra ve (so giay da mat, doan chu dau)."""
+    # Tao model TRUOC khi bat dong ho: khong tinh thoi gian tai va nap model
+    model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE)
+
     bat_dau = time.time()
-    model = WhisperModel(MODEL_SIZE, compute_type=COMPUTE_TYPE)
     segments, _info = model.transcribe(str(duong_dan_audio), language="vi")
     van_ban = " ".join(seg.text for seg in segments)
     thoi_gian = time.time() - bat_dau
