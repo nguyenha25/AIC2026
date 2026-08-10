@@ -2,7 +2,8 @@
 BỘ KIỂM TRA TỰ ĐỘNG — TÁM MỤC (Task 6).
 
 Chạy:  pytest -q
-Bốn máy đều phải ra 8 passed. Ai không pass thì BÁO NHÓM, đừng tự cài thêm gói.
+Riêng tệp này tám mục. Cả thư mục tests/ hiện là 18 passed.
+Bốn máy đều phải ra cùng con số. Ai không pass thì BÁO NHÓM, đừng tự cài thêm gói.
 
 Tám mục này KHÔNG cần dữ liệu BTC — chạy được ngay sau khi clone.
 Đó là chủ ý: bộ test kiểm BỘ KHUNG, không kiểm dữ liệu. Dữ liệu do
@@ -14,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from src.aic2026 import paths
-from src.aic2026.frame_map import EXPECTED_COLUMNS, FrameMap, KeyframeRow
-from src.aic2026.submit import KIS, QA, TRAKE, Answer, SubmissionBudget, submission_filename
+from aic2026 import paths
+from aic2026.frame_map import SOURCE_COLUMNS, FrameMap, KeyframeRow
+from aic2026.submit import KIS, QA, TRAKE, Answer, SubmissionBudget, submission_filename
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +28,13 @@ def fake_csv(tmp_path: Path) -> Path:
     path = tmp_path / "L21_V001.csv"
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
-        w.writerow(EXPECTED_COLUMNS)
+        # SOURCE_COLUMNS = bốn cột của CSV BTC (không có video_id — cột đó
+        # lấy từ TÊN TỆP và đã truyền vào qua FrameMap.load(video_id, ...)).
+        # EXPECTED_COLUMNS = năm cột của frame_map.parquet.
+        # Bản cũ ghi EXPECTED_COLUMNS, tức là dùng hằng số của ĐẦU RA để
+        # dựng tệp ĐẦU VÀO: header năm tên, dòng dữ liệu bốn ô, ô cuối
+        # thành None.
+        w.writerow(SOURCE_COLUMNS)
         w.writerow([1, 0.0, 25.0, 0])
         w.writerow([2, 4.0, 25.0, 100])
         w.writerow([3, 12.52, 25.0, 313])
