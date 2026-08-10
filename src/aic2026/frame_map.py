@@ -30,6 +30,8 @@ from .paths import MAP_KEYFRAMES_DIR, list_video_ids, map_keyframes_file
 
 EXPECTED_COLUMNS = ["n", "pts_time", "fps", "frame_idx"]
 
+EXPECTED_ROWS = 177_321
+EXPECTED_VIDEOS = 873
 
 @dataclass(frozen=True)
 class KeyframeRow:

@@ -1,143 +1,82 @@
 """
-Xây dựng kho FAISS cho toàn bộ CLIP features.
+Dựng kho tra cứu theo hình: index/faiss/clip_b32.index
 
-Đọc 873 tệp .npy từ raw/clip-features-32/,
-chuyển float16 -> float32, chuẩn hóa vector,
-sau đó xây IndexFlatIP để tìm kiếm cosine similarity.
+Nạp 873 tệp trong raw/clip-features-32/ theo đúng thứ tự của
+frame_map.parquet, ghi kèm bảng thứ tự clip_b32_ids.parquet.
 
-Output:
-    index/faiss/clip_b32.index
+Đặt tại scripts/build_faiss.py
+
+Chạy:
+    python scripts/build_faiss.py
+    python scripts/build_faiss.py --no-strict   # dựng trên dữ liệu thiếu, chỉ để thử
+
+Cần chạy scripts/build_frame_map.py trước.
+
+Chạy xong phải thấy ĐẠT. Thấy CHƯA ĐẠT thì đừng báo xong Việc 2.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 
-import faiss
-import numpy as np
-import pandas as pd
-
-from aic2026.paths import (
-    CLIP_FEATURES_DIR,
-    FAISS_DIR,
-    FRAME_MAP_PARQUET,
-    clip_features_file,
-    list_video_ids,
+# Import theo đúng kiểu cả nhóm dùng: 'aic2026.…', KHÔNG phải 'src.aic2026.…'.
+from aic2026.index.faiss_index import (
+    CLIP_DIMENSION,
+    INDEX_IDS_PATH,
+    INDEX_PATH,
+    benchmark_search,
+    build_index,
+    write_index,
 )
-
-EXPECTED_VIDEOS = 873
-EXPECTED_VECTORS = 177_321
-CLIP_DIMENSION = 512
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Nạp đặc trưng CLIP vào FAISS theo thứ tự của frame_map."
+    )
+    parser.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="Vẫn ghi kho dù chưa đủ 177.321 vector. Chỉ dùng để thử.",
+    )
+    args = parser.parse_args()
+
     started_at = time.time()
 
-    print("=" * 60)
-    print("XÂY DỰNG FAISS INDEX")
-    print("=" * 60)
-
-    video_ids = list_video_ids(CLIP_FEATURES_DIR, ".npy")
-
-    print(f"Số tệp CLIP: {len(video_ids):,}")
-
-    if len(video_ids) != EXPECTED_VIDEOS:
-        print(
-            f"[LỖI] Mong đợi {EXPECTED_VIDEOS:,} tệp, "
-            f"nhưng tìm thấy {len(video_ids):,}.",
-            file=sys.stderr,
-        )
+    try:
+        index, index_ids = build_index(strict=not args.no_strict)
+    except (FileNotFoundError, ValueError) as error:
+        print(f"\nDỪNG: {error}", file=sys.stderr)
         return 1
 
-    if not FRAME_MAP_PARQUET.exists():
-        print(
-            f"[LỖI] Không tìm thấy frame map: {FRAME_MAP_PARQUET}",
-            file=sys.stderr,
-        )
-        return 1
-
-    frame_map = pd.read_parquet(FRAME_MAP_PARQUET)
-
-    if len(frame_map) != EXPECTED_VECTORS:
-        print(
-            f"[LỖI] frame_map có {len(frame_map):,} dòng, "
-            f"cần {EXPECTED_VECTORS:,}.",
-            file=sys.stderr,
-        )
-        return 1
-
-    vectors = []
-    total_vectors = 0
-
-    for i, video_id in enumerate(video_ids, start=1):
-        feature_path = clip_features_file(video_id)
-        features = np.load(feature_path)
-
-        if features.ndim != 2 or features.shape[1] != CLIP_DIMENSION:
-            print(
-                f"[LỖI] {video_id}: shape={features.shape}, "
-                f"cần (?, {CLIP_DIMENSION})",
-                file=sys.stderr,
-            )
-            return 1
-
-        # FAISS cần float32.
-        features = features.astype(np.float32, copy=False)
-
-        # Chuẩn hóa để inner product = cosine similarity.
-        faiss.normalize_L2(features)
-
-        vectors.append(features)
-        total_vectors += len(features)
-
-        if i % 50 == 0 or i == len(video_ids):
-            print(
-                f"  {i}/{len(video_ids)} video — "
-                f"{total_vectors:,} vector"
-            )
-
-    all_vectors = np.vstack(vectors)
-
-    if all_vectors.shape != (EXPECTED_VECTORS, CLIP_DIMENSION):
-        print(
-            f"[LỖI] Shape cuối: {all_vectors.shape}, "
-            f"cần ({EXPECTED_VECTORS}, {CLIP_DIMENSION}).",
-            file=sys.stderr,
-        )
-        return 1
+    elapsed_ms = benchmark_search(index)
 
     print()
-    print("Đang xây IndexFlatIP...")
+    print(f"Số video     : {index_ids['video_id'].nunique():,}")
+    print(f"Số vector    : {index.ntotal:,}")
+    print(f"Chiều vector : {CLIP_DIMENSION}")
+    print(f"Tra thử 10 câu: {elapsed_ms:.1f} ms/câu (cần dưới 200 ms)")
 
-    index = faiss.IndexFlatIP(CLIP_DIMENSION)
-    index.add(all_vectors)
-
-    if index.ntotal != EXPECTED_VECTORS:
+    if elapsed_ms >= 200:
         print(
-            f"[LỖI] FAISS có {index.ntotal:,} vector, "
-            f"cần {EXPECTED_VECTORS:,}.",
+            f"\nCHẬM: {elapsed_ms:.1f} ms vượt mốc 200 ms của Việc 2.",
             file=sys.stderr,
         )
         return 1
 
-    FAISS_DIR.mkdir(parents=True, exist_ok=True)
+    print("\nĐẠT — kho đủ vector và tra đủ nhanh.")
 
-    index_path = FAISS_DIR / "clip_b32.index"
-    faiss.write_index(index, str(index_path))
+    write_index(index, index_ids)
 
-    elapsed = time.time() - started_at
-
-    print()
-    print("=" * 60)
-    print("ĐẠT — FAISS INDEX ĐÃ XÂY XONG")
-    print("=" * 60)
-    print(f"Số video       : {len(video_ids):,}")
-    print(f"Số vector      : {index.ntotal:,}")
-    print(f"Chiều vector   : {index.d}")
-    print(f"Index type     : IndexFlatIP")
-    print(f"Đã lưu         : {index_path}")
-    print(f"Thời gian      : {elapsed:.1f} giây")
+    print(f"Đã lưu: {INDEX_PATH}")
+    print(f"Đã lưu: {INDEX_IDS_PATH}")
+    print(f"Xong sau {time.time() - started_at:.1f} giây")
+    print(
+        "\nLƯU Ý: con số trên chỉ đo phần FAISS. Mốc 200 ms thật phải đo lại "
+        "sau khi Việc 3 xong, vì mã hoá câu chữ cũng tốn thời gian."
+    )
 
     return 0
 
