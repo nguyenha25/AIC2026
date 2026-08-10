@@ -22,14 +22,14 @@ def _make_image(path: Path, size: tuple[int, int]) -> None:
 
 def test_thumbnail_path_dung_hop_dong():
     path = th.thumbnail_path("L21_V001", 47)
-    assert path.name == "0047.jpg"
+    assert path.name == "047.jpg"
     assert path.parent.name == "L21_V001"
     assert path.parent.parent == th.THUMBNAILS_DIR
 
 
 def test_frame_number():
-    assert th.frame_number(Path("0047.jpg")) == 47
-    assert th.frame_number(Path("0000.jpg")) == 0
+    assert th.frame_number(Path("047.jpg")) == 47
+    assert th.frame_number(Path("000.jpg")) == 0
     assert th.frame_number(Path("abc.jpg")) is None
 
 

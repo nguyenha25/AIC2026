@@ -28,7 +28,7 @@ from src.aic2026.paths import KEYFRAMES_DIR, THUMBNAILS_DIR, VIDEO_ID_RE
 
 THUMB_LONG_EDGE = 224
 JPEG_QUALITY = 85
-FRAME_DIGITS = 4  # quy tac dat ten so 2: so thu tu anh luon bon chu so
+FRAME_DIGITS = 3  # quy tac dat ten so 2: so thu tu anh luon bon chu so
 MAX_SCAN_DEPTH = 4  # zip cua BTC giai nen ra thu muc long nhieu tang
 
 
