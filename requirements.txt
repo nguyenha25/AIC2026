@@ -35,48 +35,60 @@ python-dotenv==1.0.1       # doc .env (paths.py co ban tu viet, giu day cho tien
 pytest==8.2.2
 
 # =====================================================================
-#  GIAI DOAN 1 - chua cai bay gio.
-#  Bo dau # o dau dong khi toi luc can. Cai truoc la ton vai GB vo ich.
+#  GIAI DOAN 1 - DA MO
 # =====================================================================
 
 # ----- Doc ghi tep -----
-# pyarrow==16.1.0          # ghi/doc .parquet cho frame_map gop (cau hoi 2)
-# orjson==3.10.3           # doc JSON nhanh khi quet toan bo objects/
+pyarrow==16.1.0          # ghi/doc .parquet cho frame_map gop (cau hoi 2)
+orjson==3.10.3           # doc JSON nhanh khi quet toan bo objects/
 
 # ----- Tim kiem theo vector -----
-# faiss-cpu==1.8.0         # kho tra cuu. May co card roi NVIDIA thi dung faiss-gpu
+faiss-cpu==1.8.0         # kho tra cuu.
 
+# Kho phu cho torch. PyPI khong co ban "+cpu" rieng, kho nay co.
+# Ghim +cpu de bon may lay dung mot ban, khong ai phai xem may minh
+# card gi. Dung --extra-index-url (THEM kho), khong phai --index-url.
+--extra-index-url https://download.pytorch.org/whl/cpu
 # ----- Mo hinh hinh anh - van ban -----
-# torch==2.3.1             # nen tang. May co card NVIDIA: cai theo huong dan o pytorch.org
-# torchvision==0.18.1
-# open-clip-torch==2.24.0  # CLIP va SigLIP
-# transformers==4.41.2
-# sentence-transformers==3.0.1
+torch==2.3.1+cpu             # nen tang.
+torchvision==0.18.1+cpu
+open-clip-torch==2.24.0  # CLIP va SigLIP
+transformers==4.41.2
+sentence-transformers==3.0.1
 
 # ----- Xu ly anh, video -----
-# pillow==10.3.0           # doc, resize anh (lam anh thu nho)
-# opencv-python==4.10.0.84 # trich khung hinh day cho TRAKE
-# av==12.1.0               # doc video chinh xac theo so khung hinh
+pillow==10.3.0           # doc, resize anh (lam anh thu nho)
+opencv-python==4.10.0.84 # trich khung hinh day cho TRAKE
+# easyocr keo them opencv-python-headless va KHONG ghim ban.
+# Hai goi nay giai nen vao CUNG mot thu muc cv2/ - pip khong bao loi,
+# goi nao cai sau thi de len goi kia. Ghim cung mot so ban de du co
+# de len nhau thi phien ban van dung.
+# (Ban headless moi nhat la 5.0.0.93 - OpenCV 5, doi numpy>=2.
+#  Thu duy nhat dang chan no la numpy==1.26.4 o phan Giai doan 0.)
+opencv-python-headless==4.10.0.84
+av==12.1.0               # doc video chinh xac theo so khung hinh
 
 # ----- Doc chu tren anh -----
-# easyocr==1.7.1           # co san tieng Viet
-# paddleocr==2.7.3         # phuong an thay the, thuong chinh xac hon
+easyocr==1.7.1           # co san tieng Viet
+# paddleocr==2.7.3       # TAT: doi opencv-python<=4.6.0.66, dung voi
+#                        # ban 4.10 minh dang ghim. Va no con can them
+#                        # paddlepaddle - goi do khong co trong tep nay.
 
 # ----- Chuyen loi noi thanh chu -----
-# faster-whisper==1.0.2    # nhanh hon openai-whisper vai lan
-# ctranslate2==4.3.1
+faster-whisper==1.0.2    # nhanh hon openai-whisper vai lan
+ctranslate2==4.3.1
 
 # ----- Tra cuu theo chu -----
-# rank-bm25==0.2.2         # xep hang theo tu khoa
-# underthesea==6.8.4       # tach tu tieng Viet
+rank-bm25==0.2.2         # xep hang theo tu khoa
+underthesea==6.8.4       # tach tu tieng Viet
 
 # ----- Giao dien duyet ket qua -----
-# streamlit==1.36.0        # dung giao dien xem luoi anh trong ~200 dong
-# gradio==4.36.1           # phuong an thay the
+streamlit==1.36.0        # dung giao dien xem luoi anh trong ~200 dong
+#gradio==4.36.1           # phuong an thay the
 
 # ----- Chat luong ma, khi codebase lon hon -----
-# ruff==0.4.9              # kiem loi cu phap + dinh dang
-# pytest-cov==5.0.0        # do do phu test
+ruff==0.4.9              # kiem loi cu phap + dinh dang
+pytest-cov==5.0.0        # do do phu test
 
 # =====================================================================
 #  GHI CHU CHO NGUOI CAI
@@ -100,4 +112,5 @@ pytest==8.2.2
 #  5. So sanh bon may sau khi cai xong:
 #         python -m pip freeze | Sort-Object > pip_may_toi.txt
 #     Gui cho nhau, khac dong nao la co nguoi lech.
+
 # =====================================================================

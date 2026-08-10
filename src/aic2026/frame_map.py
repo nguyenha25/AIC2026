@@ -159,23 +159,36 @@ class FrameMap:
         ) as f:
             reader = csv.DictReader(f)
 
-            missing = [
-                column
-                for column in SOURCE_COLUMNS
-                if column not in (reader.fieldnames or [])
-            ]
+            # So KHỚP CHÍNH XÁC, không phải so tập con.
+            #
+            # Bản cũ chỉ hỏi "bốn cột cần có nằm trong header không",
+            # nên một header năm cột (thừa video_id) vẫn đi lọt. Khi đó
+            # DictReader ghép lệch: dòng dữ liệu bốn ô, header năm tên,
+            # ô cuối thành None và lỗi chui xuống tận int(float(...)).
+            #
+            # Thứ tự cột cũng phải đúng: DictReader ghép theo VỊ TRÍ, nên
+            # header đúng tên mà sai thứ tự sẽ gán pts_time vào fps mà
+            # không báo gì cả.
+            cot_doc_duoc = list(reader.fieldnames or [])
 
-            if missing:
+            if cot_doc_duoc != SOURCE_COLUMNS:
                 raise ValueError(
-                    f"{path.name} thiếu cột {missing}. "
-                    f"Cột đọc được: {reader.fieldnames}"
+                    f"{path.name} sai cột. "
+                    f"Cần đúng {SOURCE_COLUMNS}, "
+                    f"đọc được {cot_doc_duoc}."
                 )
 
             for line_no, raw in enumerate(reader, start=2):
+                # (raw.get(column) or "") chứ KHÔNG phải
+                # str(raw.get(column, "")).
+                #
+                # Dòng dữ liệu ngắn hơn header thì DictReader trả None,
+                # và str(None) ra chuỗi "None" — có nội dung, nên bản cũ
+                # coi ô thiếu là ô đầy và không bắt được gì.
                 blank = [
                     column
                     for column in SOURCE_COLUMNS
-                    if not str(raw.get(column, "")).strip()
+                    if not (raw.get(column) or "").strip()
                 ]
 
                 if blank:
