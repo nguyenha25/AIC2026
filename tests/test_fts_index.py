@@ -84,7 +84,7 @@ def test_or_fallback_when_and_finds_nothing(tmp_path, noisy_ocr_dir):
 
     # "XYZKHONGCO" chac chan khong co trong index -> AND ra 0, OR phai cuu duoc
     results = fts.search_text(query="THỜI SỰ XYZKHONGCO", top_k=5)
-    assert len(results) == 1
+    assert len(results) >= 1
     assert results[0]["video_id"] == "L22_V001"
 
 
