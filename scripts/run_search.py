@@ -35,6 +35,9 @@ from src.aic2026.rank.config import SETTINGS_PATH, tham_so_da_dung
 from src.aic2026.rank.search import run_query
 from src.aic2026.submit import KIS
 
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
 
 # ---------------------------------------------------------------------------
 # Năm câu tự nghĩ — điều kiện "Xong khi" của Việc 4
