@@ -22,10 +22,11 @@ gop_ket_qua:
     object: 0.4
 
 loc_trung:
-  # Hai ảnh cùng video và cách nhau dưới ngần này khung hình thì coi là
-  # cùng một cảnh, chỉ giữ ảnh điểm cao hơn.
-  khoang_cach_toi_thieu: 250
-  so_anh_toi_da_moi_video: 3
+  # Luật chốt Việc 4: mỗi video tối đa MỘT kết quả trong mỗi cửa sổ 10 giây,
+  # tính theo cột giây của bảng đối chiếu. Không tính theo khung hình —
+  # fps mỗi video một khác (đo thật: L21_V001 là 30fps, L21_V003 là 25fps),
+  # nên cùng một con số khung hình sẽ ra cửa sổ dài ngắn khác nhau.
+  cua_so_giay: 10.0
 
 duong_dan:
   # Để trống — mọi đường dẫn lấy từ src/aic2026/paths.py.
