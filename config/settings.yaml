@@ -12,6 +12,20 @@ tra_cuu:
   do_do: cosine
   mo_hinh_nen: clip-ViT-B-32 # BTC phát sẵn. Giai đoạn 2 nâng lên SigLIP 2
 
+  # NHÁNH MÃ HOÁ CÂU CHỮ. Vector ảnh KHÔNG đổi ở bất cứ lựa chọn nào.
+  #   da_ngu  clip-ViT-B-32-multilingual-v1. Hiểu tiếng Việt. Không cần cài
+  #           thêm gói. Nhanh hơn nhánh gốc (14 ms so với 37 ms mỗi câu).
+  #   dich    Dịch Việt→Anh rồi vào encoder gốc. Người ngồi máy đọc và sửa
+  #           được bản dịch. Cần tải thêm mô hình dịch ~900 MB.
+  #   goc     Đưa thẳng vào encoder gốc. CHỈ dùng cho câu tiếng Anh.
+  #           Với tiếng Việt đây là mốc sàn để so, không phải phương án.
+  #
+  # Đo trên bộ câu hỏi tiếng Việt của nhóm: da_ngu hơn goc 0,133 điểm theo
+  # công thức Việc 12.
+  #
+  # Đổi nhanh mà không sửa tệp:  $env:AIC_NHANH_CHU = "dich"
+  nhanh_ma_hoa_chu: da_ngu
+
 gop_ket_qua:
   cach_gop: rrf              # Reciprocal Rank Fusion
   rrf_k: 60
