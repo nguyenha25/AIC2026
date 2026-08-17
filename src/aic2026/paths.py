@@ -74,6 +74,16 @@ DEV_DIR = DATA_ROOT / "dev"
 RUNS_DIR = DATA_ROOT / "runs"
 SUBMISSIONS_DIR = DATA_ROOT / "submissions"
 
+# --- eval/ (nhánh 4b — Task 12) --------------------------------------------
+# dev/dev_questions.jsonl : bộ câu hỏi tự chấm, xem docs/schema/README.md mục 5
+DEV_QUERIES_PATH = DEV_DIR / "dev_questions.jsonl"
+# derived/eval/ : kết quả tự chấm + cache so khớp ngữ nghĩa, SAO LƯU không bắt
+# buộc (dựng lại được từ dev/dev_questions.jsonl + submissions/), nhưng cache answer
+# match nên giữ lại để khỏi tốn lại tiền gọi API.
+EVAL_DIR = DERIVED_DIR / "eval"
+ANSWER_MATCH_CACHE_PATH = EVAL_DIR / "answer_match_cache.json"
+SCORING_LOG_PATH = EVAL_DIR / "scoring_results.csv"
+
 # ---------------------------------------------------------------------------
 # 3. Danh sách chuẩn — bootstrap_dirs và verify_layout dùng CHUNG danh sách
 #    này. Sửa một chỗ là hai lệnh cùng đổi theo, không bao giờ lệch nhau.
@@ -99,6 +109,7 @@ REQUIRED_DIRS = [
     DEV_DIR,
     RUNS_DIR,
     SUBMISSIONS_DIR,
+    EVAL_DIR,
 ]
 
 # Bốn thư mục BTC phát ở Giai đoạn 0 — dùng để so số video giữa bốn máy.
