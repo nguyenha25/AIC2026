@@ -65,16 +65,26 @@ class MultimediaSearchEngine:
             q_emb = self.clip_encoder.encode_text(query)
             modality_candidates["visual"] = self.faiss_index.search(q_emb, top_k=limit * 2)
 
-        # 2. Text FTS5 (Task 9)
+        # 2. Text (Hỗ trợ linh hoạt cả FTSIndex và OCRReranker)
         if self.text_index is not None:
-            modality_candidates["ocr"] = self.text_index.search_text(query, top_k=limit * 2)
+            if hasattr(self.text_index, "search_ocr"):
+                modality_candidates["ocr"] = self.text_index.search_ocr(query, top_k=limit * 2)
+            elif hasattr(self.text_index, "search_text"):
+                modality_candidates["ocr"] = self.text_index.search_text(query, top_k=limit * 2)
 
         # 3. RRF Fusion
+        # VÔ HIỆU HÓA ĐỘC TÀI w=1000.0 TỪ RANKCONFIG
+        # Ép trọng số ở mức dân chủ: OCR chỉ nhỉnh hơn 1 chút (1.2) để break-tie
+        safe_w_visual = 1.0
+        safe_w_ocr = 0.45 
+        safe_w_asr = 1.0
+
         weights = {
-            "visual": self.config.w_visual,
-            "ocr": self.config.w_ocr,
-            "asr": self.config.w_asr,
+            "visual": safe_w_visual,
+            "ocr": safe_w_ocr,
+            "asr": safe_w_asr,
         }
+        
         fused = reciprocal_rank_fusion(
             modality_results=modality_candidates,
             weights=weights,
