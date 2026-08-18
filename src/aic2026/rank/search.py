@@ -176,6 +176,17 @@ class KetQuaTruyVan:
         dong = [
             f"Truy vấn : {self.query_id}  ({self.task})",
             f"Câu chữ  : {self.cau_hoi}",
+        ]
+
+        # Số mốc quyết định cả số cột của dòng nộp lẫn việc _gom_trake() giữ
+        # hay loại một video. Sai con số này là hỏng câu, mà hỏng lặng lẽ —
+        # nên in ra cho thấy.
+        if self.task == TRAKE:
+            dong.append(
+                f"Số mốc   : {self.tham_so.get('so_moc_trake', '?')}"
+            )
+
+        dong += [
             "",
             f"  bước 1+2  tra kho      : {self.so_ung_vien} ứng viên"
             f"  ({self.thoi_gian_ms.get('tra_kho', 0):.0f} ms)",
@@ -185,11 +196,22 @@ class KetQuaTruyVan:
             f" {self.bao_cao_nop}",
             f"  bước 5    ghi tệp      : {self.duong_dan_nop or '(không ghi)'}",
             "",
-            f"  cổng thoát 5           : "
-            + ("ĐẠT — không có hai dòng cùng video cách nhau dưới "
-               f"{self.tham_so.get('cua_so_giay', 10):.1f} giây"
-               if self.dat_cong_5
-               else f"TRƯỢT — {len(self.vi_pham_cong_5)} cặp quá gần"),
+            (
+                f"  cổng thoát 5           : "
+                + (
+                    "ĐẠT — TRAKE không áp dụng khoảng cách tối thiểu 10 giây"
+                    if self.task == TRAKE and self.dat_cong_5
+                    else (
+                        "ĐẠT — không có hai dòng cùng video cách nhau dưới "
+                        f"{self.tham_so.get('cua_so_giay', 10):.1f} giây"
+                        if self.dat_cong_5
+                        else (
+                            f"TRƯỢT — "
+                            f"{len(self.vi_pham_cong_5)} cặp quá gần"
+                        )
+                    )
+                )
+            ),
             f"  tổng thời gian         : {self.thoi_gian_ms.get('tong', 0):.0f} ms",
         ]
 
@@ -239,54 +261,74 @@ def _gom_kis_qa(
     return nhan
 
 
-def _gom_trake(hits: Sequence["Hit"], so_moc: int) -> tuple[list[Answer], list[str]]:
+def _gom_trake(
+    hits: Sequence["Hit"],
+    so_moc: int,
+) -> tuple[list[Answer], list[str]]:
     """
-    Gom ảnh thành dòng TRAKE: mỗi video một dòng, gồm `so_moc` mốc thời gian
-    xếp theo thứ tự thời gian tăng dần.
+    Gom ảnh thành dòng TRAKE.
 
-    Thứ tự VIDEO giữ theo thứ hạng: video có ảnh điểm cao nhất đứng trước.
-    Thứ tự MỐC trong một dòng thì theo thời gian, vì chuỗi sự kiện phải đúng
-    trình tự chứ không phải đúng điểm.
+    Mỗi video một dòng, gồm `so_moc` mốc thời gian.
 
-    CHỖ CẦN NGUYÊN KIỂM (Việc 12): danh sách vào đây là danh sách ĐÃ LỌC TRÙNG,
-    nên hai mốc liên tiếp của cùng một video luôn cách nhau ít nhất
-    `cua_so_giay`. Chuỗi sự kiện diễn ra nhanh hơn 10 giây sẽ bị mất mốc giữa.
-    Chưa đổi ở đây vì luật lọc trùng là luật chung; chờ con số từ bộ câu hỏi
-    tự chấm rồi Ngân với Nguyên chốt lại cửa sổ.
+    QUAN TRỌNG:
+    TRAKE KHÔNG yêu cầu các mốc phải cách nhau 10 giây.
+
+    Một hành động trong video có thể kéo dài nhiều frame hoặc chỉ cách
+    nhau vài frame, nên các hit gần nhau vẫn được giữ lại.
+
+    Danh sách `hits` truyền vào đây đã được xử lý theo luật TRAKE riêng
+    trong run_query().
     """
+
     theo_video: dict[str, list] = {}
     thu_tu_video: list[str] = []
 
     for h in hits:
+
         if h.video_id not in theo_video:
             theo_video[h.video_id] = []
             thu_tu_video.append(h.video_id)
+
         theo_video[h.video_id].append(h)
 
     answers: list[Answer] = []
     thieu_moc = 0
 
     for video_id in thu_tu_video:
+
         nhom = theo_video[video_id]
 
         if len(nhom) < so_moc:
             thieu_moc += 1
             continue
 
-        chon = sorted(nhom[:so_moc], key=lambda h: h.pts_time)
+        # Giữ thứ tự điểm xếp hạng để ưu tiên các hit tốt.
+        # Sau khi chọn đủ mốc mới sắp xếp theo thời gian.
+        chon = nhom[:so_moc]
+
+        chon = sorted(
+            chon,
+            key=lambda h: h.pts_time,
+        )
+
         answers.append(
             Answer(
                 video_id=video_id,
-                frame_ids=[h.frame_idx for h in chon],
+                frame_ids=[
+                    h.frame_idx
+                    for h in chon
+                ],
             )
         )
 
     canh_bao: list[str] = []
 
     if thieu_moc:
+
         canh_bao.append(
-            f"TRAKE: bỏ {thieu_moc} video vì không đủ {so_moc} mốc cách nhau "
-            f"{cua_so_giay():.1f} giây. Còn {len(answers)} dòng."
+            f"TRAKE: bỏ {thieu_moc} video vì "
+            f"không đủ {so_moc} mốc ứng viên. "
+            f"Không áp dụng giới hạn khoảng cách 10 giây."
         )
 
     return answers, canh_bao
@@ -344,17 +386,40 @@ def run_query(
     # --- bước 1 + 2: câu chữ → dãy số → tra kho ----------------------------
     nguon = tim_ung_vien or tim_ung_vien_clip
     moc = time.perf_counter()
-    ung_vien = list(nguon(cau_hoi, so_ung_vien_moi_nguon()))
+    
+    # Bơm thêm ứng viên nếu là dạng TRAKE để tránh bị thiếu mốc ở bước 4
+    k_ung_vien = 15000 if task == TRAKE else so_ung_vien_moi_nguon()
+    ung_vien = list(nguon(cau_hoi, k_ung_vien))
+    
     thoi_gian["tra_kho"] = (time.perf_counter() - moc) * 1000
 
     # --- bước 3: lọc trùng --------------------------------------------------
     moc = time.perf_counter()
-    da_loc, bao_cao_loc = loc_trung(
-        ung_vien,
-        cua_so_giay=cua_so_giay(),
-        so_anh_toi_da_moi_video=so_anh_toi_da_moi_video(),
-    )
-    thoi_gian["loc_trung"] = (time.perf_counter() - moc) * 1000
+
+    if task == TRAKE:
+        # TRAKE:
+        # Không áp dụng cửa sổ 10 giây.
+        #
+        # Một hành động có thể kéo dài nhiều frame và các frame phù hợp
+        # có thể nằm rất gần nhau.
+        #
+        # Chỉ giới hạn số ảnh tối đa mỗi video nếu cấu hình có đặt.
+        da_loc, bao_cao_loc = loc_trung(
+            ung_vien,
+            cua_so_giay=0.0,
+            so_anh_toi_da_moi_video=so_anh_toi_da_moi_video(),
+        )
+    else:
+        # KIS / QA vẫn giữ luật lọc trùng 10 giây hiện tại.
+        da_loc, bao_cao_loc = loc_trung(
+            ung_vien,
+            cua_so_giay=cua_so_giay(),
+            so_anh_toi_da_moi_video=so_anh_toi_da_moi_video(),
+        )
+
+    thoi_gian["loc_trung"] = (
+        time.perf_counter() - moc
+    ) * 1000
 
     # --- bước 4: cắt 100 dòng ----------------------------------------------
     gioi_han = so_dong_toi_da()
@@ -385,8 +450,17 @@ def run_query(
         )
 
     # --- soát cổng thoát số 5 ----------------------------------------------
-    # Cố ý gọi hàm kiểm viết bằng cách khác (so mọi cặp) chứ không tin bước 3.
-    vi_pham = tim_cap_qua_gan(ket_qua, cua_so_giay=cua_so_giay())
+    #
+    # TRAKE không dùng luật cách nhau 10 giây.
+    # KIS / QA vẫn kiểm tra cửa sổ 10 giây như trước.
+
+    if task == TRAKE:
+        vi_pham = []
+    else:
+        vi_pham = tim_cap_qua_gan(
+            ket_qua,
+            cua_so_giay=cua_so_giay(),
+        )
 
     # --- bước 5: ghi tệp ----------------------------------------------------
     duong_dan = None

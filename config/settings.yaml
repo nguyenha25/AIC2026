@@ -45,3 +45,10 @@ loc_trung:
 duong_dan:
   # Để trống — mọi đường dẫn lấy từ src/aic2026/paths.py.
   # Mục này chỉ để nhắc: KHÔNG viết đường dẫn vào tệp cấu hình.
+
+cham_diem:
+  # Task 12. So khớp ngữ nghĩa answer (hoi_dap) bằng độ tương đồng cosine
+  # giữa hai vector embedding câu (sentence-transformers, chạy LOCAL, KHÔNG
+  # gọi API trả phí). Ngưỡng dưới đây: >= thì coi là khớp ngữ nghĩa.
+  # ĐÂY LÀ QUYẾT ĐỊNH CẦN CẢ NHÓM XÁC NHẬN — xem docs/decisions/002-...md.
+  nguong_tuong_dong_qa: 0.80

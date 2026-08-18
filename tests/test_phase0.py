@@ -55,7 +55,7 @@ def test_1_khong_ai_viet_duong_dan_rieng():
 # --- MỤC 2 -----------------------------------------------------------------
 def test_2_du_hai_muoi_thu_muc_chuan():
     """Danh sách thư mục chuẩn đủ và không trùng nhau."""
-    assert len(paths.REQUIRED_DIRS) == 20
+    assert len(paths.REQUIRED_DIRS) == 21
     assert len(set(paths.REQUIRED_DIRS)) == len(paths.REQUIRED_DIRS)
     # frame_map.parquet là TỆP, tuyệt đối không nằm trong danh sách thư mục
     assert paths.FRAME_MAP_PARQUET not in paths.REQUIRED_DIRS
