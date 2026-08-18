@@ -7,7 +7,7 @@ Các điều kiện:
 2. r_score_qa khớp đúng ví dụ Q&A của BTC khi answer y hệt (không cần gọi API).
 3. r_score_trake khớp đúng ví dụ nhảy cao của BTC, ra đúng 0.75 (mục 2.1.3),
    dùng gt_events là khoảng [s,e] THẬT (schema thật của
-   dev_question.jsonl), không phải điểm + dung sai.
+   dev_questions.jsonl), không phải điểm + dung sai.
 4. r_score_trake: sai video_id phải trả 0.0 TUYỆT ĐỐI, không tính trung bình.
 5. compute_r_at_k và compute_final_score khớp đúng ví dụ 100 câu trả lời
    của BTC, Final Score ra đúng 0.74 (mục 2.2).
@@ -69,7 +69,7 @@ def test_trake_khop_3_tren_4():
     nộp 101,156,203,251 -> khớp 3/4 -> R-Score = 0.75.
  
     gt_events là khoảng [s,e] THẬT cho từng khoảnh khắc — đúng schema thật
-    của dev_question_Nguyen.jsonl (cac_giai_doan[j].frame_start/frame_end),
+    của dev_questions.jsonl (cac_giai_doan[j].frame_start/frame_end),
     không cần ngưỡng dung sai tự chế.
     """
     gt = {
@@ -123,7 +123,7 @@ def test_final_score_vi_du_btc(monkeypatch):
  
     diem_gia_lap = {0: 0.5, 2: 0.8, 14: 0.6}
  
-    def fake_r_score(task, gt, submitted, cache_path=None):
+    def fake_r_score(task, gt, submitted):
         idx = submitted["rank_index"]
         return diem_gia_lap.get(idx, 0.0)
  

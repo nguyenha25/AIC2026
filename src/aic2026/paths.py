@@ -77,11 +77,14 @@ SUBMISSIONS_DIR = DATA_ROOT / "submissions"
 # --- eval/ (nhánh 4b — Task 12) --------------------------------------------
 # dev/dev_questions.jsonl : bộ câu hỏi tự chấm, xem docs/schema/README.md mục 5
 DEV_QUERIES_PATH = DEV_DIR / "dev_questions.jsonl"
-# derived/eval/ : kết quả tự chấm + cache so khớp ngữ nghĩa, SAO LƯU không bắt
-# buộc (dựng lại được từ dev/dev_questions.jsonl + submissions/), nhưng cache answer
-# match nên giữ lại để khỏi tốn lại tiền gọi API.
+# derived/eval/ : kết quả tự chấm, SAO LƯU không bắt buộc — dựng lại được từ
+# dev/dev_questions.jsonl + submissions/ bằng: python -m scripts.run_scoring
+#
+# KHÔNG còn ANSWER_MATCH_CACHE_PATH: bản đầu Task 12 định dùng LLM trả phí làm
+# giám khảo ngữ nghĩa nên cần cache. Bản chốt dùng embedding chạy local, kết
+# quả deterministic tuyệt đối — cache không còn tác dụng gì.
+# Xem docs/decisions/001-cham-diem-task-12.md mục 3.
 EVAL_DIR = DERIVED_DIR / "eval"
-ANSWER_MATCH_CACHE_PATH = EVAL_DIR / "answer_match_cache.json"
 SCORING_LOG_PATH = EVAL_DIR / "scoring_results.csv"
 
 # ---------------------------------------------------------------------------
