@@ -57,7 +57,7 @@ class TextSearchIndex:
                     frame_idx UNINDEXED,
                     n UNINDEXED,
                     text,
-                    tokenize = 'unicode61'
+                    tokenize = 'unicode61 remove_diacritics 2'
                 );
                 """
             )

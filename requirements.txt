@@ -90,6 +90,16 @@ streamlit==1.36.0        # dung giao dien xem luoi anh trong ~200 dong
 ruff==0.4.9              # kiem loi cu phap + dinh dang
 pytest-cov==5.0.0        # do do phu test
 
+# ----- Dich Viet->Anh cho nhanh ma hoa chu 'dich' -----
+# Nhanh mac dinh la 'da_ngu', KHONG can hai goi nay. Chi can khi doi
+# tra_cuu.nhanh_ma_hoa_chu sang 'dich' trong config/settings.yaml.
+# Mo hinh VietAI/envit5-translation la T5, tokenizer cua no doc file
+# sentencepiece va can protobuf de giai ma. Thieu mot trong hai la loi
+# ngay luc nap tokenizer, khong phai luc dich.
+sentencepiece==0.2.2
+protobuf==5.29.6
+
+
 # =====================================================================
 #  GHI CHU CHO NGUOI CAI
 #
