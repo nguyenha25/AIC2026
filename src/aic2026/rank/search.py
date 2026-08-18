@@ -176,6 +176,17 @@ class KetQuaTruyVan:
         dong = [
             f"Truy vấn : {self.query_id}  ({self.task})",
             f"Câu chữ  : {self.cau_hoi}",
+        ]
+
+        # Số mốc quyết định cả số cột của dòng nộp lẫn việc _gom_trake() giữ
+        # hay loại một video. Sai con số này là hỏng câu, mà hỏng lặng lẽ —
+        # nên in ra cho thấy.
+        if self.task == TRAKE:
+            dong.append(
+                f"Số mốc   : {self.tham_so.get('so_moc_trake', '?')}"
+            )
+
+        dong += [
             "",
             f"  bước 1+2  tra kho      : {self.so_ung_vien} ứng viên"
             f"  ({self.thoi_gian_ms.get('tra_kho', 0):.0f} ms)",

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import datetime
@@ -33,7 +34,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 from src.aic2026.paths import RUNS_DIR, SUBMISSIONS_DIR
 from src.aic2026.rank.config import SETTINGS_PATH, tham_so_da_dung
-from src.aic2026.rank.search import run_query
+from src.aic2026.rank.search import SO_MOC_TRAKE_MAC_DINH, run_query
 from src.aic2026.submit import KIS, QA, TRAKE
 
 
@@ -153,6 +154,43 @@ def map_loai_truy_van(loai_truy_van: object) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Đếm số mốc của một truy vấn TRAKE
+# ---------------------------------------------------------------------------
+
+# Bắt "(1)", "( 2 )", "(3)." — cách đánh số khoảnh khắc mà cả bộ dev lẫn ví dụ
+# của BTC đều dùng.
+_MOC_TRONG_NGOAC = re.compile(r"\(\s*(\d+)\s*\)")
+
+
+def dem_moc_tu_cau_hoi(van_ban: str) -> int | None:
+    """
+    Đếm số khoảnh khắc bằng cách đọc chính câu hỏi.
+
+    Vì sao cần: ở vòng thi thật, BTC KHÔNG phát đáp án, nên không có
+    `cac_giai_doan` để đếm. Thứ duy nhất luôn có là câu chữ, và câu chữ
+    TRAKE nào cũng tự đánh số các khoảnh khắc:
+
+        "... (1) giậm nhảy, (2) bay qua xà, (3) tiếp đất, (4) đứng dậy"
+
+    Luật đếm: chỉ nhận khi dãy số bắt đầu từ 1 và tăng liên tục 1, 2, 3...
+    Chặt như vậy để "(5) người mặc quân phục" trong một câu mô tả không bị
+    hiểu nhầm thành mốc.
+
+    Trả về None nếu không tìm thấy dãy hợp lệ — để hàm gọi tự quyết dùng
+    nguồn nào tiếp theo.
+    """
+    if not van_ban:
+        return None
+
+    so = [int(x) for x in _MOC_TRONG_NGOAC.findall(van_ban)]
+    if len(so) < 2:
+        return None
+    if so != list(range(1, len(so) + 1)):
+        return None
+    return len(so)
+
+
+# ---------------------------------------------------------------------------
 # Chuẩn hóa một record JSONL
 # ---------------------------------------------------------------------------
 
@@ -228,17 +266,48 @@ def chuan_hoa_cau_hoi(muc: dict, index: int) -> dict:
         or muc.get("cau_tra_loi")
     )
 
-    # Số mốc TRAKE.
-    so_moc_raw = (
-        muc.get("so_moc_trake")
-        or muc.get("so_moc")
-        or 4
-    )
+    # Số mốc TRAKE — lấy theo thứ tự ưu tiên, KHÔNG dùng hằng số 4 nữa.
+    #
+    # Vì sao đổi: bản cũ mặc định 4 mốc cho mọi câu. Đo trên bộ dev 32 câu:
+    # 5/8 câu TRAKE có số mốc khác 4 (câu 07 có 2; câu 08, 20, 24 có 5;
+    # câu 31, 32 có 6). Hậu quả hai đầu:
+    #   - câu nhiều hơn 4 mốc: nộp thiếu mốc, trần điểm bị cắt sẵn
+    #     (câu 31 trần 0,167 thay vì 0,25 — mất 1/3 trước khi tra cứu)
+    #   - câu ít hơn 4 mốc: _gom_trake() loại mọi video không gom đủ 4 ứng
+    #     viên, tức là loại nhầm cả những video lẽ ra hợp lệ
+    #
+    # Thứ tự ưu tiên:
+    #   1. so_moc_trake / so_moc khai thẳng trong record — ai khai thì tin
+    #   2. len(cac_giai_doan) — bộ dev tự soạn, đây là con số ĐÚNG THẬT
+    #   3. đếm "(1) (2) (3)..." trong câu chữ — đường duy nhất ở VÒNG THI
+    #      THẬT, vì lúc đó không có đáp án để đếm
+    #   4. hằng số mặc định, kèm cảnh báo in ra màn hình
+    so_moc_trake = None
+    nguon_so_moc = ""
 
-    try:
-        so_moc_trake = int(so_moc_raw)
-    except (TypeError, ValueError):
-        so_moc_trake = 4
+    so_moc_raw = muc.get("so_moc_trake") or muc.get("so_moc")
+    if so_moc_raw:
+        try:
+            so_moc_trake = int(so_moc_raw)
+            nguon_so_moc = "khai trong record"
+        except (TypeError, ValueError):
+            so_moc_trake = None
+
+    if so_moc_trake is None:
+        giai_doan = muc.get("cac_giai_doan")
+        if isinstance(giai_doan, list) and giai_doan:
+            so_moc_trake = len(giai_doan)
+            nguon_so_moc = "đếm cac_giai_doan"
+
+    if so_moc_trake is None:
+        dem_duoc = dem_moc_tu_cau_hoi(cau_hoi)
+        if dem_duoc:
+            so_moc_trake = dem_duoc
+            nguon_so_moc = "đếm trong câu chữ"
+
+    if so_moc_trake is None or so_moc_trake < 1:
+        so_moc_trake = SO_MOC_TRAKE_MAC_DINH
+        nguon_so_moc = "MẶC ĐỊNH — chưa xác định được"
 
     return {
         "query_id": query_id,
@@ -247,6 +316,7 @@ def chuan_hoa_cau_hoi(muc: dict, index: int) -> dict:
         "text_en": muc.get("text_en"),
         "gt_answer": gt_answer,
         "so_moc_trake": so_moc_trake,
+        "nguon_so_moc": nguon_so_moc,
     }
 
 
@@ -454,6 +524,16 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--so-moc",
+        dest="so_moc",
+        type=int,
+        help=(
+            "Số khoảnh khắc khi task=trake. Bỏ trống thì tự đếm "
+            "'(1) (2) (3)...' trong câu chữ."
+        ),
+    )
+
+    parser.add_argument(
         "--tep",
         help="Tệp JSONL chứa nhiều câu.",
     )
@@ -490,14 +570,19 @@ def main() -> int:
 
     elif doi_so.cau:
 
+        # Đường --cau cũng đi qua chuan_hoa_cau_hoi() để số mốc TRAKE được
+        # suy ra theo cùng một luật, không còn cứng 4.
         cau_hoi = [
-            {
-                "query_id": doi_so.id,
-                "task": doi_so.task,
-                "text": doi_so.cau,
-                "gt_answer": doi_so.dap_an,
-                "so_moc_trake": 4,
-            }
+            chuan_hoa_cau_hoi(
+                {
+                    "query_id": doi_so.id,
+                    "task": doi_so.task,
+                    "text": doi_so.cau,
+                    "gt_answer": doi_so.dap_an,
+                    "so_moc_trake": doi_so.so_moc,
+                },
+                index=1,
+            )
         ]
 
         nguon = "dòng lệnh"
@@ -578,6 +663,13 @@ def main() -> int:
             or KIS
         ).lower()
 
+        if task == TRAKE:
+            print(
+                f"[{query_id}] số mốc TRAKE = "
+                f"{muc.get('so_moc_trake')} "
+                f"({muc.get('nguon_so_moc', 'không rõ')})"
+            )
+
         try:
 
             kq = run_query(
@@ -587,7 +679,7 @@ def main() -> int:
                 dap_an=muc.get("gt_answer"),
                 so_moc_trake=int(
                     muc.get("so_moc_trake")
-                    or 4
+                    or SO_MOC_TRAKE_MAC_DINH
                 ),
                 ghi_tep=ghi_tep,
             )
