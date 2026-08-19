@@ -1,4 +1,4 @@
-﻿"""
+"""
 Hợp nhất kiểu trả về và cắm nhánh gộp vào mạch của Ngân — Task 10.
 
 Tệp này làm hai việc:
