@@ -61,6 +61,8 @@ import torch  # noqa: F401,E402
 import pandas as pd  # noqa: E402
 
 from aic2026.paths import DERIVED_DIR, DEV_QUERIES_PATH, SUBMISSIONS_DIR  # noqa: E402
+from aic2026.index.fts_index import TextSearchIndex  # noqa: E402
+from aic2026.paths import DATA_ROOT  # noqa: E402
 from aic2026.rank.hop_nhat import TRONG_SO_MAC_DINH, tim_ung_vien_gop  # noqa: E402
 from aic2026.rank.ocr_rerank import OCRReranker  # noqa: E402
 from aic2026.rank.search import run_queries  # noqa: E402
@@ -75,16 +77,42 @@ from aic2026.rank.search import run_queries  # noqa: E402
 # dòng nộp -> 0 điểm bảo đảm, bất kể truy hồi tốt đến đâu.
 from scripts.run_search import doc_tep_cau_hoi  # noqa: E402
 
-CAC_CHE_DO = ("clip", "ocr", "rrf")
-
-NHAN_CHE_DO = {
-    "clip": "Chỉ dùng Hình ảnh (CLIP)",
-    "ocr": "Chỉ dùng Văn bản (OCR)",
-    "rrf": "Gộp RRF (CLIP + OCR)",
+# Mỗi chế độ = một tổ hợp nguồn. Bốn chế độ đầu là NGUỒN ĐƠN (để biết mỗi nguồn
+# tự nó làm được gì), hai chế độ sau là tổ hợp.
+CAU_HINH_CHE_DO = {
+    # --- nguồn đơn: mỗi nguồn tự nó làm được gì ---
+    "clip":    dict(dung_clip=True),
+    "ocr":     dict(dung_ocr=True),
+    "ocr_fts": dict(dung_ocr_fts=True),
+    "asr":     dict(dung_asr=True),
+    # --- tổ hợp ---
+    "rrf2":    dict(dung_clip=True, dung_ocr=True),
+    "rrf3":    dict(dung_clip=True, dung_ocr=True, dung_asr=True),
+    # Thay nhánh OCR khớp-từ-khoá bằng nhánh OCR BM25. Lý do: đo trên bộ dev,
+    # ocr_fts (4.400) hơn ocr (3.800) dù kho chữ FTS đang ít bản ghi hơn.
+    "rrf3b":   dict(dung_clip=True, dung_ocr_fts=True, dung_asr=True),
+    # Cả bốn nguồn, để biết giữ CẢ HAI nhánh OCR có hơn chọn một hay không.
+    "rrf4":    dict(dung_clip=True, dung_ocr=True, dung_ocr_fts=True, dung_asr=True),
 }
 
+CAC_CHE_DO = tuple(CAU_HINH_CHE_DO)
 
-def chay_mot_che_do(che_do: str, danh_sach: list[dict], ocr_engine) -> tuple[float, float]:
+NHAN_CHE_DO = {
+    "clip":    "Chỉ Hình ảnh (CLIP)",
+    "ocr":     "Chỉ OCR (OCRReranker)",
+    "ocr_fts": "Chỉ OCR (FTS/BM25)",
+    "asr":     "Chỉ Lời nói (ASR)",
+    "rrf2":    "CLIP + OCR",
+    "rrf3":    "CLIP + OCR + ASR",
+    "rrf3b":   "CLIP + OCR_FTS + ASR",
+    "rrf4":    "CLIP + OCR + OCR_FTS + ASR",
+}
+
+# Chế độ dùng làm mốc so sánh trong bảng đối chiếu từng câu.
+CHE_DO_MOC = "clip"
+
+
+def chay_mot_che_do(che_do: str, danh_sach: list[dict], ocr_engine, kho_chu) -> tuple[float, float]:
     """Chạy trọn bộ câu hỏi ở một chế độ, ghi tệp nộp rồi chấm điểm."""
     SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
     for p in SUBMISSIONS_DIR.glob("*.csv"):
@@ -92,9 +120,9 @@ def chay_mot_che_do(che_do: str, danh_sach: list[dict], ocr_engine) -> tuple[flo
 
     nguon = tim_ung_vien_gop(
         ocr_engine=ocr_engine,
-        dung_clip=che_do in {"clip", "rrf"},
-        dung_ocr=che_do in {"ocr", "rrf"},
+        kho_chu=kho_chu,
         trong_so=TRONG_SO_MAC_DINH,
+        **CAU_HINH_CHE_DO[che_do],
     )
 
     ket_qua = run_queries(danh_sach, ghi_tep=True, tim_ung_vien=nguon)
@@ -161,10 +189,10 @@ def doi_chieu_tung_cau(so_cau: int) -> None:
             return
         bang[che_do] = pd.read_csv(f)
 
-    cot = "final_score" if "final_score" in bang["clip"].columns else bang["clip"].columns[-1]
+    cot = "final_score" if "final_score" in bang[CHE_DO_MOC].columns else bang[CHE_DO_MOC].columns[-1]
 
-    gop = bang["clip"][["query_id", "task", cot]].rename(columns={cot: "clip"})
-    for che_do in ("ocr", "rrf"):
+    gop = bang[CHE_DO_MOC][["query_id", "task", cot]].rename(columns={cot: CHE_DO_MOC})
+    for che_do in CAC_CHE_DO[1:]:
         gop = gop.merge(
             bang[che_do][["query_id", cot]].rename(columns={cot: che_do}),
             on="query_id",
@@ -172,23 +200,24 @@ def doi_chieu_tung_cau(so_cau: int) -> None:
         )
 
     gop = gop.fillna(0.0).sort_values("query_id")
-    gop["chenh"] = gop["rrf"] - gop["clip"]
+    gop["chenh"] = gop[CAC_CHE_DO[-1]] - gop[CHE_DO_MOC]
 
     print("\n" + "=" * 100)
     print("[ĐỐI CHIẾU] ĐIỂM TỪNG CÂU: CLIP vs OCR vs RRF")
-    print("=" * 100)
-    print(f"{'CÂU':<6} | {'LOẠI':<6} | {'CLIP':>8} | {'OCR':>8} | {'RRF':>8} | {'CHÊNH':>8}")
-    print("-" * 100)
+    print("=" * 120)
+    dau_cot = " | ".join(f"{m:>8}" for m in CAC_CHE_DO)
+    print(f"{'CÂU':<6} | {'LOẠI':<6} | {dau_cot} | {'CHÊNH':>8}")
+    print("-" * 120)
 
     for _, r in gop.iterrows():
         dau = "  <<<" if abs(r["chenh"]) > 1e-9 else ""
+        o = " | ".join(f"{r[m]:>8.2f}" for m in CAC_CHE_DO)
         print(
-            f"{str(r['query_id']):<6} | {str(r.get('task', '')):<6} | "
-            f"{r['clip']:>8.2f} | {r['ocr']:>8.2f} | {r['rrf']:>8.2f} | "
+            f"{str(r['query_id']):<6} | {str(r.get('task', '')):<6} | {o} | "
             f"{r['chenh']:>+8.2f}{dau}"
         )
 
-    print("-" * 100)
+    print("-" * 120)
 
     # Điểm theo từng dạng — 8 câu TRAKE từng bằng 0 do sai định dạng tệp nộp,
     # nên tách riêng để thấy ngay dạng nào còn trắng điểm.
@@ -196,15 +225,17 @@ def doi_chieu_tung_cau(so_cau: int) -> None:
         print("Theo dạng câu hỏi:")
         for task, nhom in gop.groupby("task"):
             print(
-                f"  {str(task):<8}: RRF {nhom['rrf'].sum():>6.2f} điểm / {len(nhom)} câu"
-                f"   (CLIP {nhom['clip'].sum():.2f})"
+                f"  {str(task):<8}: "
+                + "  ".join(f"{m} {nhom[m].sum():>5.2f}" for m in CAC_CHE_DO)
+                + f"   / {len(nhom)} câu"
             )
-        print("-" * 100)
+        print("-" * 120)
 
     khac = gop[gop["chenh"].abs() > 1e-9]
     print(
-        f"TỔNG: clip={gop['clip'].sum():.3f}  ocr={gop['ocr'].sum():.3f}  "
-        f"rrf={gop['rrf'].sum():.3f}  chênh={gop['chenh'].sum():+.3f}"
+        "TỔNG: "
+        + "  ".join(f"{m}={gop[m].sum():.3f}" for m in CAC_CHE_DO)
+        + f"  chênh={gop['chenh'].sum():+.3f}"
     )
 
     if khac.empty:
@@ -221,7 +252,7 @@ def doi_chieu_tung_cau(so_cau: int) -> None:
         "  truy được ở từng câu, không phải độ lớn con số. Cần 60–80 câu mới kết\n"
         "  luận được về độ lớn."
     )
-    print("=" * 100)
+    print("=" * 120)
 
 
 def main() -> None:
@@ -255,17 +286,53 @@ def main() -> None:
 
     ocr_engine = OCRReranker()
     print(
-        f"Kho chữ OCR: {len(ocr_engine._index)} khung hình  |  "
+        f"OCRReranker: {len(ocr_engine._index)} khung hình  |  "
         f"box giữ {ocr_engine.so_box_giu} / bỏ {ocr_engine.so_box_bo} "
-        f"(ngưỡng conf {ocr_engine.nguong_conf})\n"
+        f"(ngưỡng conf {ocr_engine.nguong_conf})"
     )
+
+    # Kho chữ FTS phục vụ hai nguồn: ocr_fts và asr. Thiếu nó thì hai chế độ đó
+    # ra rỗng — phải BÁO RÕ, đừng để lặng lẽ 0 điểm rồi tưởng thuật toán kém.
+    tep_fts = DATA_ROOT / "index" / "fts" / "text.sqlite"
+    kho_chu = None
+
+    if tep_fts.exists():
+        try:
+            kho_chu = TextSearchIndex(db_path=tep_fts)
+            import sqlite3
+
+            with sqlite3.connect(tep_fts) as _c:
+                so_ocr = _c.execute("select count(*) from ocr_fts").fetchone()[0]
+                so_asr = _c.execute("select count(*) from asr_fts").fetchone()[0]
+
+            print(f"Kho chữ FTS: ocr_fts {so_ocr} bản ghi | asr_fts {so_asr} bản ghi")
+
+            if so_asr == 0:
+                print(
+                    "    [CẢNH BÁO] asr_fts RỖNG — chế độ ASR sẽ ra 0 điểm vì thiếu\n"
+                    "    dữ liệu, KHÔNG phải vì thuật toán kém. Nạp bằng:\n"
+                    "    python -m scripts.nap_asr_vao_fts",
+                    file=sys.stderr,
+                )
+            if so_ocr == 0:
+                print(
+                    "    [CẢNH BÁO] ocr_fts RỖNG — chế độ ocr_fts sẽ ra 0 điểm vì thiếu\n"
+                    "    dữ liệu. Nạp bằng build_index_from_jsonl_dir(DERIVED_DIR/'ocr').",
+                    file=sys.stderr,
+                )
+        except Exception as loi:  # noqa: BLE001
+            print(f"    [LỖI] không mở được kho chữ: {loi}", file=sys.stderr)
+    else:
+        print(f"    [CẢNH BÁO] không thấy {tep_fts} — bỏ qua ocr_fts và ASR.", file=sys.stderr)
+
+    print()
 
     diem: dict[str, tuple[float, float]] = {}
 
     for i, che_do in enumerate(CAC_CHE_DO, start=1):
         print(f"[{i}/{len(CAC_CHE_DO)}] Đang chạy: {NHAN_CHE_DO[che_do]}...")
         moc = time.time()
-        diem[che_do] = chay_mot_che_do(che_do, danh_sach, ocr_engine)
+        diem[che_do] = chay_mot_che_do(che_do, danh_sach, ocr_engine, kho_chu)
         tong, dtb = diem[che_do]
         print(f" -> Tổng điểm: {tong:.3f} | ĐTB: {dtb:.4f} ({time.time() - moc:.1f}s)\n")
 
@@ -277,8 +344,17 @@ def main() -> None:
         print(f"{NHAN_CHE_DO[che_do]:<32} | {tong:<15.3f} | {dtb:<20.4f}")
     print("=" * 75)
 
-    tong_rrf = diem["rrf"][0]
-    tot_nhat_don = max(diem["clip"][0], diem["ocr"][0])
+    NGUON_DON = ("clip", "ocr", "ocr_fts", "asr")
+    TO_HOP = ("rrf2", "rrf3", "rrf3b", "rrf4")
+
+    ten_don_tot = max(NGUON_DON, key=lambda m: diem[m][0])
+    ten_to_hop_tot = max(TO_HOP, key=lambda m: diem[m][0])
+
+    tot_nhat_don = diem[ten_don_tot][0]
+    tong_rrf = diem[ten_to_hop_tot][0]
+
+    print(f"\nNguồn đơn tốt nhất : {NHAN_CHE_DO[ten_don_tot]} = {tot_nhat_don:.3f}")
+    print(f"Tổ hợp tốt nhất    : {NHAN_CHE_DO[ten_to_hop_tot]} = {tong_rrf:.3f}")
 
     if tong_rrf >= tot_nhat_don and tong_rrf > 0:
         print("\n[ĐẠT] Điểm RRF >= max(CLIP, OCR).")
