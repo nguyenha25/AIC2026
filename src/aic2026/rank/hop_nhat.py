@@ -1,4 +1,4 @@
-"""
+﻿"""
 Hợp nhất kiểu trả về và cắm nhánh gộp vào mạch của Ngân — Task 10.
 
 Tệp này làm hai việc:
@@ -36,7 +36,7 @@ from typing import Callable, Mapping, Sequence
 
 from aic2026.frame_map import lookup
 from aic2026.index.faiss_index import Hit
-from aic2026.rank.fusion import reciprocal_rank_fusion
+from aic2026.rank.fuse import reciprocal_rank_fusion
 
 NGUON_CLIP = "clip"
 NGUON_OCR = "ocr"
