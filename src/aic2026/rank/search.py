@@ -14,15 +14,38 @@ def reciprocal_rank_fusion(
     weights: Mapping[str, float] | None = None,
     k_rrf: int = 60,
 ) -> list[dict[str, Any]]:
-    """RRF Score(d) = sum_{m in M} (w_m / (k_rrf + rank_m(d)))."""
+    """
+    RRF Score(d) = sum_{m in M} (w_m / (k_rrf + rank_m(d))).
+
+    SỬA LỖI CỘNG DỒN KHOÁ TRÙNG
+    ---------------------------
+    Trước đây vòng lặp cộng thẳng `rrf_scores[key] += ...`. Khi MỘT nhánh trả về
+    cùng (video_id, frame_idx) nhiều lần — chuyện có thật trong bộ dữ liệu này:
+    các keyframe kề nhau làm tròn về cùng frame_idx, khoảng 1.228 dòng trên 192
+    video — thì frame đó được cộng điểm HAI LẦN cho cùng một nhánh, nhảy lên trên
+    frame đơn có hạng cao hơn. Hệ quả: RRF tự đảo thứ tự nhánh hình ảnh dù nhánh
+    chữ không đóng góp gì. Đo trên bộ dev 32 câu: 6 câu bị đảo.
+
+    Công thức RRF chuẩn tính MỘT hạng cho mỗi tài liệu trong mỗi nhánh. Nên ở đây
+    khử trùng trong từng nhánh trước, GIỮ HẠNG NHỎ NHẤT (vị trí tốt nhất), rồi mới
+    cộng. Việc khử trùng theo thời gian (pts_time) vẫn do deduplicate_temporal lo
+    ở bước sau — đây chỉ sửa đúng phần trùng khoá y hệt.
+    """
     weights = weights or {}
     rrf_scores: dict[tuple[str, int], float] = defaultdict(float)
     provenance: dict[tuple[str, int], dict[str, int]] = defaultdict(dict)
 
     for mod_name, results in modality_results.items():
         w = float(weights.get(mod_name, 1.0))
+
+        # Khử trùng trong nhánh: mỗi khoá chỉ giữ hạng nhỏ nhất.
+        hang_tot_nhat: dict[tuple[str, int], int] = {}
         for rank_idx, item in enumerate(results, start=1):
             key = (str(item["video_id"]), int(item["frame_idx"]))
+            if key not in hang_tot_nhat:
+                hang_tot_nhat[key] = rank_idx
+
+        for key, rank_idx in hang_tot_nhat.items():
             rrf_scores[key] += w / (k_rrf + rank_idx)
             provenance[key][mod_name] = rank_idx
 
