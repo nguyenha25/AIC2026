@@ -24,8 +24,15 @@ from __future__ import annotations
 import re
 import unicodedata
  
-from ..rank.config import load_settings
- 
+import yaml
+from pathlib import Path
+
+def load_settings():
+    settings_path = Path("config/settings.yaml")
+    if settings_path.exists():
+        with open(settings_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {} 
 # Mô hình đa ngôn ngữ (hỗ trợ tiếng Việt), nhẹ, chạy tốt trên CPU không cần
 # GPU — hợp với máy nhóm (đúng ràng buộc "không GPU" đã ghi ở Task 13).
 # Tải về máy ĐÚNG MỘT LẦN, các lần sau load từ cache local, không cần mạng.
