@@ -1,0 +1,711 @@
+/* ==========================================================
+   11.0 — BIẾN THIẾT KẾ
+   ----------------------------------------------------------
+   Đúng bảng màu của bản gốc, chỉ gom lại thành biến để sửa một
+   chỗ ăn cả trang. Không thêm màu nào ngoài danh sách này.
+   --aic-cao-anh là nguồn DUY NHẤT cho chiều cao ảnh trong lưới.
+   ========================================================== */
+:root {
+    --aic-nen:        #0b0f19;
+    --aic-mat-1:      #111827;
+    --aic-mat-2:      #141d2e;
+    --aic-mat-3:      #1e293b;
+    --aic-vien:       #263653;
+    --aic-vien-o:     #334155;
+    --aic-vien-nut:   #3b4a68;
+    --aic-nhan:       #6366f1;
+    --aic-nhan-dam:   #4f46e5;
+    --aic-nhan-nhat:  #818cf8;
+    --aic-nhan-tim:   #8b5cf6;
+    --aic-chu-1:      #f8fafc;
+    --aic-chu-2:      #e2e8f0;
+    --aic-chu-3:      #cbd5e1;
+    --aic-chu-4:      #94a3b8;
+    --aic-diem:       #c4b5fd;
+    --aic-xanh:       #16a34a;
+    --aic-cam:        #f59e0b;
+    --aic-muot:       170ms cubic-bezier(0.4, 0, 0.2, 1);
+    --aic-cao-anh:    132px;
+    --aic-chu-so:     ui-monospace, Consolas, monospace;
+}
+
+/* ==========================================================
+   11.1 — NỀN VÀ LUẬT CHỐNG TRÀN
+   ========================================================== */
+.stApp { background: var(--aic-nen); color: var(--aic-chu-1); }
+
+.stApp p, .stApp li, .stApp span, .stApp label { color: var(--aic-chu-4); }
+
+.stApp h1, .stApp h2, .stApp h3, .stApp h4 { color: var(--aic-chu-1); }
+
+/* Để trong suốt cho liền nền, nhưng KHÔNG ẩn — nút mở thanh bên
+   nằm trong đó, ẩn đi là mất đường vào khi thanh bên đang đóng. */
+header[data-testid="stHeader"] { background: transparent; }
+
+.block-container { max-width: 1600px; padding-top: 1.5rem; padding-bottom: 4rem; }
+
+/* Luật chống tràn, phải đặt trước mọi thứ khác.
+   Mặc định của flexbox là min-width: auto — một ô cột KHÔNG chịu co
+   hẹp hơn nội dung bên trong nó, nên chỉ cần một nhãn nút hơi dài là
+   cả hàng đội ra ngoài viền thẻ. Đặt min-width: 0 để cột chịu co lại. */
+div[data-testid="stColumn"],
+div[data-testid="column"],
+div[data-testid="stHorizontalBlock"] { min-width: 0; }
+
+/* Mã video và số liệu dài không được phép đẩy rộng thẻ */
+.result-video, .result-meta, .aic-subtitle {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+hr, [data-testid="stDivider"] hr {
+    border: none;
+    height: 1px;
+    background: var(--aic-vien);
+}
+
+/* ==========================================================
+   11.2 — ĐẦU TRANG
+   ========================================================== */
+.aic-title {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    color: var(--aic-chu-1);
+}
+
+.aic-subtitle { color: var(--aic-chu-4); font-size: 14px; margin-bottom: 10px; }
+
+/* ==========================================================
+   11.3 — Ô SỐ LIỆU (st.metric)
+   ========================================================== */
+[data-testid="stMetric"] {
+    background: var(--aic-mat-1);
+    border: none;
+    border-radius: 12px;
+    padding: 12px 16px;
+    overflow: hidden;
+    min-width: 0;
+    transition: border-color var(--aic-muot);
+}
+
+[data-testid="stMetric"]:hover { background: var(--aic-mat-2); }
+
+/* Dòng phụ kiểu "133 thô -> 100 sau lọc trùng" dài hơn ô rất nhiều.
+   Mặc định nó không xuống dòng nên chữ chạy đè ra ngoài viền ô. */
+[data-testid="stMetric"] * { white-space: normal; overflow-wrap: anywhere; }
+
+[data-testid="stMetricLabel"] p {
+    color: var(--aic-chu-4);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+}
+
+[data-testid="stMetricValue"] {
+    color: var(--aic-chu-1);
+    font-size: 23px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+[data-testid="stMetricDelta"] {
+    color: var(--aic-chu-4);
+    font-size: 11.5px;
+    font-family: var(--aic-chu-so);
+}
+
+[data-testid="stMetricDelta"] svg { display: none; }
+
+/* ==========================================================
+   11.4 — KHUNG TÌM KIẾM
+   ----------------------------------------------------------
+   KHÔNG dùng position: sticky. Đã thử và sai: khung nổi lên trên
+   thì nó đè thẳng vào phần đầu của lưới kết quả bên dưới.
+   ========================================================== */
+div[data-testid="stForm"] {
+    background: var(--aic-mat-2);
+    border: none;
+    border-radius: 16px;
+    padding: 16px;
+}
+
+.search-label {
+    color: var(--aic-chu-3);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+/* ==========================================================
+   11.5 — Ô NHẬP, CHỌN, TRƯỢT
+   ========================================================== */
+div[data-testid="stTextInput"] input,
+div[data-testid="stNumberInput"] input {
+    background: var(--aic-mat-1);
+    border: 1px solid var(--aic-mat-3);
+    color: var(--aic-chu-1);
+    border-radius: 10px;
+    min-height: 44px;
+    font-size: 15px;
+    transition: border-color var(--aic-muot), box-shadow var(--aic-muot);
+}
+
+div[data-testid="stTextInput"] input::placeholder { color: #55627a; }
+
+div[data-testid="stTextInput"] input:hover,
+div[data-testid="stNumberInput"] input:hover { border-color: var(--aic-vien-nut); }
+
+div[data-testid="stTextInput"] input:focus,
+div[data-testid="stNumberInput"] input:focus {
+    border-color: var(--aic-nhan-tim);
+    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
+}
+
+div[data-testid="stTextInput"] > div,
+div[data-testid="stNumberInput"] > div { border: none; background: transparent; }
+
+div[data-baseweb="select"] > div {
+    background: var(--aic-mat-1);
+    border: 1px solid var(--aic-vien-o);
+    border-radius: 10px;
+    min-height: 44px;
+    color: var(--aic-chu-1);
+    transition: border-color var(--aic-muot), box-shadow var(--aic-muot);
+}
+
+div[data-baseweb="select"] > div:hover { border-color: var(--aic-vien-nut); }
+
+div[data-baseweb="select"]:focus-within > div {
+    border-color: var(--aic-nhan-tim);
+    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
+}
+
+div[data-baseweb="popover"] ul {
+    background: var(--aic-mat-2);
+    border: 1px solid var(--aic-vien);
+    border-radius: 10px;
+}
+
+div[data-baseweb="popover"] li:hover { background: var(--aic-mat-3); }
+
+label[data-testid="stWidgetLabel"] p {
+    color: var(--aic-chu-3);
+    font-size: 12.5px;
+    font-weight: 600;
+}
+
+div[data-testid="stSlider"] div[role="slider"] {
+    border: 2px solid var(--aic-nhan-tim);
+    transition: box-shadow var(--aic-muot);
+}
+
+div[data-testid="stSlider"] div[role="slider"]:hover {
+    box-shadow: 0 0 0 6px rgba(139, 92, 246, 0.20);
+}
+
+div[data-testid="stCheckbox"] label { color: var(--aic-chu-3); font-size: 13px; }
+
+/* Ô tìm kiếm nhiều dòng — xem chú thích ở mục 14.
+   field-sizing: content là thứ làm ô tự cao dần theo chữ, giống khung
+   chat. Chrome/Edge 123 trở lên mới hiểu; bản cũ hơn thì ô đứng yên ở
+   chiều cao mặc định và hiện thanh cuộn, vẫn đọc được cả câu. */
+div[data-testid="stTextArea"] textarea {
+    background: var(--aic-mat-1);
+    border: 1px solid var(--aic-mat-3);
+    color: var(--aic-chu-1);
+    border-radius: 10px;
+    font-size: 15px;
+    line-height: 1.5;
+    padding: 11px 13px;
+    resize: none;
+    field-sizing: content;
+    min-height: 44px;
+    max-height: 220px;
+    transition: border-color var(--aic-muot), box-shadow var(--aic-muot);
+}
+
+div[data-testid="stTextArea"] textarea::placeholder { color: #55627a; }
+
+div[data-testid="stTextArea"] textarea:hover { border-color: var(--aic-vien-nut); }
+
+div[data-testid="stTextArea"] textarea:focus {
+    border-color: var(--aic-nhan-tim);
+    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
+}
+
+div[data-testid="stTextArea"] > div { border: none; background: transparent; }
+
+/* Streamlit gắn sẵn dòng "Press Ctrl+Enter to apply" dưới ô nhiều dòng.
+   Trong biểu mẫu thì nó sai — nút Tìm kiếm mới là thứ gửi đi. */
+div[data-testid="stTextArea"] div[data-testid="InputInstructions"] { display: none; }
+
+/* ==========================================================
+   11.6 — NÚT
+   ========================================================== */
+div[data-testid="stFormSubmitButton"] button {
+    min-height: 44px;
+    border-radius: 10px;
+    border: none;
+    background: var(--aic-nhan);
+    color: #ffffff;
+    font-weight: 700;
+    transition: background var(--aic-muot), transform var(--aic-muot);
+}
+
+div[data-testid="stFormSubmitButton"] button:hover {
+    background: var(--aic-nhan-dam);
+    transform: translateY(-1px);
+}
+
+div[data-testid="stFormSubmitButton"] button:active { transform: translateY(0); }
+
+/* Nhãn nút không được xuống dòng — đó là thứ làm lưới vỡ */
+div.stButton > button,
+div[data-testid="stDownloadButton"] > button {
+    border-radius: 8px;
+    border: 1px solid var(--aic-vien-nut);
+    background: var(--aic-mat-1);
+    color: var(--aic-chu-2);
+    font-weight: 600;
+    font-size: 12px;
+    white-space: nowrap;
+    padding: 4px 8px;
+    min-height: 32px;
+    max-width: 100%;
+    transition: border-color var(--aic-muot), background var(--aic-muot),
+                color var(--aic-muot);
+}
+
+div.stButton > button:hover,
+div[data-testid="stDownloadButton"] > button:hover {
+    border-color: var(--aic-nhan-nhat);
+    background: var(--aic-mat-3);
+    color: #ffffff;
+}
+
+/* Nhãn dài thì cắt bằng dấu ba chấm, tuyệt đối không nong rộng ô */
+div.stButton > button p,
+div[data-testid="stDownloadButton"] > button p {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+    margin: 0;
+}
+
+div.stButton > button:disabled,
+div[data-testid="stDownloadButton"] > button:disabled {
+    opacity: 0.45;
+    border-color: var(--aic-vien);
+}
+
+div.stButton > button:focus-visible,
+div[data-testid="stDownloadButton"] > button:focus-visible {
+    border-color: var(--aic-nhan-tim);
+    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
+    outline: none;
+}
+
+/* Nút phụ trong hàng ngang của thẻ (Lân cận / Ảnh gốc / Đóng) chìm
+   hơn nút chính, để mắt bắt được nút Chọn trước. */
+div[data-testid="stVerticalBlockBorderWrapper"]
+div[data-testid="stHorizontalBlock"] div.stButton > button {
+    background: transparent;
+    border-color: var(--aic-vien);
+    color: var(--aic-chu-4);
+    font-size: 11.5px;
+    min-height: 30px;
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]
+div[data-testid="stHorizontalBlock"] div.stButton > button:hover {
+    color: #ffffff;
+    border-color: var(--aic-nhan-nhat);
+    background: var(--aic-mat-3);
+}
+
+/* ==========================================================
+   11.7 — THẺ KẾT QUẢ
+   ========================================================== */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border: 1px solid transparent !important;
+    background: var(--aic-mat-1) !important;
+    border-radius: 14px !important;
+    /* Ép đệm tường minh: bốn máy có thể chạy bản Streamlit khác nhau,
+       mỗi bản đặt padding một chỗ khác nhau. Ghi rõ ở đây thì nội dung
+       không bao giờ dính sát vào viền. */
+    padding: 15px !important;
+    box-sizing: border-box;
+    min-width: 0;
+    overflow: hidden;
+    transition: border-color var(--aic-muot), transform var(--aic-muot);
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+    border-color: var(--aic-nhan-dam) !important;
+    transform: translateY(-2px);
+}
+
+/* Khoảng cách giữa ảnh, chữ và nút bên trong thẻ.
+   Mặc định 1rem làm thẻ cao lêu nghêu, chữ trôi xa ảnh. */
+div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"] {
+    gap: 0.5rem;
+}
+
+/* ==========================================================
+   11.8 — ẢNH TRONG LƯỚI
+   ----------------------------------------------------------
+   Ép mọi ảnh cùng chiều cao để các thẻ thẳng hàng. Khung ngoài cắt
+   phần thừa nên phóng nhẹ khi rê chuột không xô các thẻ bên cạnh.
+   ========================================================== */
+div[data-testid="stImage"] {
+    overflow: hidden;
+    border-radius: 8px;
+    line-height: 0;
+    background: var(--aic-nen);
+}
+
+div[data-testid="stImage"] img {
+    border-radius: 8px;
+    height: var(--aic-cao-anh);
+    width: 100%;
+    object-fit: cover;
+    transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+div[data-testid="stImage"]:hover img { transform: scale(1.05); }
+
+/* ==========================================================
+   11.8b — ẢNH KEYFRAME GỐC (mục 17)
+   ----------------------------------------------------------
+   Luật cắt 132px ở trên phải được MIỄN TRỪ ở đây, nếu không thì
+   đúng tấm ảnh người ta cần soi kỹ lại là tấm bị xén thành một
+   dải ngang. Phải phủ ba đường vào, vì mục 17 có hai nhánh và
+   tên định danh hộp thoại đổi theo phiên bản Streamlit:
+
+     div[role="dialog"]   BaseWeb luôn đặt, chuẩn nhất
+     stDialog / stModal   tên riêng của Streamlit, đổi theo bản
+     :has([stMetric])     nhánh dự phòng khi máy không có
+                          st.dialog — ảnh vẽ trong container viền
+                          thường. Nhận ra nó nhờ bốn ô metric
+                          Video/Frame/Thời điểm/Keyframe; không
+                          thẻ nào khác trong app có metric.
+   ========================================================== */
+div[role="dialog"] div[data-testid="stImage"],
+div[data-testid="stDialog"] div[data-testid="stImage"],
+div[data-testid="stModal"] div[data-testid="stImage"],
+div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"])
+div[data-testid="stImage"] {
+    overflow: visible;
+    text-align: center;
+    line-height: normal;
+    background: var(--aic-nen);
+    border: none;
+    padding: 8px;
+}
+
+div[role="dialog"] div[data-testid="stImage"] img,
+div[data-testid="stDialog"] div[data-testid="stImage"] img,
+div[data-testid="stModal"] div[data-testid="stImage"] img,
+div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"])
+div[data-testid="stImage"] img {
+    height: auto;
+    /* width: auto để ảnh nhỏ không bị kéo giãn thành mờ nhoè.
+       max-height theo chiều cao màn hình để ảnh dọc không đẩy bốn ô
+       thông tin bên dưới rơi khỏi tầm nhìn. */
+    width: auto;
+    max-width: 100%;
+    max-height: 68vh;
+    object-fit: contain;
+    margin: 0 auto;
+    display: block;
+    border-radius: 8px;
+    transform: none !important;
+}
+
+/* Bốn ô thông tin dưới ảnh: hộp thoại hẹp hơn trang chính nhiều nên
+   cỡ chữ của trang chính làm chúng chen nhau. */
+div[role="dialog"] [data-testid="stMetricValue"],
+div[data-testid="stDialog"] [data-testid="stMetricValue"],
+div[data-testid="stModal"] [data-testid="stMetricValue"],
+div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"])
+[data-testid="stMetricValue"] {
+    font-size: 17px;
+}
+
+/* Panel dự phòng không nên nhấc lên khi rê chuột như thẻ kết quả */
+div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"]):hover {
+    transform: none;
+}
+
+/* ==========================================================
+   11.9 — NHÃN VÀ CHỮ TRONG THẺ
+   ========================================================== */
+.result-rank {
+    display: inline-block;
+    background: var(--aic-nhan-dam);
+    color: #ffffff;
+    border-radius: 6px;
+    padding: 2px 7px;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.result-rank-chon { background: var(--aic-xanh); }
+
+.nhan-nguon {
+    display: inline-block;
+    background: var(--aic-mat-3);
+    color: var(--aic-chu-4);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 10px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+
+.result-video {
+    color: var(--aic-chu-1);
+    font-size: 14px;
+    font-weight: 700;
+    margin-top: 4px;
+}
+
+.result-meta {
+    color: var(--aic-chu-4);
+    font-size: 11.5px;
+    line-height: 1.55;
+    font-family: var(--aic-chu-so);
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 6px;
+}
+
+.result-score { color: var(--aic-diem); font-weight: 700; }
+
+/* ==========================================================
+   11.10 — Ô THAY ẢNH
+   ----------------------------------------------------------
+   Hai trạng thái phải nhìn là phân biệt được ngay:
+   chưa tải shard  = bình thường, xám chìm
+   thiếu ảnh       = bất thường, viền cam
+   ========================================================== */
+.o-anh {
+    height: var(--aic-cao-anh);
+    border-radius: 8px;
+    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    line-height: 1.4;
+}
+
+.o-chua-tai { border: 1px dashed #2b3a54; color: #55627a; background: #0e1524; }
+
+.o-thieu-anh {
+    border: 1px dashed #b45309;
+    color: var(--aic-cam);
+    background:
+        repeating-linear-gradient(135deg, rgba(245, 158, 11, 0.09) 0 10px,
+                                  transparent 10px 20px),
+        #1c1408;
+}
+
+/* ==========================================================
+   11.11 — HỘP THÔNG BÁO
+   ========================================================== */
+div[data-testid="stAlert"] {
+    border-radius: 10px;
+    border: none;
+    border-left: 3px solid var(--aic-nhan);
+    background: var(--aic-mat-1);
+}
+
+div[data-testid="stAlert"] p { color: var(--aic-chu-3); font-size: 13px; }
+
+div[data-testid="stAlert"]:has([data-testid*="Warning"]) {
+    border-left-color: var(--aic-cam);
+}
+
+div[data-testid="stAlert"]:has([data-testid*="Error"]) {
+    border-left-color: #dc2626;
+}
+
+div[data-testid="stAlert"]:has([data-testid*="Success"]) {
+    border-left-color: var(--aic-xanh);
+}
+
+/* ==========================================================
+   11.12 — KHUNG GẤP VÀ KHUNG TRẠNG THÁI
+   ========================================================== */
+div[data-testid="stExpander"] details {
+    background: var(--aic-mat-1);
+    border: none;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+div[data-testid="stExpander"] summary {
+    color: var(--aic-chu-3);
+    font-size: 13px;
+    font-weight: 600;
+    transition: background var(--aic-muot), color var(--aic-muot);
+}
+
+div[data-testid="stExpander"] summary:hover {
+    background: var(--aic-mat-3);
+    color: #ffffff;
+}
+
+/* ==========================================================
+   11.13 — BẢNG
+   ========================================================== */
+div[data-testid="stDataFrame"] {
+    border: none;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+/* ==========================================================
+   11.14 — THANH BÊN
+   ========================================================== */
+section[data-testid="stSidebar"] > div {
+    background: var(--aic-mat-2);
+    border-right: 1px solid var(--aic-vien);
+}
+
+section[data-testid="stSidebar"] h3 {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.9px;
+    text-transform: uppercase;
+    color: var(--aic-chu-4);
+}
+
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+    font-size: 11.5px;
+    font-family: var(--aic-chu-so);
+    color: var(--aic-chu-4);
+    word-break: break-all;
+}
+
+/* Nút lịch sử: canh trái và cắt bằng dấu ba chấm, đỡ vỡ hàng */
+section[data-testid="stSidebar"] div.stButton > button {
+    justify-content: flex-start;
+    text-align: left;
+    font-weight: 500;
+    overflow: hidden;
+}
+
+section[data-testid="stSidebar"] div.stButton > button p {
+    text-align: left;
+    width: 100%;
+}
+
+/* ==========================================================
+   11.15 — HỘP THOẠI
+   ========================================================== */
+div[data-testid="stDialog"] > div,
+div[data-testid="stModal"] > div,
+div[role="dialog"] {
+    background: var(--aic-mat-2);
+    border: 1px solid var(--aic-vien);
+    border-radius: 16px;
+}
+
+/* ==========================================================
+   11.16 — THANH CUỘN
+   ========================================================== */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+::-webkit-scrollbar-thumb {
+    background: var(--aic-vien);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--aic-vien-nut);
+    background-clip: content-box;
+}
+
+/* ==========================================================
+   11.17 — CO GIÃN THEO MÀN HÌNH
+   ----------------------------------------------------------
+   st.columns cố định số cột. Cho hàng ngang xuống dòng khi màn
+   hình hẹp thì lưới 4 cột tự thành 2 cột rồi 1 cột, không phải
+   sửa SO_COT ở mục 3.
+   ========================================================== */
+@media (max-width: 1200px) {
+    div[data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+
+    /* flex-basis 260px là GỢI Ý bề rộng, min-width giữ nguyên 0 để cột
+       vẫn co được. Đặt min-width: 260px ở đây là sai: hai nút bên trong
+       thẻ rộng 280px sẽ bị ép mỗi nút 260px và tràn ra ngoài viền. */
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        flex: 1 1 260px;
+        min-width: 0;
+    }
+
+    /* Hàng nút bên trong thẻ giữ nguyên hai nút cạnh nhau */
+    div[data-testid="stVerticalBlockBorderWrapper"]
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stVerticalBlockBorderWrapper"]
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        flex: 1 1 0;
+    }
+}
+
+@media (max-width: 720px) {
+    .block-container { padding-left: 1rem; padding-right: 1rem; }
+
+    .aic-title { font-size: 26px; }
+
+    div[data-testid="stForm"] { padding: 14px; }
+
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        flex: 1 1 100%;
+    }
+
+    /* Vẫn trừ hàng nút trong thẻ: xếp chồng lên nhau thì thẻ cao gấp đôi */
+    div[data-testid="stVerticalBlockBorderWrapper"]
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stVerticalBlockBorderWrapper"]
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        flex: 1 1 0;
+    }
+}
+
+/* Máy nào bật chế độ giảm chuyển động thì tắt hết hiệu ứng */
+@media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+
+    div[data-testid="stImage"]:hover img,
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover { transform: none; }
+}
+
+/* ==========================================================
+   11.14 — CHỮ OCR ĐỌC ĐƯỢC
+   ----------------------------------------------------------
+   Ở chế độ OCR, phần lớn kết quả thuộc shard chưa tải nên không
+   có ảnh. Dòng chữ này là căn cứ duy nhất để phán đoán tấm ảnh
+   có đúng hay không.
+   ========================================================== */
+.chu-ocr {
+    color: var(--aic-chu-4);
+    background: var(--aic-mat-2);
+    border-left: 2px solid var(--aic-nhan-tim);
+    border-radius: 0;
+    padding: 5px 7px;
+    margin: 4px 0 6px 0;
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
