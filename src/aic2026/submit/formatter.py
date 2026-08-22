@@ -58,9 +58,21 @@ class Answer:
         if task == KIS:
             return [self.video_id, str(self.frame_ids[0])]
         if task == QA:
-            if self.answer is None:
-                raise ValueError("Q&A bắt buộc phải có answer")
-            return [self.video_id, str(self.frame_ids[0]), self.answer]
+            # VIỆC 14 — LUẬT CỨNG. Vòng p1: MỘT ô đáp án để trống làm BTC loại
+            # NGUYÊN TỆP 100 dòng. Không phải chấm 0 điểm câu đó — mất trắng cả
+            # câu. Điền bừa vẫn giữ tệp hợp lệ và không mất gì thêm.
+            #
+            # Chặn ở đây chứ không chỉ ở script sinh tệp: đây là chỗ DUY NHẤT
+            # mọi đường ghi tệp nộp đều đi qua, nên không đường nào lách được.
+            if self.answer is None or not str(self.answer).strip():
+                raise ValueError(
+                    f"Ô đáp án Q&A rỗng ({self.video_id}, "
+                    f"frame {self.frame_ids[0]}). "
+                    "Vòng p1 một ô trống đã làm BTC loại nguyên tệp 100 dòng. "
+                    "Chưa biết đáp án thì ĐIỀN BỪA — xem "
+                    "aic2026.qa_answer.doan_du_phong()."
+                )
+            return [self.video_id, str(self.frame_ids[0]), str(self.answer).strip()]
         if task == TRAKE:
             return [self.video_id, *[str(x) for x in self.frame_ids]]
         raise ValueError(f"Dạng truy vấn lạ: {task}")
@@ -106,8 +118,29 @@ class SubmissionBudget:
     def is_full(self) -> bool:
         return len(self._answers) >= self.limit
 
+    def o_dap_an_rong(self) -> list[int]:
+        """VIỆC 14: các dòng có ô đáp án rỗng. Rỗng nghĩa là ĐẠT.
+
+        Chỉ có ý nghĩa với task="qa". Trả về số thứ tự dòng (đếm từ 1).
+        """
+        if self.task != QA:
+            return []
+        return [
+            i
+            for i, a in enumerate(self._answers, start=1)
+            if a.answer is None or not str(a.answer).strip()
+        ]
+
     def write(self, path: Path) -> Path:
         """Ghi ra tệp CSV, không dòng tiêu đề, xuống dòng kiểu \\n."""
+        # VIỆC 14: soát TRƯỚC khi mở tệp. Ghi được nửa tệp rồi mới dừng thì
+        # còn lại một tệp .partial mà người chạy dễ tưởng là bản tốt.
+        rong = self.o_dap_an_rong()
+        if rong:
+            raise ValueError(
+                f"{len(rong)} dòng có ô đáp án Q&A rỗng (dòng {rong[:10]}). "
+                "KHÔNG ghi tệp. Một ô trống làm BTC loại nguyên tệp 100 dòng."
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".partial")   # quy tắc đặt tên số 7
         with tmp.open("w", encoding="utf-8", newline="") as f:

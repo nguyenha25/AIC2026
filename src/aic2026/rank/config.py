@@ -58,8 +58,10 @@ RRF_K_MAC_DINH = 60
 TRONG_SO_MAC_DINH = {
     "clip": 1.0,
     "ocr": 0.6,
+    "ocr_fts": 0.6,
     "asr": 0.6,
     "object": 0.4,
+    "caption": 0.5,
 }
 
 _CACHED: dict | None = None
@@ -140,6 +142,37 @@ def trong_so_nguon() -> dict[str, float]:
     ket_qua = dict(TRONG_SO_MAC_DINH)
     ket_qua.update({str(k): float(v) for k, v in khai_bao.items()})
     return ket_qua
+
+
+def trong_so_theo_dang(task: str | None = None) -> dict[str, float]:
+    """Trọng số RRF do Việc 6 đo được, đọc từ config/rrf_weights.yaml.
+
+    Chưa có tệp đó (hoặc dạng câu chưa đo được) thì lùi về trong_so_nguon()
+    của settings.yaml. KHÔNG bịa số: TRAKE hiện chưa đo được nên nó dùng bộ
+    mặc định, và điều đó phải nhìn thấy được chứ không giấu đi.
+    """
+    tep = CONFIG_DIR / "rrf_weights.yaml"
+    if not tep.exists():
+        return trong_so_nguon()
+
+    with tep.open("r", encoding="utf-8") as f:
+        noi_dung = yaml.safe_load(f) or {}
+
+    if task:
+        theo_dang = noi_dung.get("theo_dang") or {}
+        rieng = theo_dang.get(str(task))
+        if isinstance(rieng, dict) and rieng:
+            ket_qua = trong_so_nguon()
+            ket_qua.update({str(k): float(v) for k, v in rieng.items()})
+            return ket_qua
+
+    chung = noi_dung.get("mac_dinh")
+    if isinstance(chung, dict) and chung:
+        ket_qua = trong_so_nguon()
+        ket_qua.update({str(k): float(v) for k, v in chung.items()})
+        return ket_qua
+
+    return trong_so_nguon()
 
 
 def so_dong_toi_da() -> int:

@@ -26,14 +26,38 @@ tra_cuu:
   # Đổi nhanh mà không sửa tệp:  $env:AIC_NHANH_CHU = "dich"
   nhanh_ma_hoa_chu: da_ngu
 
+# ---------------------------------------------------------------------------
+# Việc 4 — xếp hạng lại top-100 bằng mô hình mạnh hơn
+# ---------------------------------------------------------------------------
+rerank:
+  mo_hinh: ViT-L-14
+  pretrained: laion2b_s32b_b82k
+  # thiet_bi: cpu        # bỏ trống thì tự chọn cuda nếu có
+  so_dau: 100
+  cach_gop: thay         # thay | rrf — đo cả hai trên dev v2 rồi hãy chốt
+
+# ---------------------------------------------------------------------------
+# Việc 5 — mở rộng truy vấn Việt -> Anh. CHỈ áp cho nhánh CLIP.
+# ---------------------------------------------------------------------------
+mo_rong_truy_van:
+  # tu_dien  tra bảng, offline, tất định — mốc sàn để so
+  # marian   dùng lại nhánh "dich" của clip_encoder
+  # llm      gọi mô hình ngôn ngữ, cần ANTHROPIC_API_KEY trong .env
+  nguon: tu_dien
+  toi_da_bien_the: 2
+
 gop_ket_qua:
   cach_gop: rrf              # Reciprocal Rank Fusion
   rrf_k: 60
+  # Đây là bộ KHỞI ĐẦU. Việc 6 quét lưới trên dev v2 rồi ghi bộ đã đo vào
+  # config/rrf_weights.yaml; rank/config.trong_so_theo_dang() ưu tiên tệp đó.
   trong_so:
     clip: 1.0
     ocr: 0.6
+    ocr_fts: 0.6
     asr: 0.6
     object: 0.4
+    caption: 0.5
 
 loc_trung:
   # Luật chốt Việc 4: mỗi video tối đa MỘT kết quả trong mỗi cửa sổ 10 giây,
