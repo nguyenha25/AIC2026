@@ -41,6 +41,25 @@ if not _data_root_env:
         "Windows nhớ viết gạch chéo xuôi: D:/aic-data"
     )
 
+# Bắt lỗi .env dính dòng TRƯỚC khi nó biến thành FileNotFoundError khó hiểu
+# ở tận đáy ngăn xếp.
+#
+# Chuyện đã xảy ra thật: .env không có ký tự xuống dòng ở cuối, nên
+#     Add-Content .env "ANTHROPIC_API_KEY=..."
+# nối thẳng vào cuối dòng DATA_ROOT, thành:
+#     DATA_ROOT=D:/aic-dataANTHROPIC_API_KEY=sk-ant-...
+# Triệu chứng duy nhất là một đường dẫn lạ trong thông báo lỗi ở tệp khác.
+if "=" in _data_root_env:
+    raise ValueError(
+        f"DATA_ROOT có dấu bằng bên trong: {_data_root_env!r}\n"
+        "Gần như chắc chắn là .env bị dính hai dòng vào nhau — Add-Content nối "
+        "thẳng vào cuối dòng cũ khi tệp không kết thúc bằng ký tự xuống dòng.\n"
+        "Sửa bằng PowerShell:\n"
+        '    Set-Content .env "DATA_ROOT=D:/aic-data"\n'
+        '    Add-Content .env "ANTHROPIC_API_KEY=sk-ant-..."\n'
+        "    type .env        # phải thấy HAI dòng riêng biệt"
+    )
+
 DATA_ROOT = Path(_data_root_env).expanduser()
 
 # --- Ba tầng ---------------------------------------------------------------
@@ -138,10 +157,51 @@ def clip_features_file(video_id: str) -> Path:
     return resolve(CLIP_FEATURES_DIR, video_id, ".npy") or CLIP_FEATURES_DIR / f"{video_id}.npy"
 
 
+# ---------------------------------------------------------------------------
+# Tệp đánh số bên trong thư mục của một video
+#
+# BTC KHÔNG đệm số thống nhất. Đo thật trên máy nhóm:
+#     raw/keyframes/Keyframes_L30/keyframes/L30_V023/001.jpg   <- BA chữ số
+# Bản cũ ở đây gõ cứng f"{n:04d}.jpg" nên trả về 0001.jpg và mọi phép tra ảnh
+# đều trượt. Triệu chứng rất dễ đọc nhầm: các việc 4, 4b, 10, 11, 12 chỉ báo
+# "thiếu ảnh", trông y như chưa tải shard, chứ không báo lỗi gì.
+#
+# Nên không gõ cứng nữa: quét thư mục MỘT LẦN, lấy số trong tên tệp, rồi tra
+# bằng bảng. Cách này chịu được mọi kiểu đệm, kể cả khi BTC đổi giữa chừng.
+# ---------------------------------------------------------------------------
+
+_bang_tep_cache: dict = {}
+
+
+def bang_tep_theo_so(thu_muc: Path, duoi: str) -> dict[int, Path]:
+    """{số trong tên tệp: đường dẫn}. Quét một lần rồi giữ trong RAM."""
+    khoa = (str(thu_muc), duoi.lower())
+    if khoa in _bang_tep_cache:
+        return _bang_tep_cache[khoa]
+
+    bang: dict[int, Path] = {}
+    if thu_muc.is_dir():
+        for item in thu_muc.iterdir():
+            if not item.is_file() or item.suffix.lower() != duoi.lower():
+                continue
+            khop = re.search(r"(\d+)", item.stem)
+            if khop:
+                bang[int(khop.group(1))] = item
+
+    _bang_tep_cache[khoa] = bang
+    return bang
+
+
+def _tep_theo_so(thu_muc: Path, so: int, duoi: str) -> Path:
+    """Tệp mang số `so`. Không thấy thì trả đường dẫn bốn chữ số để báo lỗi."""
+    tim_duoc = bang_tep_theo_so(thu_muc, duoi).get(int(so))
+    return tim_duoc if tim_duoc is not None else thu_muc / f"{so:04d}{duoi}"
+
+
 def objects_file(video_id: str, keyframe_n: int) -> Path:
-    """raw/objects/L21_V001/0047.json — số thứ tự giữ đủ bốn chữ số"""
+    """raw/objects/L21_V001/0047.json — đệm bao nhiêu chữ số cũng tra được"""
     base = resolve(OBJECTS_DIR, video_id) or OBJECTS_DIR / video_id
-    return base / f"{keyframe_n:04d}.json"
+    return _tep_theo_so(base, keyframe_n, ".json")
 
 
 def media_info_file(video_id: str) -> Path:
@@ -150,9 +210,9 @@ def media_info_file(video_id: str) -> Path:
 
 
 def keyframe_image(video_id: str, keyframe_n: int) -> Path:
-    """raw/keyframes/L21_V001/0047.jpg"""
+    """raw/keyframes/L21_V001/047.jpg — BTC đệm ba chữ số, KHÔNG phải bốn."""
     base = resolve(KEYFRAMES_DIR, video_id) or KEYFRAMES_DIR / video_id
-    return base / f"{keyframe_n:04d}.jpg"
+    return _tep_theo_so(base, keyframe_n, ".jpg")
 
 
 def video_file(video_id: str) -> Path:
@@ -247,6 +307,7 @@ def _scan(folder: Path, suffix: str | None) -> dict[str, Path]:
 def refresh_scan_cache() -> None:
     """Gọi sau khi vừa giải nén thêm dữ liệu trong cùng một lần chạy."""
     _scan_cache.clear()
+    _bang_tep_cache.clear()
 
 
 def resolve(folder: Path, video_id: str, suffix: str | None = None) -> Path | None:
