@@ -122,6 +122,17 @@ TEN_TEP_DEM = "mo_rong_truy_van.json"
 PHIEN_BAN_DEM = 2
 
 
+def con_tieng_viet(s: str) -> bool:
+    """Chuỗi còn chữ cái tiếng Việt có dấu hay không.
+
+    Dùng để soát BẢN DỊCH: mô hình dịch trả lại nguyên câu tiếng Việt là
+    chuyện có thật (VietAI/envit5 thỉnh thoảng chép lại đầu vào). Chuỗi đó
+    KHÔNG rỗng nên mọi phép kiểm "có trả về gì không" đều cho qua, rồi cả
+    mạch chạy ở mốc sàn mà không ai biết.
+    """
+    return any("\u00c0" <= ch <= "\u1ef9" for ch in (s or ""))
+
+
 def chuan_hoa(s: str) -> str:
     """Hạ chữ thường bằng Python, GIỮ DẤU. Xem objects_index.chuan_hoa()."""
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
@@ -298,10 +309,26 @@ def dich_bang_marian(cau: str) -> KetQuaMoRong:
             cau, [cau.strip()], "nguyen_ban", [f"Dịch hỏng: {loi}"]
         )
 
+    # envit5 là mô hình HAI CHIỀU và thỉnh thoảng trả lại y nguyên đầu vào.
+    # Bỏ mọi tiền tố tác vụ trước khi soát.
+    for tien_to in ("en:", "vi:", "en :", "vi :"):
+        if ban_dich.lower().startswith(tien_to):
+            ban_dich = ban_dich[len(tien_to):].strip()
+
     if not ban_dich:
         return KetQuaMoRong(
             cau, [cau.strip()], "nguyen_ban",
             ["Bộ dịch trả về chuỗi rỗng."],
+        )
+
+    if con_tieng_viet(ban_dich):
+        return KetQuaMoRong(
+            cau, [cau.strip()], "nguyen_ban",
+            [
+                f"Bộ dịch trả lại tiếng Việt: {ban_dich!r}. Bản dịch KHÔNG rỗng "
+                "nên phép kiểm 'có trả về gì không' cho qua, nhưng nhánh CLIP "
+                "vẫn nhận tiếng Việt — đó là mốc sàn."
+            ],
         )
 
     return KetQuaMoRong(cau, [ban_dich, f"a photo of {ban_dich}"], "marian")
@@ -342,7 +369,7 @@ def dich_bang_llm(cau: str, goi_llm: Callable[[str], str] | None = None) -> KetQ
         kq.ghi_chu.append(f"LLM lỗi ({loi}) — đã lùi về nhánh tu_dien.")
         return kq
 
-    cum = _doc_mang_json(tra_loi)
+    cum = [c for c in _doc_mang_json(tra_loi) if not con_tieng_viet(c)]
     if not cum:
         kq = dich_bang_tu_dien(cau)
         kq.ghi_chu.append("LLM trả về thứ không đọc được — đã lùi về tu_dien.")
@@ -563,9 +590,14 @@ def mo_rong(
 
     ket_qua = _NGUON[nguon](cau_hoi)
 
-    # Nguồn tu_dien được phép trả "nguyen_ban" khi không nhận ra từ nào — đó
-    # là hành vi bình thường của nó, không phải lùi nhánh.
-    da_lui = ket_qua.nguon not in (nguon, "nguyen_ban")
+    # CHỈ tu_dien được phép trả "nguyen_ban": nó là bảng tra, không nhận ra từ
+    # nào thì đành chịu, đó là hành vi bình thường.
+    #
+    # Với marian và llm thì "nguyen_ban" nghĩa là HỎNG — mô hình dịch có mà
+    # không dịch được. Miễn trừ nhầm cho cả hai nguồn này là lý do phép kiểm
+    # bat_buoc chưa từng nổ dù bộ dịch trả lại nguyên tiếng Việt.
+    duoc_mien = {nguon} | ({"nguyen_ban"} if nguon == "tu_dien" else set())
+    da_lui = ket_qua.nguon not in duoc_mien
 
     if da_lui and bat_buoc:
         raise LuiNhanhKhongMongMuon(

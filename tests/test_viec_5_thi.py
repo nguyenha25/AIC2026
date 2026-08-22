@@ -311,3 +311,56 @@ def test_marian_hong_thi_bao_ly_do_chu_khong_im_lang(monkeypatch):
     kq = query_expand.dich_bang_marian("nhấc bánh khỏi rổ")
     assert kq.nguon == "nguyen_ban"
     assert any("mô hình chưa tải xong" in c for c in kq.ghi_chu)
+
+
+def test_ban_dich_tra_lai_tieng_viet_bi_coi_la_HONG(monkeypatch):
+    """VietAI/envit5 là mô hình HAI CHIỀU và thỉnh thoảng chép lại đầu vào.
+
+    Chuỗi đó KHÔNG rỗng nên phép kiểm 'có trả về gì không' cho qua, rồi cả
+    mạch chạy ở mốc sàn. Đã cắn thật: 'một người đàn ông cầm ô' dịch ra chính
+    nó, và cả 6 sự kiện TRAKE chạy bằng tiếng Việt.
+    """
+    from aic2026 import query_expand
+
+    class Echo:
+        def encode_text(self, t):
+            pass
+
+        def ban_dich_gan_nhat(self):
+            return "một người đàn ông cầm ô"
+
+    monkeypatch.setattr(query_expand, "_BO_DICH", Echo())
+    kq = query_expand.dich_bang_marian("một người đàn ông cầm ô")
+    assert kq.nguon == "nguyen_ban"
+    assert any("trả lại tiếng Việt" in c for c in kq.ghi_chu)
+
+    # và khi người chạy ĐÃ chỉ định marian thì phải nổ, không lùi âm thầm
+    with pytest.raises(query_expand.LuiNhanhKhongMongMuon):
+        query_expand.mo_rong(
+            "một người đàn ông cầm ô", nguon="marian", dung_dem=False, bat_buoc=True
+        )
+
+
+def test_bo_tien_to_tac_vu_cua_envit5(monkeypatch):
+    from aic2026 import query_expand
+
+    class CoTienTo:
+        def encode_text(self, t):
+            pass
+
+        def ban_dich_gan_nhat(self):
+            return "en: a man holding an umbrella"
+
+    monkeypatch.setattr(query_expand, "_BO_DICH", CoTienTo())
+    kq = query_expand.dich_bang_marian("một người đàn ông cầm ô")
+    assert kq.nguon == "marian"
+    assert kq.cum_chinh == "a man holding an umbrella"
+
+
+def test_con_tieng_viet():
+    from aic2026.query_expand import con_tieng_viet
+
+    assert con_tieng_viet("nhấc bánh khỏi rổ")
+    assert con_tieng_viet("Đèo Tà Pứa")
+    assert not con_tieng_viet("a man lifting a cake out of a basket")
+    assert not con_tieng_viet("")
