@@ -269,3 +269,62 @@ def test_bang_nhan_that_doc_duoc_ca_hai_muc():
     assert len(bang) > 100
     assert bang.tim_nhan("biển số xe") == ["Vehicle registration plate"]
     assert bang.tim_nhan("cảnh quay trong nhà") == []
+
+
+# ---------------------------------------------------------------------------
+# Việc 6 — trọng số tách theo dạng câu, nối vào mạch chính
+# ---------------------------------------------------------------------------
+
+def test_trong_so_doc_duoc_theo_dang(tmp_path, monkeypatch):
+    """config/rrf_weights.yaml phải THẬT SỰ tới được chỗ gộp RRF.
+
+    Trước đây trong_so_theo_dang() có tồn tại nhưng hop_nhat.tim_ung_vien_gop()
+    vẫn dùng bảng gõ cứng — viết tệp yaml xong không có gì thay đổi.
+    """
+    import yaml
+
+    from aic2026.rank import config as cfg
+
+    tep = tmp_path / "rrf_weights.yaml"
+    tep.write_text(
+        yaml.safe_dump(
+            {
+                "mac_dinh": {"clip": 1.0, "ocr_fts": 1.0, "asr": 0.0},
+                "theo_dang": {
+                    "kis": {"clip": 1.0, "ocr_fts": 1.0, "asr": 0.0},
+                    "qa": {"clip": 1.0, "ocr_fts": 0.0, "asr": 1.0},
+                    "trake": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+
+    kis = cfg.trong_so_theo_dang("kis")
+    qa = cfg.trong_so_theo_dang("qa")
+
+    # ASR chạy một mình được KIS 0,0000 nhưng QA 0,1667 — trọng số phải khác nhau
+    assert kis["asr"] == 0.0 and qa["asr"] == 1.0
+    # OCR ngược lại: KIS 0,3000, QA 0,0000
+    assert kis["ocr_fts"] == 1.0 and qa["ocr_fts"] == 0.0
+
+    # dạng chưa đo được thì lùi về bộ mặc định, KHÔNG bịa số
+    assert cfg.trong_so_theo_dang("trake")["clip"] == 1.0
+
+
+def test_khong_co_tep_thi_lui_ve_settings(tmp_path, monkeypatch):
+    from aic2026.rank import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)     # thư mục rỗng
+    ts = cfg.trong_so_theo_dang("kis")
+    assert ts == cfg.trong_so_nguon()
+
+
+def test_tim_ung_vien_gop_nhan_dang_cau():
+    """Chữ ký phải có dang_cau, không thì mạch chính không truyền được dạng."""
+    import inspect
+
+    from aic2026.rank.hop_nhat import tim_ung_vien_gop
+
+    assert "dang_cau" in inspect.signature(tim_ung_vien_gop).parameters

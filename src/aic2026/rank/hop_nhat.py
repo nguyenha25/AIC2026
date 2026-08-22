@@ -295,6 +295,7 @@ def tim_ung_vien_gop(
     dung_caption: bool = False,
     mo_rong_truy_van: bool = False,
     nguon_mo_rong: str | None = None,
+    dang_cau: str | None = None,
     trong_so=None,
     k_rrf: int = 60,
 ):
@@ -328,6 +329,23 @@ def tim_ung_vien_gop(
     Anh vào nhánh OCR/ASR là bảo đảm 0 kết quả — chữ trên hình và lời nói
     trong video đều là tiếng Việt.
     """
+    # VIỆC 6 — TRỌNG SỐ TÁCH THEO DẠNG CÂU.
+    #
+    # Đo trên 24 câu dev: nhánh ASR chạy một mình được KIS 0,0000 nhưng
+    # Q&A 0,1667. Nhánh OCR ngược lại: KIS 0,3000, Q&A 0,0000. Dùng CHUNG một
+    # vector trọng số cho cả hai dạng là bắt mỗi dạng gánh nhánh vô dụng của
+    # dạng kia — đo được: thêm ASR vào KIS làm điểm TỤT 0,3833 -> 0,3500.
+    #
+    # Thứ tự ưu tiên: tham số truyền vào > config/rrf_weights.yaml theo dạng
+    # > settings.yaml > bảng mặc định ở đầu tệp này.
+    if trong_so is None:
+        try:
+            from aic2026.rank.config import trong_so_theo_dang
+
+            trong_so = trong_so_theo_dang(dang_cau)
+        except Exception:
+            trong_so = TRONG_SO_MAC_DINH
+
     trong_so = trong_so or TRONG_SO_MAC_DINH
 
     def _tim(cau_hoi: str, so_ung_vien: int):
