@@ -87,19 +87,40 @@ from scripts.run_scoring import build_gt, doc_dev_questions   # noqa: E402
 LUOI_THO = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 BUOC_TINH = 0.1
 
-NHANH = ["ocr_fts", "asr", "object", "caption"]
+NHANH = ["ocr_fts", "asr", "object", "caption", "clip_l"]
 
 TEP_TRONG_SO = CONFIG_DIR / "rrf_weights.yaml"
 
 _THAM_CHIEU: dict = {}
+
+# Đếm ứng viên KHÔNG có ảnh khi rerank. Đây là con số quyết định phép đo có
+# đọc được hay không — xem cảnh báo ở cuối bước 1.
+THONG_KE_RERANK = {"da_xep": 0, "thieu_anh": 0}
 
 
 # ---------------------------------------------------------------------------
 # Bước 1 — tra kho một lần, lưu bảng xếp hạng thô
 # ---------------------------------------------------------------------------
 
-def dung_cac_nguon(dung_caption: bool, dung_object: bool):
-    """Trả về {tên nhánh: hàm (câu chữ, số ứng viên) -> list[dict]}."""
+def dung_cac_nguon(
+    dung_caption: bool,
+    dung_object: bool,
+    mo_rong_clip: bool = False,
+    loc_vat_the: bool = False,
+    loc_token_hiem_ocr: bool = False,
+    dung_clip_l: bool = False,
+    rerank: bool = False,
+    rerank_so_dau: int = 100,
+):
+    """Trả về {tên nhánh: hàm (câu chữ, số ứng viên) -> list[dict]}.
+
+    mo_rong_clip=False: nhánh CLIP nhận NGUYÊN câu tiếng Việt. Đây là MỐC NỀN.
+    mo_rong_clip=True : nhánh CLIP nhận cụm tiếng Anh của Việc 5.
+
+    Bản đầu luôn gọi thẳng tim_ung_vien_clip, nên đặt $env:AIC_NGUON_MO_RONG
+    rồi chạy lại chỉ ra SỐ GIỐNG HỆT — Việc 5 chưa từng được đo, mà không có
+    dấu hiệu gì báo điều đó.
+    """
     from aic2026.index.fts_index import TextSearchIndex
     from aic2026.paths import FTS_DIR
     from aic2026.rank.hop_nhat import hit_sang_dict, no_khoang_asr
@@ -107,22 +128,86 @@ def dung_cac_nguon(dung_caption: bool, dung_object: bool):
     kho_chu = TextSearchIndex(FTS_DIR / "text.sqlite")
     nguon = {}
 
-    def _clip(cau, k):
-        from aic2026.rank.search import tim_ung_vien_clip
+    if mo_rong_clip:
+        from aic2026.query_expand import tim_ung_vien_clip_mo_rong
 
-        return [hit_sang_dict(h) for h in tim_ung_vien_clip(cau, k)]
+        _tim = tim_ung_vien_clip_mo_rong()
+    else:
+        from aic2026.rank.search import tim_ung_vien_clip as _tim
+
+    if rerank:
+        # VIỆC 4 — xếp lại top-N bằng mô hình mạnh hơn.
+        #
+        # Bọc riêng nhánh CLIP: rerank chấm ảnh với câu chữ, nên nó chỉ có
+        # nghĩa cho nhánh ảnh. Bọc cả OCR/ASR là đè lên tín hiệu chữ bằng tín
+        # hiệu ảnh — hai thứ khác nhau.
+        from aic2026.rerank import Reranker
+
+        _bo_xep = Reranker()
+        _tim_tho = _tim
+
+        def _tim(cau, k):
+            da_xep, bao_cao = _bo_xep.xep_lai(
+                cau, _tim_tho(cau, k), so_dau=rerank_so_dau
+            )
+            THONG_KE_RERANK["da_xep"] += bao_cao.so_da_xep_lai
+            THONG_KE_RERANK["thieu_anh"] += bao_cao.so_thieu_anh
+            return da_xep
+
+    def _clip(cau, k):
+        return [hit_sang_dict(h) for h in _tim(cau, k)]
 
     nguon["clip"] = _clip
-    nguon["ocr_fts"] = lambda cau, k: kho_chu.search_text(cau, top_k=k)
+    nguon["ocr_fts"] = lambda cau, k: kho_chu.search_text(
+        cau, top_k=k, loc_hiem=loc_token_hiem_ocr
+    )
     nguon["asr"] = lambda cau, k: [
         hit_sang_dict(h) for h in no_khoang_asr(kho_chu.search_asr(cau, top_k=k))
     ]
 
-    if dung_object:
+    if dung_object or loc_vat_the:
         from aic2026.index.objects_index import ObjectSearchIndex
 
         kho_vt = ObjectSearchIndex()
-        nguon["object"] = lambda cau, k: kho_vt.tra_bang_cau_viet(cau, top_k=k)
+        if dung_object:
+            nguon["object"] = lambda cau, k: kho_vt.tra_bang_cau_viet(cau, top_k=k)
+
+    if loc_vat_the:
+        # Bọc MỌI nhánh: bộ lọc chạy trước, nhánh nào cũng chỉ thấy phần khung
+        # còn lại. Đây là điểm khác căn bản với nhánh xếp hạng — nó tác động
+        # lên cả CLIP, OCR và ASR chứ không chỉ góp thêm một bảng.
+        def _boc(ham):
+            def f(cau, k):
+                ra = ham(cau, k)
+                tap = kho_vt.khung_chua(cau)
+                if tap is None:
+                    return ra
+                loc = [
+                    d for d in ra
+                    if (str(d["video_id"]), round(float(d.get("pts_time") or 0), 3))
+                    in tap
+                ]
+                return loc or ra          # lọc sạch thì trả về nguyên
+            return f
+
+        nguon = {ten: _boc(h) for ten, h in nguon.items()}
+
+    if dung_clip_l:
+        from aic2026.index.clip_l_index import tim as _tim_clip_l
+
+        if mo_rong_clip:
+            from aic2026.query_expand import mo_rong as _mr
+
+            def _clip_l(cau, k):
+                try:
+                    cau = _mr(cau).cum_chinh
+                except Exception:
+                    pass
+                return _tim_clip_l(cau, k)
+        else:
+            _clip_l = _tim_clip_l
+
+        nguon["clip_l"] = _clip_l
 
     if dung_caption:
         from aic2026.enrich.caption import CaptionSearchIndex
@@ -245,9 +330,20 @@ def main() -> int:
     p.add_argument("--k-rrf", type=int, default=60)
     p.add_argument("--cua-so-giay", type=float, default=10.0)
     p.add_argument("--khong-object", action="store_true")
+    p.add_argument("--loc-vat-the", action="store_true",
+                   help="Việc 3 làm BỘ LỌC: thu hẹp ứng viên trước khi gộp")
+    p.add_argument("--clip-l", action="store_true",
+                   help="Việc 8: bật nhánh chỉ mục ảnh thứ hai (ViT-L-14)")
+    p.add_argument("--loc-token-hiem", action="store_true",
+                   help="nhánh OCR chỉ tra token HIẾM, bỏ token phổ biến")
+    p.add_argument("--rerank", action="store_true",
+                   help="Việc 4: xếp lại top-N bằng mô hình mạnh hơn")
+    p.add_argument("--rerank-so-dau", type=int, default=100)
     p.add_argument("--khong-caption", action="store_true")
     p.add_argument("--min", action="store_true", help="quét tinh quanh bản đang chốt")
     p.add_argument("--chi-do-rieng", action="store_true")
+    p.add_argument("--nguon-mo-rong", choices=["tu_dien", "marian", "llm"],
+                   default=None, help="bật Việc 5 cho nhánh CLIP")
     args = p.parse_args()
 
     cau_hoi = doc_dev_questions(Path(args.tep))
@@ -265,15 +361,87 @@ def main() -> int:
         "hơn cửa sổ đáp án. Làm Việc 9 trước.\n"
     )
 
+    mo_rong = bool(args.nguon_mo_rong)
+    if mo_rong:
+        import os
+
+        os.environ["AIC_NGUON_MO_RONG"] = args.nguon_mo_rong
+
+        # Dịch thử MỘT câu trước: nhánh hỏng thì phải biết ngay, không phải
+        # sau khi in ra một bảng số trông như đã đo xong.
+        from aic2026.query_expand import LuiNhanhKhongMongMuon, mo_rong as _mr
+
+        try:
+            thu = _mr("một người đàn ông cầm ô", bat_buoc=True)
+        except LuiNhanhKhongMongMuon as loi:
+            print(f"NHÁNH DỊCH {args.nguon_mo_rong.upper()} KHÔNG DÙNG ĐƯỢC\n  {loi}")
+            return 1
+        print(f"Thử dịch: 'một người đàn ông cầm ô' -> {thu.cum_chinh!r}")
+
+    if args.rerank:
+        # Thử xếp lại MỘT lượt trước khi chạy cả mẻ. Rerank hỏng thì phải biết
+        # ngay, không phải sau vài phút và một bảng số trông như đã đo xong.
+        try:
+            from aic2026.rerank import Reranker
+
+            _thu = Reranker()
+            _thu.ma_hoa_cau("a man holding an umbrella")
+            print(f"Rerank: {_thu.ten_day_du} — nạp được")
+        except Exception as loi:
+            print(
+                f"RERANK KHÔNG DÙNG ĐƯỢC: {type(loi).__name__}: {loi}\n"
+                "  Cần: pip install open-clip-torch\n"
+                "  Dừng ở đây thay vì chạy tiếp rồi in một bảng số giống hệt\n"
+                "  lượt không rerank — đó là phép đo giả."
+            )
+            return 1
+
     nguon = dung_cac_nguon(
-        dung_caption=not args.khong_caption, dung_object=not args.khong_object
+        dung_caption=not args.khong_caption,
+        dung_object=not args.khong_object,
+        mo_rong_clip=mo_rong,
+        loc_vat_the=args.loc_vat_the,
+        loc_token_hiem_ocr=args.loc_token_hiem,
+        dung_clip_l=args.clip_l,
+        rerank=args.rerank,
+        rerank_so_dau=args.rerank_so_dau,
     )
-    print(f"Nhánh bật: {', '.join(nguon)}\n")
+    print(
+        f"Nhánh bật: {', '.join(nguon)} | nhánh CLIP: "
+        + (f"mở rộng qua {args.nguon_mo_rong}" if mo_rong
+           else "NGUYÊN câu tiếng Việt (mốc nền)")
+        + (" | LỌC theo vật thể hiếm" if args.loc_vat_the else "")
+        + (" | OCR chỉ token hiếm" if args.loc_token_hiem else "")
+        + (" | + nhánh clip_l" if args.clip_l else "")
+        + (f" | RERANK top-{args.rerank_so_dau}" if args.rerank else "")
+        + "\n"
+    )
 
     print("Bước 1 — tra kho một lần cho mỗi câu, mỗi nhánh")
     bat_dau = time.perf_counter()
     kho_tam = tra_kho_mot_lan(cau_hoi, nguon, args.so_ung_vien)
     print(f"  xong sau {time.perf_counter() - bat_dau:.0f} giây\n")
+
+    if args.rerank:
+        tong = THONG_KE_RERANK["da_xep"] + THONG_KE_RERANK["thieu_anh"]
+        ti_le = THONG_KE_RERANK["thieu_anh"] / tong if tong else 0.0
+        print(
+            f"  Rerank: xếp lại {THONG_KE_RERANK['da_xep']:,} ứng viên, "
+            f"{THONG_KE_RERANK['thieu_anh']:,} thiếu ảnh ({ti_le:.0%})\n"
+        )
+        if ti_le > 0.20:
+            print(
+                "  " + "!" * 68 + "\n"
+                f"  {ti_le:.0%} ỨNG VIÊN KHÔNG CÓ ẢNH TRÊN MÁY NÀY.\n\n"
+                "  Rerank đẩy ứng viên thiếu ảnh xuống CUỐI, bất kể nó đúng hay sai.\n"
+                "  Câu nào có video đáp án không nằm trong shard của máy này thì ứng\n"
+                "  viên đúng bị đẩy xuống một cách máy móc.\n\n"
+                "  Con số dưới đây ĐO 'MÁY NÀY CÓ ẢNH KHÔNG', KHÔNG đo rerank tốt hay\n"
+                "  xấu. ĐỪNG ghi vào sổ điểm.\n\n"
+                "  Muốn đo đúng: chạy trên máy giữ shard chứa phần lớn câu dev, hoặc\n"
+                "  lọc bộ dev xuống những câu có ảnh rồi truyền qua --tep.\n"
+                "  " + "!" * 68 + "\n"
+            )
 
     # -- đo riêng từng nhánh ------------------------------------------------
     print("Bước 2 — điểm của TỪNG nhánh chạy một mình")

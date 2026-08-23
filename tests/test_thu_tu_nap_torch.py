@@ -71,3 +71,39 @@ def test_thieu_torch_khong_lam_do_script(ten):
         f"{ten}: import torch phải nằm trong try/except ImportError, "
         "để máy chưa cài torch nhận được thông báo tử tế thay vì traceback."
     )
+
+
+def test_test_khong_import_thu_vien_nang_giua_me():
+    """Test KHÔNG được nạp open_clip/torch/faiss giữa một mẻ pytest.
+
+    Mẻ test nạp pandas từ đầu (frame_map). Một test nạp open_clip sau đó là
+    0xC0000005 — sập cả mẻ, không traceback Python nào cho biết vì sao.
+
+    Đã cắn thật: pytest.importorskip("aic2026.index.encode.clip_encoder") làm
+    sập mẻ 202 test ngay ở test cuối. Cần kiểm mã của module nặng thì ĐỌC
+    NGUỒN bằng ast, đừng import.
+    """
+    import re
+    from pathlib import Path
+
+    thu_muc = Path(__file__).resolve().parent
+    cam = re.compile(
+        r"^\s*(?:import|from)\s+(?:open_clip|faiss|onnxruntime)\b"
+        r"|importorskip\(\s*[\"'](?:aic2026\.index\.encode|open_clip|faiss)",
+        re.MULTILINE,
+    )
+
+    vi_pham = []
+    for tep in sorted(thu_muc.glob("test_*.py")):
+        if tep.name == Path(__file__).name:
+            continue
+        ma = "\n".join(
+            d for d in tep.read_text(encoding="utf-8").split('"""')[::2]
+        )
+        if cam.search(ma):
+            vi_pham.append(tep.name)
+
+    assert not vi_pham, (
+        f"nạp thư viện nặng giữa mẻ test: {vi_pham}. "
+        "Dùng ast đọc mã nguồn thay vì import."
+    )

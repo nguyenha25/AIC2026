@@ -285,3 +285,47 @@ def test_dong_tu_duoc_giu_lai():
     assert "lifting" in dich_bang_tu_dien("nhấc bánh").cum_chinh
     assert "placing" in dich_bang_tu_dien("đặt bánh").cum_chinh
     assert "lid" in dich_bang_tu_dien("đậy nắp").cum_chinh
+
+
+def test_tach_su_kien_dinh_dang_THAT_cua_btc():
+    """Đề THẬT của BTC đánh dấu E1/E2/E3 ở đầu dòng, dòng đầu là BỐI CẢNH.
+
+    Bản đầu chỉ xử lý định dạng "(1)(2)(3)" một dòng của bộ dev tự soạn, nên
+    trên đề thật nó cắt dòng bối cảnh theo dấu phẩy rồi dừng — không bao giờ
+    chạm tới E1. TRAKE sẽ hỏng trên đề thật bất kể mật độ khung.
+    """
+    from aic2026.trake_align import tach_su_kien
+
+    de = (
+        "Đoạn video bắt đầu bằng ảnh cận đầu một con lân trắng, mũi đỏ, "
+        "bên cạnh lá cờ trắng viền đỏ.\n"
+        "E1 Khoảnh khắc đầu tiên xuất hiện đầy đủ hai con rồng vàng đang xoay vòng.\n"
+        "E2 Khoảnh khắc đầu tiên con lân hoàn tất cú xoay người trên các thanh trụ.\n"
+        "E3 Khoảnh khắc đầu tiên dùi chạm vào kẻng đồng múa lân."
+    )
+    cum = tach_su_kien(de)
+
+    assert len(cum) == 3
+    assert cum[0].startswith("Khoảnh khắc đầu tiên xuất hiện")
+    assert "kẻng đồng" in cum[2]
+    # Dòng bối cảnh KHÔNG được thành một mốc
+    assert not any("Đoạn video bắt đầu" in c for c in cum)
+
+
+def test_tach_su_kien_chiu_duoc_ca_hai_dinh_dang():
+    from aic2026.trake_align import tach_su_kien
+
+    assert tach_su_kien("E1: nhấc bánh\nE2: đặt bánh\nE3: đậy nắp") == [
+        "nhấc bánh", "đặt bánh", "đậy nắp"
+    ]
+    assert tach_su_kien("Các mốc: (1) nhấc bánh, (2) đặt bánh") == [
+        "nhấc bánh", "đặt bánh"
+    ]
+
+
+def test_su_kien_ngan_khong_bi_xoa():
+    """Bộ lọc len>=2 của bản đầu xoá sạch sự kiện một ký tự rồi rơi về nhánh
+    dự phòng trả nguyên cả câu lặp N lần — N mốc giống hệt nhau."""
+    from aic2026.trake_align import tach_su_kien
+
+    assert tach_su_kien("Các khoảnh khắc: (1) A, (2) B", so_moc=3) == ["A", "B", "B"]

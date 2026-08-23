@@ -66,6 +66,10 @@ def main() -> int:
     p.add_argument("--liet-ke-nhan", action="store_true")
     p.add_argument("--thu", default=None, help="tra thử một câu tiếng Việt")
     p.add_argument("--top", type=int, default=15)
+    p.add_argument("--tan-suat", action="store_true",
+                   help="in nhãn hiếm nhất và phổ biến nhất")
+    p.add_argument("--giai-thich-loc", default=None, metavar="CÂU",
+                   help="xem bộ lọc giữ lại bao nhiêu khung cho câu này")
     args = p.parse_args()
 
     if args.liet_ke_nhan:
@@ -74,22 +78,73 @@ def main() -> int:
 
     kho = ObjectSearchIndex()
 
+    if args.tan_suat:
+        ts = kho.tan_suat_nhan()
+        tong = kho.tong_so_khung()
+        print(f"{len(ts)} nhãn khác nhau trên {tong:,} khung\n")
+        xep = sorted(ts.items(), key=lambda t: -t[1])
+        print("PHỔ BIẾN NHẤT — lọc theo mấy nhãn này không thu hẹp được gì:")
+        for n, c in xep[:12]:
+            print(f"  {c:>8,}  {c/tong:>6.1%}  {n}")
+        print("\nHIẾM NHẤT (từ 200 khung trở lên) — đây mới là thứ đáng lọc:")
+        for n, c in [x for x in xep if x[1] >= 200][-15:]:
+            print(f"  {c:>8,}  {c/tong:>6.1%}  {n}")
+        return 0
+
+    if args.giai_thich_loc:
+        gt = kho.giai_thich_loc(args.giai_thich_loc)
+        print(f"Câu hỏi: {args.giai_thich_loc}\n")
+        print(f"{'khái niệm':<24}{'số khung':>10}{'tỉ lệ':>9}  nhãn")
+        for k in gt["khai_niem"]:
+            print(f"  {k['khai_niem']:<22}{k['so_khung']:>10,}{k['ti_le']:>9.2%}  {k['nhan']}")
+        print()
+        if gt["co_loc"]:
+            print(
+                f"CÓ LỌC: giữ {gt['so_khung_giu_lai']:,}/{gt['tong_khung']:,} khung "
+                f"({gt['ti_le_giu_lai']:.1%})"
+            )
+        else:
+            print(
+                "KHÔNG LỌC — hoặc không có khái niệm nào đủ hiếm, hoặc tập lọc\n"
+                "ra quá hẹp. Giữ nguyên toàn bộ ứng viên, đây là hành vi an toàn."
+            )
+        return 0
+
     if args.thu:
-        nhan = kho.bang_nhan.tim_nhan(args.thu)
+        nhom = kho.bang_nhan.tim_nhom(args.thu)
+        nhan = [x for _, ds in nhom for x in ds]
         print(f"Câu hỏi : {args.thu}")
-        print(f"Nhãn rút : {nhan or '(không nhận ra vật thể nào)'}")
+        if nhom:
+            print(f"Khái niệm ({len(nhom)}):")
+            for ten, ds in nhom:
+                print(f"   {ten!r} -> {ds}")
+        else:
+            print("Khái niệm : (không nhận ra vật thể nào)")
         if not nhan:
             print(
                 "\nCâu này không nhắc vật thể nào có trong config/nhan_vat_the.yaml.\n"
                 "Nhánh vật thể sẽ BỎ QUA câu này — đó là hành vi đúng, không phải lỗi."
             )
             return 0
-        ket_qua = kho.tra_theo_nhan(nhan, top_k=args.top)
+        ket_qua = kho.tra_theo_nhan(nhan, top_k=args.top, nhom=nhom)
+
+        from aic2026.index import objects_index as _oi
+
+        if _oi.DA_LUI_VE_OR:
+            print(
+                f"\nCẢNH BÁO: KHÔNG khung nào có ĐỦ {len(nhom)} khái niệm trên.\n"
+                "Kết quả dưới đây chỉ phủ MỘT PHẦN — xem cột 'phủ'. Bộ nhận dạng\n"
+                "bỏ sót nhiều, nên đây là chuyện thường; nhưng nếu một khái niệm\n"
+                "KHÔNG BAO GIỜ khớp thì nhiều khả năng rút nhầm nhãn."
+            )
+
         print(f"\n{len(ket_qua)} kết quả đầu:\n")
         for i, r in enumerate(ket_qua, 1):
             print(
                 f"  {i:>3}. {r['video_id']}  n={r['n']:<5} frame_idx={r['frame_idx']:<7}"
-                f" giây={r['pts_time']:>8.2f}  {json.dumps(r['dem'], ensure_ascii=False)}"
+                f" phủ {r['so_nhan_khop']}/{len(nhom)}"
+                f"  {'+'.join(r.get('khai_niem_khop', [])) or '-'}"
+                f"  {json.dumps(r['dem'], ensure_ascii=False)}"
             )
         return 0
 

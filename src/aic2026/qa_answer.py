@@ -70,6 +70,10 @@ _MAU_CAU = [
     (CHU_TREN_HINH, [
         "dong chu", "chu tren", "bien so", "so hieu", "ten chuong trinh",
         "tieu de", "khau hieu", "bang hieu", "ghi gi", "viet gi", "so dien thoai",
+        # Thương hiệu, tên riêng: chữ trên hình (logo, biển) là nguồn đúng.
+        # Bản đầu xếp mấy câu này vào KHAC nên không có tiêu chí chọn nào.
+        "thuong hieu", "nhan hieu", "hang gi", "hang nao", "ten gi", "ten la gi",
+        "goi la gi", "ten cua", "logo",
     ]),
     (MAU, ["mau gi", "mau sac", "mau nao"]),
     (THOI_GIAN, ["nam nao", "ngay nao", "thang nao", "luc may gio", "thoi gian nao"]),
@@ -102,12 +106,140 @@ class DapAn:
     ung_vien_khac: list[str] = field(default_factory=list)
 
     def __post_init__(self):
-        self.van_ban = (self.van_ban or "").strip()
+        # Cắt ngắn ở MỘT chỗ duy nhất, để không nguồn nào lọt qua với cả câu.
+        self.van_ban = cat_ngan(self.van_ban or "")
         if not self.van_ban:
             # Luật cứng. Không nơi nào trong dự án được phép tạo ra DapAn rỗng.
             self.van_ban = DAP_AN_DU_PHONG
             self.do_tin = 0.0
             self.nguon = "du_phong"
+
+
+# ---------------------------------------------------------------------------
+# CẮT NGẮN VÀ CHỌN CỤM — chỗ hỏng nặng nhất của bản đầu
+#
+# Đo trên 12 câu dev: trần 0,2333 (tầng tìm ảnh) -> thật 0,0000. Tầng sinh đáp
+# án làm mất TOÀN BỘ. Câu 14 tìm ảnh được 1,000 rồi trả về một câu ASR dài 96
+# ký tự, trong khi đáp án đúng là một chữ: "Jacquemus".
+#
+# Hai nguyên nhân, cả hai đều sửa được mà không cần mô hình nào:
+#   1. Bản đầu lấy hộp OCR có conf cao nhất và câu ASR gần mốc nhất — KHÔNG
+#      đọc câu hỏi. Ra 'EV', 'Online', 'HỂ THAO', 'công'.
+#   2. Không cắt ngắn. Đáp án đúng của bộ dev dài 1-4 chữ; trả về cả câu thì
+#      không bao giờ khớp.
+# ---------------------------------------------------------------------------
+
+# Đáp án đúng trong bộ dev dài nhất 33 ký tự. Vượt xa mức đó gần như chắc chắn
+# là đang trả về cả câu thay vì cụm đáp án.
+DAI_TOI_DA = 40
+
+# Từ quá phổ biến thì không phải đáp án — dùng để loại cụm rác của OCR.
+_TU_RAC = {
+    "tv", "hd", "live", "online", "news", "official", "channel", "subscribe",
+    "the", "and", "of", "com", "vn", "www", "http", "https",
+}
+
+# Logo đài đóng trên MỌI khung hình của video đó, nên nó luôn là hộp OCR rõ
+# nhất — và gần như không bao giờ là đáp án. Loại thẳng.
+_LOGO_DAI = {
+    "vtv", "vtv1", "vtv2", "vtv3", "vtv4", "vtv5", "vtv6", "vtv7", "vtv8",
+    "vtv9", "vtv24", "vtvcab", "htv", "htv7", "htv9", "thvl", "thvl1",
+    "thvl2", "vtc", "vtc1", "vtc14", "antv", "vov", "hanoitv", "qpvn",
+    "sctv", "vinhlong", "cantho",
+}
+
+
+def cat_ngan(van_ban: str, dai: int = DAI_TOI_DA) -> str:
+    """Cắt tại ranh giới từ, không cắt giữa chừng một chữ."""
+    van_ban = re.sub(r"\s+", " ", (van_ban or "")).strip(" ,.;:!?-")
+    if len(van_ban) <= dai:
+        return van_ban
+    cat = van_ban[:dai].rsplit(" ", 1)[0]
+    return (cat or van_ban[:dai]).strip(" ,.;:!?-")
+
+
+def _tach_cum(van_ban: str) -> list[str]:
+    """Cắt một câu dài thành các cụm ứng viên theo dấu câu và liên từ."""
+    cum = re.split(r"[,;.!?]|\bvà\b|\blà\b|\bthì\b", van_ban or "")
+    return [c.strip() for c in cum if len(c.strip()) >= 2]
+
+
+def _diem_ung_vien(cum: str, loai: str) -> float:
+    """Chấm một cụm ứng viên theo DẠNG CÂU HỎI. Càng cao càng đáng chọn.
+
+    Đây là chỗ đưa câu hỏi vào quyết định — bản đầu bỏ qua hoàn toàn.
+    """
+    gon = cum.strip()
+    khong_dau_gon = _khong_dau(gon).replace(" ", "")
+    if not gon or _khong_dau(gon) in _TU_RAC or khong_dau_gon in _LOGO_DAI:
+        return -1.0
+
+    diem = 0.0
+
+    if loai == DEM:
+        # Câu đếm: đáp án là MỘT con số, không phải một câu có số trong đó.
+        if re.fullmatch(r"\d+", gon):
+            diem += 3.0
+        elif re.search(r"\b\d+\b", gon):
+            diem += 1.0
+        else:
+            diem -= 1.0
+
+    elif loai == THOI_GIAN:
+        if re.fullmatch(r"(19|20)\d{2}", gon):
+            diem += 3.0
+        elif re.search(r"\b(19|20)\d{2}\b", gon):
+            diem += 1.5
+
+    elif loai == MAU:
+        mau = {"đỏ", "xanh", "vàng", "trắng", "đen", "cam", "tím", "hồng",
+               "nâu", "xám", "bạc"}
+        if any(m in gon.lower() for m in mau):
+            diem += 2.0
+
+    elif loai == CHU_TREN_HINH:
+        # Tên riêng, thương hiệu: viết hoa, ngắn, không phải câu.
+        if gon[0].isupper() and len(gon.split()) <= 4:
+            diem += 2.0
+        if re.fullmatch(r"[A-Za-zÀ-ỹ0-9\-\. ]+", gon):
+            diem += 0.5
+        # Cụm 1-2 ký tự hầu như luôn là rác OCR ('EV', 'e|', '4C'). Đáp án
+        # thật là 'Cây từ vựng', 'Jacquemus' — dài hơn thế.
+        if len(gon) <= 2:
+            diem -= 2.5
+
+    # Cụm cực ngắn mà KHÔNG phải số thì gần như luôn là rác OCR.
+    if len(gon) <= 2 and not gon.isdigit():
+        diem -= 1.5
+
+    # Ngắn gọn luôn được ưu ái: đáp án bộ dev dài 1-4 chữ.
+    so_tu = len(gon.split())
+    if so_tu <= 4:
+        diem += 1.0
+    elif so_tu <= 8:
+        diem += 0.2
+    else:
+        diem -= 1.0 + 0.1 * (so_tu - 8)
+
+    return diem
+
+
+def chon_cum_tot_nhat(cau_hoi: str, ung_vien: list[str]) -> str | None:
+    """Chọn cụm hợp DẠNG CÂU HỎI nhất trong danh sách ứng viên."""
+    loai = loai_cau_hoi(cau_hoi)
+
+    cham = []
+    for u in ung_vien:
+        for c in [u] + (_tach_cum(u) if len(u.split()) > 4 else []):
+            d = _diem_ung_vien(c, loai)
+            if d > 0:
+                cham.append((d, -len(c), c))
+
+    if not cham:
+        return None
+
+    cham.sort(reverse=True)
+    return cat_ngan(cham[0][2])
 
 
 # ---------------------------------------------------------------------------
@@ -156,16 +288,28 @@ def tra_loi_bang_ocr(cau_hoi: str, video_id: str, n: int) -> DapAn | None:
                     video_id, -1, "năm đọc được trên hình",
                 )
 
-    if loai in (CHU_TREN_HINH, KHAC):
-        for b in hop:
-            chu = str(b.get("text", "")).strip()
-            conf = float(b.get("conf", 0.0))
-            if len(chu) >= 2 and conf >= 0.40:
-                return DapAn(
-                    chu, conf, "ocr", video_id, -1,
-                    "dòng chữ rõ nhất trên hình",
-                    [str(x.get("text", "")).strip() for x in hop[1:4]],
-                )
+    # Chọn theo DẠNG CÂU HỎI, không lấy hộp conf cao nhất.
+    #
+    # Bản đầu trả về hộp đầu bảng và ra 'EV', 'Online', 'HỂ THAO' — chữ rõ
+    # nhất trên hình thường là logo đài hoặc watermark, gần như không bao giờ
+    # là đáp án.
+    ung_vien = [
+        str(b.get("text", "")).strip()
+        for b in hop
+        if float(b.get("conf", 0.0)) >= 0.40 and len(str(b.get("text", "")).strip()) >= 2
+    ]
+    chon = chon_cum_tot_nhat(cau_hoi, ung_vien)
+    if chon:
+        conf = next(
+            (float(b.get("conf", 0.5)) for b in hop
+             if chon in str(b.get("text", ""))),
+            0.5,
+        )
+        return DapAn(
+            chon, conf, "ocr", video_id, -1,
+            f"cụm hợp dạng câu hỏi {loai!r} nhất trong {len(ung_vien)} hộp OCR",
+            [u for u in ung_vien if u != chon][:4],
+        )
 
     return None
 
@@ -318,9 +462,15 @@ def tra_loi_bang_asr(
         if khop:
             return DapAn(khop.group(0), 0.5, "asr", video_id, -1, "năm nghe được")
 
+    # Cắt câu nói thành cụm rồi chọn theo dạng câu hỏi. Bản đầu trả nguyên
+    # 120 ký tự đầu — đáp án bộ dev dài 1-4 chữ nên không bao giờ khớp.
+    chon = chon_cum_tot_nhat(cau_hoi, _tach_cum(gan_nhat[1]))
+    if not chon:
+        return None
+
     return DapAn(
-        gan_nhat[1].strip()[:120], 0.35, "asr", video_id, -1,
-        f"lời nói cách mốc {gan_nhat[0]:.1f} giây",
+        chon, 0.35, "asr", video_id, -1,
+        f"cụm trong lời nói cách mốc {gan_nhat[0]:.1f} giây",
     )
 
 
@@ -424,3 +574,110 @@ def kiem_khong_o_trong(dap_an_theo_cau: dict[str, str]) -> list[str]:
         for q, a in dap_an_theo_cau.items()
         if a is None or not str(a).strip()
     ]
+
+
+# ---------------------------------------------------------------------------
+# CHIẾN THUẬT NỘP Q&A — rải biến thể đáp án theo thứ hạng
+# ---------------------------------------------------------------------------
+
+def bien_the_dap_an(dap_an: str, cau_hoi: str = "") -> list[str]:
+    """Các cách viết KHÁC NHAU của cùng một đáp án, xếp theo độ chắc ăn.
+
+    Vòng p1 nhóm đã làm việc này bằng tay: câu 3 rải '2484' / '2.484' /
+    '2484 kg', câu 17 rải 'đèo Tà Pứa' / 'Đèo Tà Pứa' / 'Tà Pứa'. Đúng hướng —
+    BTC so khớp thế nào thì không ai biết chắc, nên rải là bảo hiểm rẻ.
+
+    Hàm này chỉ sinh biến thể; việc XẾP CHÚNG Ở ĐÂU là của rai_theo_hang().
+    """
+    goc = (dap_an or "").strip()
+    if not goc:
+        return [DAP_AN_DU_PHONG]
+
+    ra = [goc]
+
+    def them(x: str) -> None:
+        """Thêm một biến thể, bỏ qua thứ chỉ khác HOA/THƯỜNG.
+
+        SubmissionBudget.dedup_key() hạ chữ thường trước khi so, nên
+        'Đèo Tà Pứa' và 'đèo tà pứa' là CÙNG một dòng và bị bỏ. Sinh ra chúng
+        là chiếm chỗ trong danh sách 4 biến thể rồi mất trắng ở bước ghi —
+        đã đo: câu 17 chỉ ra 98/100 dòng vì chuyện này.
+        """
+        x = x.strip()
+        if x and not any(x.lower() == c.lower() for c in ra):
+            ra.append(x)
+
+    # Số: dấu phân cách hàng nghìn, và bản trần trụi không đơn vị.
+    so = re.fullmatch(r"([\d.,]+)\s*(.*)", goc)
+    if so and re.search(r"\d", so[1]):
+        con_so, don_vi = so[1], so[2]
+        tran_trui = re.sub(r"[.,]", "", con_so)
+        if tran_trui.isdigit():
+            them(tran_trui)
+            if len(tran_trui) > 3:
+                them(f"{int(tran_trui):,}".replace(",", "."))
+                them(f"{int(tran_trui):,}")
+            if don_vi:
+                them(f"{tran_trui} {don_vi}")
+
+    # Chữ. THỨ TỰ QUAN TRỌNG vì danh sách bị cắt ở 4:
+    #   1. bỏ tiền tố loại từ ("đèo Tà Pứa" -> "Tà Pứa") — đổi NGHĨA của cụm,
+    #      giá trị cao nhất; vòng p1 nhóm đã rải đúng biến thể này bằng tay
+    #   2. viết hoa đầu từ — BTC có thể so khớp phân biệt hoa thường
+    #   3. thường / HOA — giá trị thấp nhất, phần lớn bộ so khớp bỏ qua
+    else:
+        tu = goc.split()
+        if len(tu) > 1 and len(tu[0]) <= 5:
+            them(" ".join(tu[1:]))
+        them(goc.title())
+
+    return ra[:4]
+
+
+def rai_theo_hang(hits, dap_an: str, cau_hoi: str = "", so_dong: int = 100):
+    """Ghép (khung, biến thể đáp án) thành danh sách dòng nộp.
+
+    VÌ SAO KHÔNG XOAY VÒNG ĐỀU
+    --------------------------
+    Vòng p1 rải kiểu xoay vòng: khung 1 lấy biến thể A, khung 2 lấy B, khung 3
+    lấy C. Nghĩa là khung ĐÚNG chỉ được ghép với MỘT biến thể — 1/3 cơ hội.
+
+    Điểm cuối là trung bình của R@1, R@5, R@20, R@50, R@100, nên hạng đầu đáng
+    giá hơn hẳn. Đặt khung tốt nhất × MỌI biến thể ở hạng 1-3 thì R@5 gần như
+    chắc ăn nếu khung đúng, mà chỉ tốn 3 suất trong 100.
+
+    Sau nhóm đầu mới rải tiếp các khung còn lại, mỗi khung một biến thể chính.
+    """
+    bien_the = bien_the_dap_an(dap_an, cau_hoi)
+    hits = list(hits)
+    if not hits:
+        return []
+
+    dong: list[tuple] = []
+    da_co: set = set()
+
+    def them(h, ans: str) -> None:
+        khoa = (str(h.video_id), int(h.frame_idx), ans)
+        if khoa not in da_co and len(dong) < so_dong:
+            da_co.add(khoa)
+            dong.append((h, ans))
+
+    # Nhóm đầu: khung tốt nhất × mọi biến thể.
+    for ans in bien_the:
+        them(hits[0], ans)
+
+    # Vài khung tiếp theo cũng được đủ biến thể, nếu còn chỗ.
+    for h in hits[1:3]:
+        for ans in bien_the[:2]:
+            them(h, ans)
+
+    # Phần còn lại: mỗi khung một biến thể chính.
+    for h in hits[1:]:
+        them(h, bien_the[0])
+
+    # Vẫn thừa chỗ thì rải nốt các biến thể khác.
+    for ans in bien_the[1:]:
+        for h in hits[1:]:
+            them(h, ans)
+
+    return dong[:so_dong]

@@ -64,6 +64,82 @@ def _build_or_query(tokens: List[str]) -> str:
     return " OR ".join(_quote_token(t) for t in tokens)
 
 
+# Token xuất hiện ở nhiều hơn tỉ lệ này số khung thì coi là PHỔ BIẾN, và bị
+# loại khỏi truy vấn khi bật lọc token hiếm.
+TI_LE_PHO_BIEN = 0.05
+
+# Giữ nhiều nhất bấy nhiêu token hiếm. Nhiều hơn thì AND lại rỗng, mà OR lại
+# loãng — chính vấn đề đang muốn tránh.
+SO_TOKEN_GIU = 5
+
+
+def chuan_token(t: str) -> str:
+    """Chuẩn hoá token GIỐNG HỆT cách FTS5 làm: hạ chữ thường và bỏ dấu.
+
+    Bảng ocr_fts dùng tokenize='unicode61 remove_diacritics 2'. Bảng tần suất
+    phải chuẩn hoá y như vậy, không thì tra "online" ra 0 trong khi kho đầy
+    "Online" — và mọi phép lọc dựa trên tần suất đều sai.
+    """
+    import unicodedata
+
+    t = unicodedata.normalize("NFD", t.lower())
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return t.replace("\u0111", "d")
+
+
+def loc_token_hiem(
+    tokens: List[str],
+    tan_suat: Dict[str, int],
+    tong_khung: int,
+    ti_le_pho_bien: float = TI_LE_PHO_BIEN,
+    so_giu: int = SO_TOKEN_GIU,
+) -> List[str]:
+    """Giữ lại các token HIẾM NHƯNG CÓ THẬT trong kho, bỏ token phổ biến.
+
+    VÌ SAO
+    ------
+    Bài học vòng p1 đã ghi trong sổ: truy vấn tiếng Việt dài làm phồng điểm
+    BM25 cho tài liệu không liên quan. Đây là chỗ nó chưa được áp dụng.
+
+    Đo trên câu dev 11 ("Tượng màu đỏ của một vị quan đứng trên bệ có bảng ghi
+    Mạc Cửu 1655-1735..."):
+        cả câu 99 ký tự -> khung đúng (n=122) KHÔNG có trong 1000 kết quả đầu
+        "Mac Cuu"       -> khung đúng ở HẠNG 6
+
+    Câu dài có ~20 token nên AND luôn rỗng, rồi rơi về OR trên toàn bộ token.
+    Khung nào tình cờ nhiều "của", "một", "trên" thì lên trước khung có đúng
+    cái tên riêng cần tìm.
+
+    TOKEN TẦN SUẤT 0 BỊ LOẠI, KHÔNG PHẢI GIỮ
+    ----------------------------------------
+    Bản đầu coi token không có trong bảng là "hiếm nhất" và giữ lại. Sai:
+    token chưa từng xuất hiện trong kho thì KHÔNG BAO GIỜ khớp được gì, nên
+    giữ đúng chúng là bảo đảm 0 kết quả. Đã đo: câu dev 11 giữ lại
+    ['tuong','trung','quan','dung','bang'] — toàn từ không có trong kho OCR —
+    và trả về 0 kết quả, tệ hơn hẳn cả câu.
+    """
+    if not tokens or not tong_khung:
+        return tokens
+
+    nguong = ti_le_pho_bien * tong_khung
+
+    co_that = [(tan_suat.get(chuan_token(t), 0), t) for t in tokens]
+    co_that = [(so, t) for so, t in co_that if so > 0]
+
+    if not co_that:
+        # Không token nào có trong kho -> lọc kiểu gì cũng 0 kết quả.
+        # Trả nguyên câu để nhánh AND/OR sẵn có tự xoay xở.
+        return tokens
+
+    hiem = [(so, t) for so, t in co_that if so < nguong]
+    if not hiem:
+        # Mọi token đều phổ biến -> lấy những cái ít phổ biến nhất.
+        hiem = sorted(co_that)[:so_giu]
+
+    hiem.sort(key=lambda x: (x[0], -len(x[1])))
+    return [t for _, t in hiem[:so_giu]]
+
+
 class TextSearchIndex:
     def __init__(self, db_path: Path = Path("index/fts/text.sqlite")):
         self.db_path = db_path
@@ -261,8 +337,54 @@ class TextSearchIndex:
             for row in rows
         ]
 
+    def tan_suat_tu(self, bang: str = BANG_OCR, lam_lai: bool = False) -> Dict[str, int]:
+        """{token: số KHUNG có token đó}. Quét một lần rồi lưu vào bảng phụ.
+
+        Đếm theo KHUNG, không theo lần xuất hiện: một khung lặp "Online" mười
+        lần vẫn chỉ tính một.
+        """
+        ten_bang_phu = f"tan_suat_{bang}"
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS {ten_bang_phu} "
+                "(token TEXT PRIMARY KEY, so_khung INTEGER)"
+            )
+            if not lam_lai:
+                cur.execute(f"SELECT token, so_khung FROM {ten_bang_phu}")
+                da_co = dict(cur.fetchall())
+                if da_co:
+                    return da_co
+
+            from collections import Counter
+
+            dem: Counter = Counter()
+            cur.execute(f"SELECT text FROM {bang}")
+            for (chu,) in cur:
+                # Chuẩn hoá GIỐNG FTS5, không thì tra "online" ra 0 trong khi
+                # kho đầy "Online".
+                dem.update({chuan_token(t) for t in _tokenize(str(chu or ""))})
+
+            cur.execute(f"DELETE FROM {ten_bang_phu}")
+            cur.executemany(
+                f"INSERT INTO {ten_bang_phu} (token, so_khung) VALUES (?, ?)",
+                sorted(dem.items()),
+            )
+            conn.commit()
+            return dict(dem)
+
+    def so_khung(self, bang: str = BANG_OCR) -> int:
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM {bang}")
+            return int(cur.fetchone()[0])
+
     def search_text(
-        self, query: str, top_k: int = 100, fallback_to_or: bool = True
+        self,
+        query: str,
+        top_k: int = 100,
+        fallback_to_or: bool = True,
+        loc_hiem: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Tim kiem Full-Text Search TREN CHU DOC DUOC TREN ANH (OCR).
@@ -276,6 +398,11 @@ class TextSearchIndex:
         tokens = _tokenize(query)
         if not tokens:
             return []
+
+        if loc_hiem:
+            tokens = loc_token_hiem(
+                tokens, self.tan_suat_tu(BANG_OCR), self.so_khung(BANG_OCR)
+            )
 
         with self._get_connection() as conn:
             cursor = conn.cursor()

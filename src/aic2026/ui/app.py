@@ -739,7 +739,13 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         dung_ocr=NGUON_OCR in cac_nguon,
         dung_ocr_fts=NGUON_OCR_FTS in cac_nguon,
         dung_asr=NGUON_ASR in cac_nguon,
-        trong_so=TRONG_SO_MAC_DINH,
+        # VIỆC 6: để None thì đọc config/rrf_weights.yaml. Truyền cứng
+        # TRONG_SO_MAC_DINH như bản cũ là đè lên tệp đó, và mọi con số đo
+        # được ở Việc 6 không tới được giao diện.
+        #
+        # Giao diện chưa có ô chọn dạng câu nên dùng bộ "mac_dinh" (= bộ của
+        # KIS). Thêm ô chọn dạng thì truyền dang_cau vào đây — việc của Thi.
+        trong_so=None,
         k_rrf=cfg.rrf_k(),
     )
 

@@ -43,6 +43,15 @@ BANG_OBJECT = "objects_fts"
 # Ngưỡng của notebook baseline BTC. Đổi số này là mất khả năng so với baseline.
 NGUONG_DIEM_MAC_DINH = 0.4
 
+# Lần tra gần nhất có phải lùi từ AND về OR không.
+#
+# Lùi âm thầm là chuyện nguy hiểm: truy vấn AND ra 0 kết quả nghĩa là KHÔNG
+# khung nào có đủ mọi nhãn, và kết quả OR trả về sau đó chỉ khớp một phần —
+# nhưng nhìn vào danh sách thì không phân biệt được. Đề thật p1 câu 25 dính
+# đúng chuyện này: một nhãn thừa (Tree, do chữ "một CÂY đàn piano") làm AND
+# rỗng, và không dòng nào trong 20 kết quả có Drum.
+DA_LUI_VE_OR = False
+
 _SO_TRONG_TEN = re.compile(r"(\d+)")
 
 
@@ -120,6 +129,37 @@ class BangNhan:
         with duong_dan.open("r", encoding="utf-8") as f:
             noi_dung = yaml.safe_load(f) or {}
         return cls(noi_dung.get("anh_xa", {}), noi_dung.get("bo_qua", []))
+
+    def tim_nhom(self, cau_hoi: str) -> list[tuple[str, list[str]]]:
+        """[(từ tiếng Việt, [nhãn tiếng Anh])] — MỘT khái niệm một phần tử.
+
+        VÌ SAO PHẢI GOM NHÓM
+        --------------------
+        "đàn piano" trỏ tới CẢ Piano LẪN Musical keyboard — bộ nhận dạng gán
+        hai nhãn cho CÙNG MỘT vật thể. Đếm độ phủ theo nhãn tiếng Anh thì một
+        khung chỉ có cây piano đạt 2/3, còn khung có cái trống chỉ được 1/3,
+        nên piano luôn thắng dù câu hỏi đòi cả trống lẫn piano.
+
+        Đếm theo KHÁI NIỆM TIẾNG VIỆT mới đúng: "trống" là một khái niệm,
+        "đàn piano" là khái niệm thứ hai, phủ đủ nghĩa là có cả hai.
+        """
+        van_ban = chuan_hoa(cau_hoi)
+        for mau in self._bo_qua:
+            van_ban = mau.sub(" | ", van_ban)
+
+        ra: list[tuple[str, list[str]]] = []
+        da_co: set[str] = set()
+
+        for khoa in self._khoa_theo_do_dai:
+            if not khoa or not self._mau[khoa].search(van_ban):
+                continue
+            moi = [n for n in self._map[khoa] if n not in da_co]
+            if moi:
+                ra.append((khoa, moi))
+                da_co.update(moi)
+            van_ban = self._mau[khoa].sub(" | ", van_ban)
+
+        return ra
 
     def tim_nhan(self, cau_hoi: str) -> list[str]:
         """Rút mọi nhãn tiếng Anh mà câu hỏi tiếng Việt có nhắc tới.
@@ -352,26 +392,71 @@ class ObjectSearchIndex:
         nhan: list[str],
         top_k: int = 500,
         bat_buoc_du: bool = True,
+        nhom: list[tuple[str, list[str]]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Tra thẳng bằng danh sách nhãn TIẾNG ANH.
+        """Tra bằng danh sách nhãn TIẾNG ANH, xếp theo ĐỘ PHỦ NHÃN.
 
-        bat_buoc_du=True: nối AND, khung phải có ĐỦ mọi nhãn. Câu "bộ trống
-        và piano" cần cả hai thì AND đúng hơn OR rất nhiều.
-        Không ra kết quả nào thì tự hạ xuống OR — thà xếp hạng kém còn hơn
-        trả rỗng.
+        VÌ SAO KHÔNG DÙNG AND RỒI LÙI VỀ OR
+        -----------------------------------
+        Bộ nhận dạng bỏ sót rất nhiều. Đo thật trên đề p1 câu 25 ("bộ trống cơ
+        màu đỏ và một cây đàn piano"): trong 164.812 khung của 873 video,
+        KHÔNG khung nào có cả Piano lẫn Drum. AND rỗng tuyệt đối.
+
+        Lùi về OR thì còn tệ hơn bỏ qua: BM25 xếp theo tần suất từ, nên khung
+        có BA cái piano đứng trên khung có MỘT piano và MỘT trống — đúng ngược
+        thứ câu hỏi cần.
+
+        Nên xếp theo SỐ NHÃN KHÁC NHAU KHỚP ĐƯỢC trước, BM25 chỉ phá hoà. Khung
+        phủ 2/3 nhãn luôn đứng trên khung phủ 1/3, dù khung kia có mười cái
+        piano.
+
+        `bat_buoc_du=True` chỉ còn nghĩa: báo cho phía gọi biết có khung nào
+        phủ đủ hay không (qua DA_LUI_VE_OR), chứ không lọc bỏ nữa.
         """
+        global DA_LUI_VE_OR
+        DA_LUI_VE_OR = False
+
         if not nhan:
             return []
 
+        # Mỗi nhãn một nhóm riêng khi phía gọi không nói gì thêm.
+        nhom = nhom or [(t, [t]) for t in nhan]
         boc = ['"' + t.replace('"', '""') + '"' for t in nhan]
-        bieu_thuc = (" AND " if bat_buoc_du else " OR ").join(boc)
+
+        # Lấy dư rồi mới xếp lại: cắt ở top_k ngay theo BM25 thì khung phủ
+        # nhiều nhãn có thể đã bị đẩy ra ngoài trước khi kịp xếp.
+        lay_du = max(top_k * 5, 2000)
 
         with self._conn() as conn:
             cur = conn.cursor()
-            ra = self._chay(cur, bieu_thuc, top_k)
-            if not ra and bat_buoc_du and len(boc) > 1:
-                ra = self._chay(cur, " OR ".join(boc), top_k)
-        return ra
+            tho = self._chay(cur, " OR ".join(boc), lay_du)
+
+        # Đếm theo KHÁI NIỆM, không theo nhãn: một khái niệm coi là khớp khi
+        # BẤT KỲ nhãn nào của nó xuất hiện.
+        can = [[x.lower() for x in ds] for _, ds in nhom]
+        for r in tho:
+            # Ưu tiên khoá của dem_json — tên nhãn nguyên vẹn. Tách cột `nhan`
+            # bằng dấu cách là cắt nát mọi nhãn nhiều chữ.
+            co = {x.lower() for x in (r.get("dem") or {})}
+            if not co:
+                co = {x.lower() for x in str(r["nhan"]).split()}
+            r["so_nhan_khop"] = sum(1 for ds in can if any(x in co for x in ds))
+            r["du_nhan"] = r["so_nhan_khop"] == len(can)
+            r["khai_niem_khop"] = [
+                ten for (ten, ds) in nhom if any(x.lower() in co for x in ds)
+            ]
+
+        # Nhiều nhãn khớp trước. Hoà thì BM25 tốt hơn trước.
+        #
+        # CHÚ Ý DẤU: bm25() của SQLite trả SỐ ÂM, khớp càng tốt càng âm. _chay()
+        # lưu abs() của nó, nên "tốt hơn" = abs LỚN HƠN. Sắp tăng dần theo
+        # score là đảo ngược thứ hạng — bộ test bắt được đúng chỗ này.
+        tho.sort(key=lambda r: (-r["so_nhan_khop"], -r["score"]))
+
+        if bat_buoc_du and len(can) > 1 and not any(r["du_nhan"] for r in tho):
+            DA_LUI_VE_OR = True
+
+        return tho[:top_k]
 
     def _chay(self, cur, bieu_thuc: str, top_k: int) -> list[dict[str, Any]]:
         cur.execute(
@@ -406,8 +491,156 @@ class ObjectSearchIndex:
         trả lời ĐÚNG, không phải lỗi. Nhánh vật thể chỉ nên đóng góp khi
         câu hỏi thật sự nói về vật thể.
         """
-        nhan = self.bang_nhan.tim_nhan(cau_hoi)
-        return self.tra_theo_nhan(nhan, top_k=top_k)
+        nhom = self.bang_nhan.tim_nhom(cau_hoi)
+        nhan = [x for _, ds in nhom for x in ds]
+        return self.tra_theo_nhan(nhan, top_k=top_k, nhom=nhom)
+
+    # -- tần suất nhãn: nền tảng của bộ lọc --------------------------------
+
+    def tan_suat_nhan(self, lam_lai: bool = False) -> dict[str, int]:
+        """{nhãn: số KHUNG có nhãn đó}. Quét một lần rồi lưu vào bảng phụ.
+
+        VÌ SAO CẦN
+        ----------
+        Đề thật p1: 23/25 câu nhắc vật thể, nhưng phần lớn là `người`, `áo`,
+        `xe` — có mặt ở hàng chục nghìn khung, lọc theo chúng không thu hẹp
+        được gì. Thứ đáng lọc là nhãn HIẾM: `Drum`, `Scissors`, `Tie`, `Cat`.
+
+        Không có bảng này thì không phân biệt được nhãn nào đáng lọc, và bộ
+        lọc sẽ hoặc vô dụng (lọc theo `Person`) hoặc giết oan (lọc theo nhãn
+        mà bộ nhận dạng hay bỏ sót).
+        """
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS tan_suat_nhan "
+                "(nhan TEXT PRIMARY KEY, so_khung INTEGER)"
+            )
+            if not lam_lai:
+                cur.execute("SELECT nhan, so_khung FROM tan_suat_nhan")
+                da_co = dict(cur.fetchall())
+                if da_co:
+                    return da_co
+
+            from collections import Counter
+
+            dem: Counter = Counter()
+            # Đọc dem_json, KHÔNG tách cột `nhan` bằng dấu cách. Cột `nhan`
+            # ngăn nhãn bằng dấu cách nên .split() cắt "Musical keyboard"
+            # thành hai nhãn rời "Musical" và "keyboard" — sai với mọi nhãn
+            # nhiều chữ: Human face, Sun hat, Vehicle registration plate...
+            # Khoá của dem_json là tên nhãn NGUYÊN VẸN.
+            cur.execute(f"SELECT dem_json, nhan FROM {BANG_OBJECT}")
+            for chuoi_dem, chuoi_nhan in cur:
+                try:
+                    khoa = set(json.loads(chuoi_dem or "{}"))
+                except json.JSONDecodeError:
+                    khoa = set()
+                # set(): một khung có ba cái piano vẫn chỉ tính MỘT khung.
+                dem.update(khoa or set(str(chuoi_nhan).split()))
+
+            cur.execute("DELETE FROM tan_suat_nhan")
+            cur.executemany(
+                "INSERT INTO tan_suat_nhan (nhan, so_khung) VALUES (?, ?)",
+                sorted(dem.items()),
+            )
+            conn.commit()
+            return dict(dem)
+
+    def tong_so_khung(self) -> int:
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM {BANG_OBJECT}")
+            return int(cur.fetchone()[0])
+
+    # -- BỘ LỌC: thu hẹp ứng viên TRƯỚC khi CLIP chấm ----------------------
+
+    def khung_chua(
+        self,
+        cau_hoi: str,
+        ti_le_hiem_toi_da: float = 0.05,
+        so_khai_niem_toi_da: int = 3,
+        toi_thieu_giu_lai: int = 2000,
+    ) -> set[tuple[str, float]] | None:
+        """Tập (video_id, pts_time) của các khung CÓ vật thể hiếm trong câu hỏi.
+
+        Trả về None nghĩa là KHÔNG lọc — phía gọi giữ nguyên toàn bộ ứng viên.
+        Đây là hành vi mặc định và an toàn: lọc sai giết mất đáp án đúng, còn
+        không lọc thì chỉ mất cơ hội thu hẹp.
+
+        Trả None khi:
+          * câu hỏi không nhắc khái niệm nào có trong bảng nhãn
+          * mọi khái niệm nhắc tới đều PHỔ BIẾN (>= ti_le_hiem_toi_da số khung)
+          * tập lọc ra nhỏ hơn `toi_thieu_giu_lai` — hẹp quá thì rủi ro bỏ sót
+            lớn hơn lợi ích, vì bộ nhận dạng bỏ sót rất nhiều (đo thật: không
+            khung nào trong 164.812 khung có cả Piano lẫn Drum)
+
+        Dùng phép HỢP, không phải phép GIAO: khung chỉ cần có MỘT khái niệm
+        hiếm là được giữ. Giao là quá chặt với một bộ nhận dạng hay bỏ sót.
+        """
+        nhom = self.bang_nhan.tim_nhom(cau_hoi)
+        if not nhom:
+            return None
+
+        tan_suat = self.tan_suat_nhan()
+        tong = self.tong_so_khung()
+        if not tong:
+            return None
+
+        nguong = ti_le_hiem_toi_da * tong
+
+        # Xếp khái niệm theo độ hiếm; hiếm nhất lọc mạnh nhất.
+        do_hiem = []
+        for ten, ds in nhom:
+            so = sum(tan_suat.get(n, 0) for n in ds)
+            if 0 < so < nguong:
+                do_hiem.append((so, ten, ds))
+        if not do_hiem:
+            return None
+
+        do_hiem.sort()
+        chon = do_hiem[:so_khai_niem_toi_da]
+
+        nhan = [n for _, _, ds in chon for n in ds]
+        boc = ['"' + t.replace('"', '""') + '"' for t in nhan]
+
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT video_id, pts_time FROM {BANG_OBJECT} "
+                f"WHERE {BANG_OBJECT} MATCH ?",
+                (" OR ".join(boc),),
+            )
+            tap = {(r[0], round(float(r[1]), 3)) for r in cur.fetchall()}
+
+        if len(tap) < toi_thieu_giu_lai:
+            return None
+
+        return tap
+
+    def giai_thich_loc(self, cau_hoi: str, **kw) -> dict[str, Any]:
+        """Cùng phép tính với khung_chua() nhưng trả về lý do, để soi lại."""
+        nhom = self.bang_nhan.tim_nhom(cau_hoi)
+        tan_suat = self.tan_suat_nhan()
+        tong = self.tong_so_khung() or 1
+
+        chi_tiet = [
+            {
+                "khai_niem": ten,
+                "nhan": ds,
+                "so_khung": sum(tan_suat.get(n, 0) for n in ds),
+                "ti_le": sum(tan_suat.get(n, 0) for n in ds) / tong,
+            }
+            for ten, ds in nhom
+        ]
+        tap = self.khung_chua(cau_hoi, **kw)
+        return {
+            "tong_khung": tong,
+            "khai_niem": sorted(chi_tiet, key=lambda x: x["so_khung"]),
+            "co_loc": tap is not None,
+            "so_khung_giu_lai": len(tap) if tap else tong,
+            "ti_le_giu_lai": (len(tap) / tong) if tap else 1.0,
+        }
 
     # -- soát lại ----------------------------------------------------------
 

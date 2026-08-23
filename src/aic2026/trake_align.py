@@ -112,14 +112,48 @@ class KetQuaTrake:
 # 1. Tách mô tả thành các sự kiện
 # ---------------------------------------------------------------------------
 
+# Đề THẬT của BTC đánh dấu sự kiện bằng E1, E2, E3 ở đầu dòng, và dòng đầu
+# tiên là BỐI CẢNH chứ không phải sự kiện:
+#
+#     Đoạn video bắt đầu bằng ảnh cận đầu một con lân trắng, mũi đỏ, ...
+#     E1 Khoảnh khắc đầu tiên xuất hiện đầy đủ hai con rồng vàng đang xoay vòng.
+#     E2 Khoảnh khắc đầu tiên con lân hoàn tất cú xoay người trên các thanh trụ.
+#     E3 Khoảnh khắc đầu tiên dùi chạm vào kẻng đồng múa lân.
+#
+# Bộ dev tự soạn của nhóm lại dùng "(1) (2) (3)" trên MỘT dòng, ngăn bằng dấu
+# phẩy. Hai định dạng khác hẳn nhau, và bản đầu chỉ xử lý được cái thứ hai —
+# nó cắt dòng bối cảnh theo dấu phẩy rồi dừng, không bao giờ chạm tới E1.
+MAU_DANH_DAU_DONG = re.compile(r"^\s*E\s*(\d+)\s*[:.)\-]?\s*", re.IGNORECASE | re.MULTILINE)
+
+
 def tach_su_kien(mo_ta: str, so_moc: int | None = None) -> list[str]:
     """'chạy đà, giậm nhảy, bay qua xà, tiếp đất' -> 4 cụm.
+
+    Xử lý được CẢ HAI định dạng:
+      * BTC:     mỗi sự kiện một dòng, đánh dấu E1/E2/E3, dòng đầu là bối cảnh
+      * bộ dev:  một dòng, "(1) ... , (2) ... , (3) ..."
 
     so_moc=None: lấy đúng số cụm tách được.
     so_moc=k   : ép về k cụm. Thừa thì gộp hai cụm cuối, thiếu thì lặp cụm
                  cuối — vì BTC đòi ĐỦ số mốc, thiếu mốc là mất điểm mốc đó.
     """
-    van_ban = mo_ta.strip()
+    van_ban = (mo_ta or "").strip()
+
+    # --- định dạng BTC: có E1/E2/E3 ---------------------------------------
+    danh_dau = list(MAU_DANH_DAU_DONG.finditer(van_ban))
+    if len(danh_dau) >= 2:
+        cum = []
+        for i, khop in enumerate(danh_dau):
+            ket = danh_dau[i + 1].start() if i + 1 < len(danh_dau) else len(van_ban)
+            noi_dung = van_ban[khop.end(): ket].strip(" ,.;\r\n")
+            if noi_dung:
+                cum.append(noi_dung)
+        # Phần TRƯỚC E1 là bối cảnh chung, KHÔNG phải một mốc — bỏ hẳn.
+        if cum:
+            return _ep_so_moc(cum, so_moc)
+
+    # --- định dạng bộ dev: một dòng, ngăn bằng dấu phẩy --------------------
+    van_ban = " ".join(d.strip() for d in van_ban.splitlines() if d.strip())
 
     # Bỏ phần dẫn trước dấu hai chấm: "Vận động viên nhảy cao: chạy đà, ..."
     if ":" in van_ban:
@@ -135,20 +169,27 @@ def tach_su_kien(mo_ta: str, so_moc: int | None = None) -> list[str]:
         re.sub(r"^\s*[(\[]?\s*\d+\s*[).\]\-]\s*", "", c).strip(" ,.;")
         for c in re.split(r"[,;]|->|→", van_ban)
     ]
-    cum = [c for c in cum if len(c) >= 2]
+    # Giữ MỌI mảnh khác rỗng. Bản đầu lọc len(c) >= 2 và xoá sạch các sự kiện
+    # một ký tự, rồi rơi về nhánh dự phòng trả nguyên cả câu lặp lại N lần —
+    # tức N mốc giống hệt nhau, và quy hoạch động chỉ còn cách lấy ba khung
+    # kề nhau.
+    cum = [c for c in cum if c]
 
     if not cum:
         cum = [mo_ta.strip()]
 
+    return _ep_so_moc(cum, so_moc)
+
+
+def _ep_so_moc(cum: list[str], so_moc: int | None) -> list[str]:
     if so_moc is None:
         return cum
-
+    cum = list(cum)
     while len(cum) > so_moc:
         cum[-2] = f"{cum[-2]} {cum[-1]}"
         cum.pop()
     while len(cum) < so_moc:
         cum.append(cum[-1])
-
     return cum
 
 

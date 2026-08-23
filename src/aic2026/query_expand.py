@@ -301,12 +301,29 @@ def dich_bang_marian(cau: str) -> KetQuaMoRong:
             [f"Không dựng được bộ dịch: {loi}"],
         )
 
+    # Câu đưa vào bộ dịch phải GIỮ hoa thường và dấu câu. Đo thật trên envit5:
+    #   'vi: Một người đàn ông cầm ô.' -> 'en: A man with an umbrella.'
+    #   'một người đàn ông cầm ô'      -> 'en: A man with a umbrella'
+    # Bản có dấu câu dịch chuẩn hơn. cat_chu_thua() hạ chữ thường và cắt dấu
+    # câu, nên chỉ dùng nó để BỎ CỤM ĐƯA ĐẨY rồi khôi phục lại dáng câu.
+    dau_vao = cat_chu_thua(cau).strip()
+    if dau_vao:
+        dau_vao = dau_vao[0].upper() + dau_vao[1:]
+        if dau_vao[-1] not in ".!?":
+            dau_vao += "."
+    else:
+        dau_vao = cau.strip()
+
     try:
-        encoder.encode_text(cat_chu_thua(cau))       # kích hoạt nhánh dịch
-        ban_dich = (encoder.ban_dich_gan_nhat() or "").strip()
+        encoder.encode_text(dau_vao)                 # kích hoạt nhánh dịch
+        # ban_dich_gan_nhat là @property, KHÔNG phải hàm. Bản đầu gọi nó như
+        # hàm -> TypeError -> bị chính khối except này nuốt và báo "dịch hỏng",
+        # trong khi mô hình dịch chạy hoàn hảo. Lỗi nằm ở một cặp ngoặc.
+        ban_dich = (encoder.ban_dich_gan_nhat or "").strip()
     except Exception as loi:
         return KetQuaMoRong(
-            cau, [cau.strip()], "nguyen_ban", [f"Dịch hỏng: {loi}"]
+            cau, [cau.strip()], "nguyen_ban",
+            [f"Dịch hỏng: {type(loi).__name__}: {loi}"],
         )
 
     # envit5 là mô hình HAI CHIỀU và thỉnh thoảng trả lại y nguyên đầu vào.

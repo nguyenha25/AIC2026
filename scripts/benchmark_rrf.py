@@ -118,14 +118,28 @@ def chay_mot_che_do(che_do: str, danh_sach: list[dict], ocr_engine, kho_chu) -> 
     for p in SUBMISSIONS_DIR.glob("*.csv"):
         p.unlink()
 
-    nguon = tim_ung_vien_gop(
-        ocr_engine=ocr_engine,
-        kho_chu=kho_chu,
-        trong_so=TRONG_SO_MAC_DINH,
-        **CAU_HINH_CHE_DO[che_do],
-    )
+    # VIỆC 6 — MỖI DẠNG CÂU MỘT BỘ TRỌNG SỐ.
+    #
+    # Bản cũ truyền cứng trong_so=TRONG_SO_MAC_DINH, đè lên config/rrf_weights.yaml
+    # nên tệp đó chưa từng có tác dụng ở mạch chạy thật. Đo được: ASR giúp Q&A
+    # (0,1667 chạy một mình) nhưng làm KIS TỤT (0,3833 -> 0,3500). Một bộ chung
+    # cho cả hai dạng là bắt mỗi dạng gánh nhánh vô dụng của dạng kia.
+    #
+    # run_queries() nhận MỘT hàm tìm ứng viên cho cả mẻ, nên gom câu theo dạng
+    # rồi chạy từng nhóm. Cách này không phải sửa rank/search.py của Ngân.
+    theo_dang: dict[str, list[dict]] = {}
+    for muc in danh_sach:
+        theo_dang.setdefault(str(muc.get("task") or "kis").lower(), []).append(muc)
 
-    ket_qua = run_queries(danh_sach, ghi_tep=True, tim_ung_vien=nguon)
+    ket_qua = []
+    for dang, nhom in theo_dang.items():
+        nguon = tim_ung_vien_gop(
+            ocr_engine=ocr_engine,
+            kho_chu=kho_chu,
+            dang_cau=dang,          # trong_so=None -> đọc rrf_weights.yaml
+            **CAU_HINH_CHE_DO[che_do],
+        )
+        ket_qua.extend(run_queries(nhom, ghi_tep=True, tim_ung_vien=nguon))
 
     # Cổng thoát số 5 do chính mạch của Ngân soát. Câu nào trượt thì phải biết
     # ngay, đừng để lẫn vào điểm thấp rồi tưởng do truy hồi kém.

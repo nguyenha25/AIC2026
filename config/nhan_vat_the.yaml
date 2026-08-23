@@ -30,6 +30,11 @@ anh_xa:
   piano: [Piano, Musical keyboard]
   dương cầm: [Piano, Musical keyboard]
   đàn organ: [Musical keyboard]
+  # "một CÂY ĐÀN piano" — "cây" ở đây là LOẠI TỪ, không phải cái cây. Cụm dài
+  # khớp trước và ăn luôn đoạn chữ, nên "cây" không còn để khớp thành Tree.
+  # Phát hiện từ đề thật p1 câu 25: nhãn rút ra có cả Tree, Houseplant, Plant.
+  cây đàn piano: [Piano, Musical keyboard]
+  cây đàn: [Musical instrument, Guitar, Piano]
   bàn phím đàn: [Musical keyboard]
   trống: [Drum]
   bộ trống: [Drum]

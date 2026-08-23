@@ -288,6 +288,7 @@ def test_marian_tra_ve_dung_nguon_khi_dich_duoc(monkeypatch):
         def encode_text(self, t):
             self._d = "a man lifting a rice cake out of a basket"
 
+        @property
         def ban_dich_gan_nhat(self):
             return self._d
 
@@ -304,6 +305,7 @@ def test_marian_hong_thi_bao_ly_do_chu_khong_im_lang(monkeypatch):
         def encode_text(self, t):
             raise RuntimeError("mô hình chưa tải xong")
 
+        @property
         def ban_dich_gan_nhat(self):
             return ""
 
@@ -326,6 +328,7 @@ def test_ban_dich_tra_lai_tieng_viet_bi_coi_la_HONG(monkeypatch):
         def encode_text(self, t):
             pass
 
+        @property
         def ban_dich_gan_nhat(self):
             return "một người đàn ông cầm ô"
 
@@ -348,6 +351,7 @@ def test_bo_tien_to_tac_vu_cua_envit5(monkeypatch):
         def encode_text(self, t):
             pass
 
+        @property
         def ban_dich_gan_nhat(self):
             return "en: a man holding an umbrella"
 
@@ -364,3 +368,100 @@ def test_con_tieng_viet():
     assert con_tieng_viet("Đèo Tà Pứa")
     assert not con_tieng_viet("a man lifting a cake out of a basket")
     assert not con_tieng_viet("")
+
+
+def test_ban_dich_gan_nhat_la_PROPERTY_khong_phai_ham():
+    """Lỗi đã cắn thật: query_expand gọi encoder.ban_dich_gan_nhat như HÀM —
+    thêm một cặp ngoặc vào một @property.
+
+    TypeError bị chính khối except của dich_bang_marian nuốt, báo "dịch hỏng",
+    và cả sáu sự kiện TRAKE chạy bằng tiếng Việt suốt nhiều lượt — trong khi
+    mô hình envit5 dịch hoàn hảo.
+
+    ĐỌC MÃ NGUỒN, KHÔNG IMPORT. Bản đầu dùng pytest.importorskip() để nạp
+    clip_encoder, và nó kéo open_clip vào một tiến trình pytest ĐÃ nạp pandas
+    -> 0xC0000005, sập cả mẻ test. Đúng cái bẫy mà test_thu_tu_nap_torch.py
+    canh chừng.
+    """
+    import ast
+    from pathlib import Path
+
+    goc = Path(__file__).resolve().parents[1]
+    cay = ast.parse(
+        (goc / "src/aic2026/index/encode/clip_encoder.py").read_text(encoding="utf-8")
+    )
+
+    la_property = False
+    for nut in ast.walk(cay):
+        if isinstance(nut, ast.FunctionDef) and nut.name == "ban_dich_gan_nhat":
+            la_property = any(
+                isinstance(d, ast.Name) and d.id == "property"
+                for d in nut.decorator_list
+            )
+            if la_property:
+                break
+
+    assert la_property, (
+        "bản thật khai @property — mọi bản giả trong test phải khai giống vậy"
+    )
+
+
+def test_cau_dua_vao_bo_dich_giu_hoa_thuong_va_dau_cau(monkeypatch):
+    """Đo thật trên envit5:
+        'vi: Một người đàn ông cầm ô.' -> 'en: A man with an umbrella.'
+        'một người đàn ông cầm ô'      -> 'en: A man with a umbrella'
+    Bản có dấu câu dịch chuẩn hơn.
+    """
+    from aic2026 import query_expand
+
+    da_nhan = {}
+
+    class Ghi:
+        def encode_text(self, t):
+            da_nhan["cau"] = t
+
+        @property
+        def ban_dich_gan_nhat(self):
+            return "A man with an umbrella."
+
+    monkeypatch.setattr(query_expand, "_BO_DICH", Ghi())
+    query_expand.dich_bang_marian("Trong đoạn video, hãy tìm một người đàn ông cầm ô")
+
+    assert da_nhan["cau"][0].isupper(), "phải viết hoa chữ đầu"
+    assert da_nhan["cau"].endswith("."), "phải có dấu chấm cuối"
+    assert "hãy tìm" not in da_nhan["cau"], "vẫn phải bỏ cụm đưa đẩy"
+
+
+def test_khong_goi_property_nhu_ham_trong_query_expand():
+    """Chốt chặn chính, chạy được cả trên máy chưa cài open_clip."""
+    import inspect
+
+    from aic2026 import query_expand
+
+    ma = inspect.getsource(query_expand.dich_bang_marian)
+    than = "\n".join(
+        d for d in ma.split('"""')[-1].splitlines()
+        if not d.lstrip().startswith("#")
+    )
+    assert "ban_dich_gan_nhat()" not in than, "đang gọi @property như hàm"
+
+
+def test_do_trong_so_rrf_co_duong_CLIP_qua_query_expand():
+    """Bản đầu luôn gọi thẳng tim_ung_vien_clip, nên đặt $env:AIC_NGUON_MO_RONG
+    rồi chạy lại chỉ ra SỐ GIỐNG HỆT — Việc 5 chưa từng được đo, mà không có
+    dấu hiệu gì báo điều đó.
+    """
+    import re
+    from pathlib import Path
+
+    ma = (
+        Path(__file__).resolve().parents[1] / "scripts/do_trong_so_rrf.py"
+    ).read_text(encoding="utf-8")
+    than = "\n".join(ma.split('"""')[::2])
+
+    assert "tim_ung_vien_clip_mo_rong" in than, (
+        "thiếu đường CLIP đi qua query_expand — không đo được Việc 5"
+    )
+    assert re.search(r"mo_rong_clip\s*:?\s*bool", than), (
+        "thiếu cờ tách hai chế độ, không có mốc nền để so"
+    )
