@@ -1,19 +1,22 @@
 mac_dinh:
   clip: 1.0
   ocr_fts: 1.0
-  asr: 0.0
+  asr: 0.2
   object: 0.0
+  clip_l: 1.0
 theo_dang:
   kis:
     clip: 1.0
     ocr_fts: 1.0
-    asr: 0.0
+    asr: 0.2
     object: 0.0
+    clip_l: 1.0
   qa:
     clip: 1.0
     ocr_fts: 0.0
     asr: 1.0
     object: 0.0
+    clip_l: 0.0
   trake: null
 ghi_chu: Sinh bởi scripts/do_trong_so_rrf.py trên 24 câu KIS/QA. Q&A đo bằng đáp án
   đúng điền sẵn — chỉ đo khả năng TÌM ẢNH. TRAKE chưa đo được (trần 0,000 do keyframe
