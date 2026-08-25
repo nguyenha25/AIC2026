@@ -3,6 +3,9 @@
 Kho mã nguồn của nhóm. **Chỉ chứa chương trình, không chứa dữ liệu.**
 Dữ liệu nằm ở một thư mục riêng, khai báo trong `.env` của từng máy.
 
+Chuẩn bị Task 4 (rerank top-100): xem
+[`docs/decisions/task4_rerank_chuan_bi.md`](docs/decisions/task4_rerank_chuan_bi.md).
+
 ---
 
 ## Cài lần đầu (làm một lần)

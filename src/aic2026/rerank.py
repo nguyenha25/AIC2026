@@ -10,23 +10,23 @@ không mã hoá lại toàn kho như Việc 8.
 BA ĐIỀU KIỆN ĐỂ CON SỐ ĐO ĐƯỢC LÀ THẬT
 --------------------------------------
 1. TẤT ĐỊNH. Mô hình ở chế độ eval, không dropout, không random crop, chạy
-   trong torch.no_grad(). Chạy hai lần phải ra kết quả GIỐNG HỆT — checklist
+   trong torch.inference_mode(). Chạy hai lần phải ra kết quả GIỐNG HỆT — checklist
    yêu cầu đúng điều này. `kiem_tat_dinh()` ở cuối tệp kiểm hộ.
 
 2. KHÔNG NUỐT ẢNH THIẾU. Ảnh không có trên đĩa thì ứng viên đó KHÔNG bị xoá,
    mà bị đẩy xuống cuối và đếm vào `so_thieu_anh`. Xoá âm thầm thì một máy
    tải thiếu shard sẽ "cải thiện" điểm một cách giả tạo.
 
-3. ĐO TRƯỚC KHI GỘP. Điểm cosine của mô hình rerank KHÔNG cùng thang với
-   điểm RRF (cỡ 0,016). Rerank chạy SAU khi đã gộp RRF và làm việc trên thứ
-   hạng, không cộng thẳng hai loại điểm với nhau.
+3. ĐO TRƯỚC KHI GỘP NGUỒN. Điểm cosine của mô hình rerank KHÔNG cùng thang
+   với điểm RRF đa nguồn (cỡ 0,016). Rerank chỉ thay thứ tự nhánh CLIP rồi
+   nhánh đó mới được gộp với OCR/ASR; không cộng thẳng hai loại điểm.
 
 CÁCH DÙNG
 ---------
     from aic2026.rerank import Reranker
 
     bo_xep_lai = Reranker()                     # nạp mô hình một lần
-    hits_moi = bo_xep_lai.xep_lai(cau_hoi, hits, so_dau=100)
+    hits_moi, bao_cao = bo_xep_lai.xep_lai(cau_hoi, hits, so_dau=100)
 
 Cắm vào mạch của Ngân qua run_query(tim_ung_vien=...):
 
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -50,6 +50,7 @@ import numpy as np
 #     pretrained: webli
 MO_HINH_MAC_DINH = "ViT-L-14"
 PRETRAINED_MAC_DINH = "laion2b_s32b_b82k"
+KICH_THUOC_LO_MAC_DINH = 8
 
 
 @dataclass
@@ -62,12 +63,15 @@ class BaoCaoXepLai:
     so_dao_thu_hang: int          # bao nhiêu ứng viên đổi vị trí
     thoi_gian_ms: float
     mo_hinh: str
+    kich_thuoc_lo: int = KICH_THUOC_LO_MAC_DINH
+    cach_gop: str = "thay"
 
     def __str__(self) -> str:
         return (
             f"xếp lại {self.so_da_xep_lai}/{self.so_ung_vien_vao} ứng viên | "
             f"thiếu ảnh: {self.so_thieu_anh} | đảo hạng: {self.so_dao_thu_hang} | "
-            f"{self.thoi_gian_ms:.0f} ms | {self.mo_hinh}"
+            f"{self.thoi_gian_ms:.0f} ms | {self.mo_hinh} | "
+            f"batch={self.kich_thuoc_lo} | {self.cach_gop}"
         )
 
 
@@ -90,11 +94,23 @@ class Reranker:
         pretrained: str | None = None,
         thiet_bi: str | None = None,
         duong_dan_anh: Callable[[str, int], Path] | None = None,
+        kich_thuoc_lo: int | None = None,
+        tat_dinh: bool | None = None,
     ):
         cau_hinh = _doc_cau_hinh()
         self.ten_mo_hinh = mo_hinh or cau_hinh.get("mo_hinh", MO_HINH_MAC_DINH)
         self.pretrained = pretrained or cau_hinh.get("pretrained", PRETRAINED_MAC_DINH)
         self._thiet_bi_yeu_cau = thiet_bi or cau_hinh.get("thiet_bi")
+        self.kich_thuoc_lo = int(
+            kich_thuoc_lo or cau_hinh.get("kich_thuoc_lo", KICH_THUOC_LO_MAC_DINH)
+        )
+        if self.kich_thuoc_lo <= 0:
+            raise ValueError("kich_thuoc_lo phải lớn hơn 0")
+        self.so_dau_mac_dinh = int(cau_hinh.get("so_dau", 100))
+        self.cach_gop_mac_dinh = str(cau_hinh.get("cach_gop", "thay"))
+        self.tat_dinh = bool(
+            cau_hinh.get("tat_dinh", True) if tat_dinh is None else tat_dinh
+        )
 
         if duong_dan_anh is None:
             from .paths import keyframe_image
@@ -123,6 +139,17 @@ class Reranker:
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
+        if self.tat_dinh:
+            # Hai lần nghiệm thu phải cho cùng thứ tự. Các cờ này tắt việc
+            # cuDNN tự chọn thuật toán khác nhau giữa hai lượt trên GPU.
+            if hasattr(torch.backends, "cudnn"):
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+            try:
+                torch.use_deterministic_algorithms(True, warn_only=True)
+            except TypeError:  # torch cũ chưa có warn_only
+                torch.use_deterministic_algorithms(True)
+
         model, _, preprocess = open_clip.create_model_and_transforms(
             self.ten_mo_hinh,
             pretrained=self.pretrained,
@@ -143,24 +170,63 @@ class Reranker:
     def ma_hoa_cau(self, cau_hoi: str) -> np.ndarray:
         import torch
 
+        if not cau_hoi or not cau_hoi.strip():
+            raise ValueError("Câu truy vấn rỗng.")
+
         self._nap()
-        with torch.no_grad():
-            token = self._tokenizer([cau_hoi]).to(self._thiet_bi)
+        with torch.inference_mode():
+            token = self._tokenizer([cau_hoi.strip()]).to(self._thiet_bi)
             v = self._model.encode_text(token)
             v = v / v.norm(dim=-1, keepdim=True)
-        return v.cpu().numpy().astype(np.float64).ravel()
+        ra = v.float().cpu().numpy().astype(np.float32, copy=False).ravel()
+        if not np.isfinite(ra).all():
+            raise ValueError("Mô hình sinh vector câu chứa NaN hoặc vô hạn.")
+        return ra
 
     def ma_hoa_anh(self, duong_dan: Path) -> np.ndarray:
+        """Mã hoá một ảnh. Đường chạy chính dùng `ma_hoa_nhieu_anh()` theo lô."""
+        return self.ma_hoa_nhieu_anh([duong_dan], kich_thuoc_lo=1)[0]
+
+    def ma_hoa_nhieu_anh(
+        self,
+        cac_duong_dan: Sequence[Path],
+        kich_thuoc_lo: int | None = None,
+    ) -> list[np.ndarray]:
+        """Mã hoá ảnh theo lô để top-100 không thành 100 lượt gọi mô hình.
+
+        Chỉ giữ tensor của một lô trong RAM/VRAM. Vì vậy máy không có GPU vẫn
+        chạy được, còn GPU nhỏ có thể hạ `rerank.kich_thuoc_lo` xuống 4 hoặc 2.
+        Thứ tự vector trả về luôn khớp thứ tự đường dẫn đầu vào.
+        """
         import torch
         from PIL import Image
 
         self._nap()
-        with Image.open(duong_dan) as anh:
-            x = self._preprocess(anh.convert("RGB")).unsqueeze(0).to(self._thiet_bi)
-        with torch.no_grad():
-            v = self._model.encode_image(x)
-            v = v / v.norm(dim=-1, keepdim=True)
-        return v.cpu().numpy().astype(np.float64).ravel()
+        lo = int(kich_thuoc_lo or self.kich_thuoc_lo)
+        if lo <= 0:
+            raise ValueError("kich_thuoc_lo phải lớn hơn 0")
+
+        ra: list[np.ndarray] = []
+        for bat_dau in range(0, len(cac_duong_dan), lo):
+            duong_dan_lo = cac_duong_dan[bat_dau: bat_dau + lo]
+            tensor_anh = []
+            for duong_dan in duong_dan_lo:
+                with Image.open(duong_dan) as anh:
+                    tensor_anh.append(self._preprocess(anh.convert("RGB")))
+
+            if not tensor_anh:
+                continue
+
+            x = torch.stack(tensor_anh).to(self._thiet_bi)
+            with torch.inference_mode():
+                v = self._model.encode_image(x)
+                v = v / v.norm(dim=-1, keepdim=True)
+            mang = v.float().cpu().numpy().astype(np.float32, copy=False)
+            if not np.isfinite(mang).all():
+                raise ValueError("Mô hình sinh vector ảnh chứa NaN hoặc vô hạn.")
+            ra.extend(hang.copy() for hang in mang)
+
+        return ra
 
     def _vector_anh(self, video_id: str, n: int) -> np.ndarray | None:
         khoa = (video_id, int(n))
@@ -175,14 +241,56 @@ class Reranker:
         self._nho_anh[khoa] = v
         return v
 
+    def _vector_nhieu_anh(
+        self,
+        cac_khoa: Sequence[tuple[str, int]],
+    ) -> dict[tuple[str, int], np.ndarray | None]:
+        """Lấy vector cache và mã hoá gộp mọi ảnh chưa có trong cache."""
+        ket_qua: dict[tuple[str, int], np.ndarray | None] = {}
+        khoa_moi: list[tuple[str, int]] = []
+        duong_dan_moi: list[Path] = []
+        da_xet: set[tuple[str, int]] = set()
+
+        for video_id, n in cac_khoa:
+            khoa = (str(video_id), int(n))
+            if khoa in da_xet:
+                continue
+            da_xet.add(khoa)
+            if khoa in self._nho_anh:
+                ket_qua[khoa] = self._nho_anh[khoa]
+                continue
+
+            duong_dan = Path(self.duong_dan_anh(*khoa))
+            if not duong_dan.exists():
+                ket_qua[khoa] = None
+                continue
+            khoa_moi.append(khoa)
+            duong_dan_moi.append(duong_dan)
+
+        if duong_dan_moi:
+            cac_vector = self.ma_hoa_nhieu_anh(duong_dan_moi)
+            if len(cac_vector) != len(khoa_moi):
+                raise RuntimeError(
+                    "Số vector ảnh trả về không khớp số ảnh đưa vào rerank."
+                )
+            for khoa, vector in zip(khoa_moi, cac_vector):
+                self._nho_anh[khoa] = vector
+                ket_qua[khoa] = vector
+
+        return ket_qua
+
+    def xoa_nho_anh(self) -> None:
+        """Xoá cache vector ảnh, dùng trước lượt nghiệm thu độc lập thứ hai."""
+        self._nho_anh.clear()
+
     # -- xếp lại -----------------------------------------------------------
 
     def xep_lai(
         self,
         cau_hoi: str,
         ung_vien: Sequence,
-        so_dau: int = 100,
-        cach_gop: str = "thay",
+        so_dau: int | None = None,
+        cach_gop: str | None = None,
         k_rrf: int = 60,
     ) -> tuple[list, BaoCaoXepLai]:
         """Xếp lại `so_dau` ứng viên đầu tiên. Phần còn lại giữ nguyên phía sau.
@@ -197,20 +305,31 @@ class Reranker:
         import time
 
         bat_dau = time.perf_counter()
+        so_dau = self.so_dau_mac_dinh if so_dau is None else int(so_dau)
+        cach_gop = cach_gop or self.cach_gop_mac_dinh
+        if so_dau <= 0:
+            raise ValueError("so_dau phải lớn hơn 0")
+        if k_rrf < 0:
+            raise ValueError("k_rrf không được âm")
         ung_vien = list(ung_vien)
         dau = ung_vien[:so_dau]
         duoi = ung_vien[so_dau:]
 
         if not dau:
-            return ung_vien, BaoCaoXepLai(0, 0, 0, 0, 0.0, self.ten_day_du)
+            return ung_vien, BaoCaoXepLai(
+                0, 0, 0, 0, 0.0, self.ten_day_du,
+                self.kich_thuoc_lo, cach_gop,
+            )
 
         v_cau = self.ma_hoa_cau(cau_hoi)
+        cac_khoa = [(str(h.video_id), int(h.n)) for h in dau]
+        cac_vector = self._vector_nhieu_anh(cac_khoa)
 
         cham_diem: list[tuple[float, int, Any]] = []   # (điểm, hạng cũ, hit)
         thieu: list = []
 
-        for hang_cu, h in enumerate(dau):
-            v_anh = self._vector_anh(str(h.video_id), int(h.n))
+        for hang_cu, (h, khoa) in enumerate(zip(dau, cac_khoa)):
+            v_anh = cac_vector[khoa]
             if v_anh is None:
                 thieu.append(h)
                 continue
@@ -253,32 +372,68 @@ class Reranker:
             so_dao_thu_hang=dao,
             thoi_gian_ms=(time.perf_counter() - bat_dau) * 1000,
             mo_hinh=self.ten_day_du,
+            kich_thuoc_lo=self.kich_thuoc_lo,
+            cach_gop=cach_gop,
         )
         return ket_qua, bao_cao
 
-    def kiem_tat_dinh(self, cau_hoi: str, ung_vien: Sequence, so_dau: int = 20) -> bool:
-        """Chạy hai lần, so thứ tự. Đây là dòng nghiệm thu của checklist."""
-        lan_1, _ = self.xep_lai(cau_hoi, ung_vien, so_dau=so_dau)
-        self._nho_anh.clear()                      # ép mã hoá lại từ đầu
-        lan_2, _ = self.xep_lai(cau_hoi, ung_vien, so_dau=so_dau)
-        return [(h.video_id, h.n) for h in lan_1] == [(h.video_id, h.n) for h in lan_2]
+    def kiem_tat_dinh(
+        self,
+        cau_hoi: str,
+        ung_vien: Sequence,
+        so_dau: int | None = None,
+        cach_gop: str | None = None,
+    ) -> bool:
+        """Mã hoá lại từ đầu hai lần và so cả thứ tự lẫn điểm số."""
+        lan_1, _ = self.xep_lai(
+            cau_hoi, ung_vien, so_dau=so_dau, cach_gop=cach_gop
+        )
+        self.xoa_nho_anh()
+        lan_2, _ = self.xep_lai(
+            cau_hoi, ung_vien, so_dau=so_dau, cach_gop=cach_gop
+        )
+        return _chu_ky(lan_1) == _chu_ky(lan_2)
 
 
 def _thay_diem(hit, diem: float):
     """Đổi score của một Hit (frozen dataclass) mà giữ nguyên các trường khác."""
     import dataclasses
 
-    try:
-        return dataclasses.replace(hit, score=float(diem), source=f"{hit.source}+rerank")
-    except Exception:
-        return hit
+    if isinstance(hit, Mapping):
+        ra = dict(hit)
+        nguon = str(ra.get("source", ""))
+        ra["score"] = float(diem)
+        ra["source"] = nguon if "rerank" in nguon.split("+") else f"{nguon}+rerank".lstrip("+")
+        return ra
+
+    if not dataclasses.is_dataclass(hit):
+        raise TypeError(
+            "Ứng viên rerank phải là dataclass Hit hoặc mapping có video_id/n."
+        )
+
+    nguon = str(getattr(hit, "source", ""))
+    nguon_moi = nguon if "rerank" in nguon.split("+") else f"{nguon}+rerank".lstrip("+")
+    return dataclasses.replace(hit, score=float(diem), source=nguon_moi)
+
+
+def _chu_ky(hits: Sequence) -> list[tuple[str, int, float]]:
+    """Chữ ký nghiệm thu: định danh, thứ tự và điểm float32 của từng hit."""
+    ra = []
+    for h in hits:
+        if isinstance(h, Mapping):
+            video_id, n, score = h["video_id"], h["n"], h.get("score", 0.0)
+        else:
+            video_id, n, score = h.video_id, h.n, h.score
+        ra.append((str(video_id), int(n), float(np.float32(score))))
+    return ra
 
 
 def boc_them_rerank(
     tim_ung_vien: Callable[[str, int], list],
     bo_xep_lai: Reranker | None = None,
-    so_dau: int = 100,
-    cach_gop: str = "thay",
+    so_dau: int | None = None,
+    cach_gop: str | None = None,
+    bien_doi_cau: Callable[[str], str] | None = None,
 ) -> Callable[[str, int], list]:
     """Bọc một hàm tìm ứng viên để nó tự xếp lại top-N trước khi trả về.
 
@@ -289,8 +444,9 @@ def boc_them_rerank(
 
     def _tim(cau_hoi: str, so_ung_vien: int):
         tho = tim_ung_vien(cau_hoi, so_ung_vien)
+        cau_cho_mo_hinh = bien_doi_cau(cau_hoi) if bien_doi_cau else cau_hoi
         da_xep, _ = bo_xep_lai.xep_lai(
-            cau_hoi, tho, so_dau=so_dau, cach_gop=cach_gop
+            cau_cho_mo_hinh, tho, so_dau=so_dau, cach_gop=cach_gop
         )
         return da_xep
 

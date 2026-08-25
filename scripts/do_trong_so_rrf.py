@@ -147,8 +147,16 @@ def dung_cac_nguon(
         _tim_tho = _tim
 
         def _tim(cau, k):
+            # Tầng thô và tầng rerank phải nhận CÙNG một câu cho mô hình ảnh.
+            # Khi Việc 5 bật, _tim_tho đã dùng cụm tiếng Anh; nếu rerank lại
+            # chấm bằng câu Việt gốc thì phép đo đang đổi hai biến cùng lúc.
+            cau_rerank = cau
+            if mo_rong_clip:
+                from aic2026.query_expand import mo_rong as _mo_rong
+
+                cau_rerank = _mo_rong(cau).cum_chinh
             da_xep, bao_cao = _bo_xep.xep_lai(
-                cau, _tim_tho(cau, k), so_dau=rerank_so_dau
+                cau_rerank, _tim_tho(cau, k), so_dau=rerank_so_dau
             )
             THONG_KE_RERANK["da_xep"] += bao_cao.so_da_xep_lai
             THONG_KE_RERANK["thieu_anh"] += bao_cao.so_thieu_anh

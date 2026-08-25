@@ -34,6 +34,8 @@ rerank:
   pretrained: laion2b_s32b_b82k
   # thiet_bi: cpu        # bỏ trống thì tự chọn cuda nếu có
   so_dau: 100
+  kich_thuoc_lo: 8       # GPU/RAM yếu: hạ 4 hoặc 2; CPU vẫn chạy được
+  tat_dinh: true         # bắt buộc cho phép nghiệm thu hai lượt giống nhau
   cach_gop: thay         # thay | rrf — đo cả hai trên dev v2 rồi hãy chốt
 
 # ---------------------------------------------------------------------------
