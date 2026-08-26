@@ -119,6 +119,7 @@ from aic2026.index.faiss_index import Hit                          # noqa: E402
 from aic2026.rank import config as cfg                             # noqa: E402
 from aic2026.rank.dedupe import loc_trung                          # noqa: E402
 from aic2026.rank.search import tim_ung_vien_clip                  # noqa: E402
+from aic2026.rank.hop_nhat import NGUON_CLIP_L
 from aic2026.rank.hop_nhat import (                                # noqa: E402
     NGUON_ASR, NGUON_CLIP, NGUON_OCR, NGUON_OCR_FTS,
     tim_ung_vien_gop,
@@ -735,6 +736,12 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         ocr_engine=ocr_engine,
         kho_chu=kho_chu,
         dung_clip=NGUON_CLIP in cac_nguon,
+        dung_clip_l=NGUON_CLIP_L in cac_nguon,
+        nguon_clip_l=(
+            "marian"
+            if NGUON_CLIP_L in cac_nguon
+            else None
+        ),
         dung_ocr=NGUON_OCR in cac_nguon,
         dung_ocr_fts=NGUON_OCR_FTS in cac_nguon,
         dung_asr=NGUON_ASR in cac_nguon,
@@ -972,7 +979,7 @@ with st.form("form_tim_kiem", clear_on_submit=False):
         cot_clip, cot_ocr, cot_fts, cot_asr = st.columns(4)
 
         bat_clip = cot_clip.checkbox(
-            "Hình ảnh (CLIP)",
+            "Hình ảnh mạnh (CLIP-L)",
             value=True,
             key="ng_clip",
             help="Tìm theo độ tương đồng ngữ nghĩa hình ảnh - văn bản.",
@@ -1024,7 +1031,7 @@ with st.form("form_tim_kiem", clear_on_submit=False):
     cac_nguon = set()
 
     if bat_clip:
-        cac_nguon.add(NGUON_CLIP)
+        cac_nguon.add(NGUON_CLIP_L)
     if bat_ocr:
         cac_nguon.add(NGUON_OCR)
     if bat_ocr_fts:

@@ -42,7 +42,12 @@ except ImportError:
     pass
 
 from aic2026.eval import compute_final_score  # noqa: E402
-from aic2026.paths import DEV_QUERIES_PATH, RUNS_DIR  # noqa: E402
+from aic2026.paths import (
+    DEV_QUERIES_PATH,
+    RUNS_DIR,
+    THUMBNAILS_DIR,
+    bang_tep_theo_so,
+)  # noqa: E402
 from aic2026.rank.config import so_ung_vien_moi_nguon  # noqa: E402
 from aic2026.rank.search import run_query, tim_ung_vien_clip  # noqa: E402
 from aic2026.rerank import Reranker  # noqa: E402
@@ -51,6 +56,13 @@ from scripts.run_scoring import build_gt, doc_dev_questions  # noqa: E402
 
 
 CO_MAU_KET_LUAN_TOI_THIEU = 40
+
+
+def _duong_dan_thumbnail(video_id: str, n: int) -> Path:
+    base = THUMBNAILS_DIR / str(video_id)
+    found = bang_tep_theo_so(base, ".jpg").get(int(n))
+    return found if found is not None else base / f"{int(n):03d}.jpg"
+
 
 
 def _chu_ky(hits) -> list[tuple[str, int, float]]:
@@ -116,6 +128,11 @@ def main() -> int:
     p.add_argument("--nguon-mo-rong", choices=["tu_dien", "marian", "llm"])
     p.add_argument("--cho-phep-thieu-anh", action="store_true",
                    help="chỉ debug; báo cáo có ảnh thiếu không được dùng chốt điểm")
+    p.add_argument(
+        "--dung-thumbnail",
+        action="store_true",
+        help="dung derived/thumbnails thay cho raw/keyframes",
+    )
     p.add_argument("--ra", default=None, help="đường dẫn báo cáo JSON")
     args = p.parse_args()
 
@@ -144,10 +161,16 @@ def main() -> int:
         print("LỖI: bộ dev không có câu KIS/QA hợp lệ.")
         return 2
 
-    bo = Reranker()
+    nguon_anh = "thumbnail" if args.dung_thumbnail else "keyframe_goc"
+    bo = Reranker(
+        duong_dan_anh=_duong_dan_thumbnail
+        if args.dung_thumbnail
+        else None
+    )
     cach_gop = args.cach_gop or bo.cach_gop_mac_dinh
     so_lay_tho = max(args.so_dau, so_ung_vien_moi_nguon())
 
+    print(f"Nguon anh     : {nguon_anh}")
     print(f"Dev           : {args.tep} ({len(cau_hoi)} câu KIS/QA)")
     print(f"Tầng thô      : CLIP B/32, lấy {so_lay_tho} ứng viên")
     print(f"Rerank        : {bo.ten_day_du}, top-{args.so_dau}, {cach_gop}, batch={bo.kich_thuoc_lo}")
@@ -260,6 +283,7 @@ def main() -> int:
         "du_co_mau_ket_luan": du_co_mau,
         "co_mau_ket_luan_toi_thieu": CO_MAU_KET_LUAN_TOI_THIEU,
         "mo_hinh": bo.ten_day_du,
+        "nguon_anh": nguon_anh,
         "so_dau": args.so_dau,
         "so_lay_tho": so_lay_tho,
         "kich_thuoc_lo": bo.kich_thuoc_lo,

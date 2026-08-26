@@ -303,6 +303,7 @@ def tim_ung_vien_gop(
     dung_clip_l: bool = False,
     mo_rong_truy_van: bool = False,
     nguon_mo_rong: str | None = None,
+    nguon_clip_l: str | None = None,
     dang_cau: str | None = None,
     trong_so=None,
     k_rrf: int = 60,
@@ -437,12 +438,17 @@ def tim_ung_vien_gop(
             from aic2026.index.clip_l_index import tim as _tim_clip_l
 
             cau_anh = cau_hoi
-            if mo_rong_truy_van:
+            if nguon_clip_l:
                 try:
                     from aic2026.query_expand import mo_rong
 
-                    cau_anh = mo_rong(cau_hoi, nguon=nguon_mo_rong).cum_chinh
+                    cau_anh = mo_rong(
+                        cau_hoi,
+                        nguon=nguon_clip_l,
+                        bat_buoc=True,
+                    ).cum_chinh
                 except Exception:
+                    # Mạch sản phẩm vẫn phải trả kết quả nếu bộ dịch lỗi.
                     cau_anh = cau_hoi
 
             hits = [

@@ -109,6 +109,7 @@ def dung_cac_nguon(
     loc_vat_the: bool = False,
     loc_token_hiem_ocr: bool = False,
     dung_clip_l: bool = False,
+    nguon_clip_l: str | None = None,
     rerank: bool = False,
     rerank_so_dau: int = 100,
 ):
@@ -203,15 +204,16 @@ def dung_cac_nguon(
     if dung_clip_l:
         from aic2026.index.clip_l_index import tim as _tim_clip_l
 
-        if mo_rong_clip:
+        if nguon_clip_l:
             from aic2026.query_expand import mo_rong as _mr
 
             def _clip_l(cau, k):
-                try:
-                    cau = _mr(cau).cum_chinh
-                except Exception:
-                    pass
-                return _tim_clip_l(cau, k)
+                cau_anh = _mr(
+                    cau,
+                    nguon=nguon_clip_l,
+                    bat_buoc=True,
+                ).cum_chinh
+                return _tim_clip_l(cau_anh, k)
         else:
             _clip_l = _tim_clip_l
 
@@ -303,7 +305,11 @@ def cham_mot_bo(kho_tam, cau_hoi_list, trong_so, cua_so_giay, so_dong, k_rrf):
     return ket_qua
 
 
-def sinh_luoi(nhanh_co_that: list[str], quanh: dict | None = None):
+def sinh_luoi(
+    nhanh_co_that: list[str],
+    quanh: dict | None = None,
+    nhanh_neo: str = "clip",
+):
     """Sinh các bộ trọng số cần thử."""
     if quanh is None:
         gia_tri = {t: LUOI_THO for t in nhanh_co_that}
@@ -323,7 +329,7 @@ def sinh_luoi(nhanh_co_that: list[str], quanh: dict | None = None):
 
     ten = list(gia_tri)
     for to_hop in itertools.product(*(gia_tri[t] for t in ten)):
-        bo = {"clip": 1.0}
+        bo = {nhanh_neo: 1.0}
         bo.update(dict(zip(ten, to_hop)))
         yield bo
 
@@ -351,7 +357,9 @@ def main() -> int:
     p.add_argument("--min", action="store_true", help="quét tinh quanh bản đang chốt")
     p.add_argument("--chi-do-rieng", action="store_true")
     p.add_argument("--nguon-mo-rong", choices=["tu_dien", "marian", "llm"],
-                   default=None, help="bật Việc 5 cho nhánh CLIP")
+                   default=None, help="bật Việc 5 cho nhánh CLIP B/32")
+    p.add_argument("--nguon-clip-l", choices=["tu_dien", "marian", "llm"],
+                   default=None, help="nguồn tiếng Anh riêng cho nhánh CLIP-L")
     args = p.parse_args()
 
     cau_hoi = doc_dev_questions(Path(args.tep))
@@ -411,6 +419,7 @@ def main() -> int:
         loc_vat_the=args.loc_vat_the,
         loc_token_hiem_ocr=args.loc_token_hiem,
         dung_clip_l=args.clip_l,
+        nguon_clip_l=args.nguon_clip_l,
         rerank=args.rerank,
         rerank_so_dau=args.rerank_so_dau,
     )
@@ -472,13 +481,25 @@ def main() -> int:
         return 0
 
     # -- quét lưới ----------------------------------------------------------
-    nhanh_co_that = [t for t in NHANH if t in nguon]
+    if "clip_l" in nguon:
+        nhanh_neo = "clip_l"
+        nhanh_co_that = [
+            t
+            for t in ["clip", "ocr_fts", "asr", "object", "caption"]
+            if t in nguon
+        ]
+    else:
+        nhanh_neo = "clip"
+        nhanh_co_that = [t for t in NHANH if t in nguon]
+
     quanh = None
     if args.min and TEP_TRONG_SO.exists():
         with TEP_TRONG_SO.open("r", encoding="utf-8") as f:
             quanh = (yaml.safe_load(f) or {}).get("mac_dinh")
 
-    cac_bo = list(sinh_luoi(nhanh_co_that, quanh))
+    cac_bo = list(
+        sinh_luoi(nhanh_co_that, quanh, nhanh_neo=nhanh_neo)
+    )
     print(f"Bước 3 — quét {len(cac_bo):,} bộ trọng số")
 
     bang: list[tuple[dict, dict]] = []
@@ -502,15 +523,35 @@ def main() -> int:
     print("Bước 4 — so với các bộ đơn giản, giải thích được\n")
 
     def _bo(**kw):
-        return {t: float(kw.get(t, 0.0)) for t in ["clip"] + nhanh_co_that}
+        return {t: float(kw.get(t, 0.0)) for t in nguon}
 
-    tham_chieu = {
-        "chỉ clip": _bo(clip=1),
-        "clip + ocr": _bo(clip=1, ocr_fts=1),
-        "clip + ocr + asr": _bo(clip=1, ocr_fts=1, asr=1),
-        "ba nhánh, bỏ vật thể": _bo(clip=1, ocr_fts=1, asr=0.6),
-        "mặc định settings.yaml": _bo(clip=1, ocr_fts=0.6, asr=0.6, object=0.4),
-    }
+    if "clip_l" in nguon:
+        tham_chieu = {
+            "chỉ clip": _bo(clip=1),
+            "chỉ clip_l": _bo(clip_l=1),
+            "clip + clip_l": _bo(clip=1, clip_l=1),
+            "clip_l + ocr": _bo(clip_l=1, ocr_fts=1),
+            "clip_l + ocr + asr": _bo(
+                clip_l=1, ocr_fts=1, asr=1
+            ),
+            "clip_l + chữ + vật thể": _bo(
+                clip_l=1, ocr_fts=1, asr=0.6, object=0.2
+            ),
+        }
+    else:
+        tham_chieu = {
+            "chỉ clip": _bo(clip=1),
+            "clip + ocr": _bo(clip=1, ocr_fts=1),
+            "clip + ocr + asr": _bo(
+                clip=1, ocr_fts=1, asr=1
+            ),
+            "ba nhánh, bỏ vật thể": _bo(
+                clip=1, ocr_fts=1, asr=0.6
+            ),
+            "mặc định settings.yaml": _bo(
+                clip=1, ocr_fts=0.6, asr=0.6, object=0.4
+            ),
+        }
 
     global _THAM_CHIEU
     _THAM_CHIEU = tham_chieu

@@ -203,18 +203,28 @@ def tra_mot_de(de: dict, tim, kho_chu=None) -> tuple[list[Answer], str]:
 def dung_tim():
     from aic2026.index.fts_index import TextSearchIndex
     from aic2026.paths import FTS_DIR
+    from aic2026.rank.config import trong_so_theo_dang
     from aic2026.rank.hop_nhat import tim_ung_vien_gop
 
     kho_chu = TextSearchIndex(FTS_DIR / "text.sqlite")
-    return {
-        dang: tim_ung_vien_gop(
+
+    def dung_mot_dang(dang):
+        trong_so = trong_so_theo_dang(dang)
+
+        return tim_ung_vien_gop(
             kho_chu=kho_chu,
-            dung_clip=True,
-            dung_ocr_fts=True,
-            dung_asr=True,
-            mo_rong_truy_van=True,
+            dung_clip=float(trong_so.get("clip", 0.0)) > 0,
+            dung_ocr_fts=float(trong_so.get("ocr_fts", 0.0)) > 0,
+            dung_asr=float(trong_so.get("asr", 0.0)) > 0,
+            dung_clip_l=float(trong_so.get("clip_l", 0.0)) > 0,
+            mo_rong_truy_van=False,
+            nguon_clip_l="marian",
             dang_cau=dang,
+            trong_so=trong_so,
         )
+
+    return {
+        dang: dung_mot_dang(dang)
         for dang in ("kis", "qa", "trake")
     }
 

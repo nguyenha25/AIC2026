@@ -1,30 +1,31 @@
-/* AIC 2026 - Soft Rose Glassmorphism UI */
+/* AIC 2026 - Berry Rose Glassmorphism UI
+   Reference palette: #DD4473 + #5B011D */
 
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 :root {
-    --bg-0: #fff8fb;
-    --bg-1: #fff1f6;
+    --bg-0: #fff8fa;
+    --bg-1: #fff0f4;
     --surface-1: rgba(255, 255, 255, 0.62);
-    --surface-2: rgba(255, 247, 251, 0.78);
-    --surface-3: rgba(253, 232, 241, 0.8);
+    --surface-2: rgba(255, 246, 249, 0.78);
+    --surface-3: rgba(250, 224, 232, 0.8);
     --glass: rgba(255, 255, 255, 0.58);
     --glass-strong: rgba(255, 255, 255, 0.78);
-    --line: rgba(190, 24, 93, 0.11);
-    --line-strong: rgba(190, 24, 93, 0.22);
-    --text-1: #3f2532;
-    --text-2: #664454;
-    --text-3: #927181;
-    --pink: #ec4899;
-    --pink-soft: #f9a8d4;
-    --rose: #e11d67;
-    --rose-soft: #fb7185;
-    --fuchsia: #c026d3;
-    --success: #be185d;
-    --warning: #d97706;
-    --danger: #e11d48;
-    --shadow: 0 20px 54px rgba(190, 24, 93, 0.1);
-    --shadow-hover: 0 24px 58px rgba(190, 24, 93, 0.17);
+    --line: rgba(91, 1, 29, 0.1);
+    --line-strong: rgba(91, 1, 29, 0.2);
+    --text-1: #320a17;
+    --text-2: #663346;
+    --text-3: #956c7a;
+    --pink: #dd4473;
+    --pink-soft: #f3a7be;
+    --rose: #b52a57;
+    --rose-soft: #ea7598;
+    --burgundy: #5b011d;
+    --success: #8f173c;
+    --warning: #9a5b00;
+    --danger: #a81443;
+    --shadow: 0 20px 54px rgba(91, 1, 29, 0.09);
+    --shadow-hover: 0 24px 58px rgba(91, 1, 29, 0.16);
     --radius-lg: 22px;
     --radius-md: 15px;
     --radius-sm: 11px;
@@ -46,9 +47,9 @@ body,
     min-height: 100vh;
     color: var(--text-1);
     background:
-        radial-gradient(circle at 6% 8%, rgba(249, 168, 212, 0.52) 0, rgba(249, 168, 212, 0.18) 18rem, transparent 32rem),
-        radial-gradient(circle at 94% 78%, rgba(192, 38, 211, 0.20) 0, rgba(251, 113, 133, 0.16) 20rem, transparent 35rem),
-        linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(255, 241, 246, 0.78)),
+        radial-gradient(circle at 6% 8%, rgba(221, 68, 115, 0.34) 0, rgba(243, 167, 190, 0.18) 18rem, transparent 32rem),
+        radial-gradient(circle at 94% 78%, rgba(91, 1, 29, 0.13) 0, rgba(221, 68, 115, 0.14) 20rem, transparent 35rem),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.84), rgba(255, 240, 244, 0.78)),
         var(--bg-0);
     background-repeat: no-repeat;
     background-size: 42rem 42rem, 48rem 48rem, 100% 100%, auto;
@@ -97,7 +98,7 @@ hr,
 [data-testid="stDivider"] hr {
     border: 0;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(190, 24, 93, 0.16), transparent);
+    background: linear-gradient(90deg, transparent, rgba(91, 1, 29, 0.14), transparent);
 }
 
 
@@ -113,7 +114,7 @@ hr,
     border: 1px solid rgba(255, 255, 255, 0.82);
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.57);
-    box-shadow: 0 12px 38px rgba(190, 24, 93, 0.09);
+    box-shadow: 0 12px 38px rgba(91, 1, 29, 0.09);
     backdrop-filter: blur(22px) saturate(145%);
     -webkit-backdrop-filter: blur(22px) saturate(145%);
 }
@@ -133,15 +134,15 @@ hr,
     justify-content: center;
     border-radius: 12px;
     color: #ffffff;
-    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--fuchsia));
-    box-shadow: 0 9px 22px rgba(225, 29, 103, 0.22);
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--burgundy));
+    box-shadow: 0 9px 22px rgba(181, 42, 87, 0.22);
     font-size: 0.92rem;
     font-weight: 800;
     transition: transform var(--ease), box-shadow var(--ease);
 }
 
 .app-nav:hover .nav-mark {
-    box-shadow: 0 12px 28px rgba(192, 38, 211, 0.24);
+    box-shadow: 0 12px 28px rgba(91, 1, 29, 0.22);
     transform: translateY(-2px) rotate(-4deg);
 }
 
@@ -167,8 +168,8 @@ hr,
     gap: 0.5rem;
     padding: 0.5rem 0.72rem;
     border-radius: 999px;
-    color: #9d174d;
-    background: rgba(253, 232, 241, 0.76);
+    color: #741332;
+    background: rgba(250, 224, 232, 0.76);
     font-size: 0.7rem;
     font-weight: 700;
 }
@@ -184,7 +185,7 @@ hr,
 .status-pulse::after {
     position: absolute;
     inset: -4px;
-    border: 1px solid rgba(225, 29, 103, 0.48);
+    border: 1px solid rgba(221, 68, 115, 0.48);
     border-radius: 50%;
     content: "";
     animation: statusPulse 1.9s ease-out infinite;
@@ -222,8 +223,8 @@ hr,
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--pink), var(--fuchsia));
-    box-shadow: 0 0 0 5px rgba(236, 72, 153, 0.1);
+    background: linear-gradient(135deg, var(--pink), var(--burgundy));
+    box-shadow: 0 0 0 5px rgba(221, 68, 115, 0.1);
     content: "";
 }
 
@@ -231,7 +232,7 @@ hr,
     max-width: 820px;
     margin: 0;
     color: var(--text-1);
-    background: linear-gradient(110deg, #4a2939 12%, var(--rose) 55%, var(--fuchsia));
+    background: linear-gradient(110deg, var(--text-1) 12%, var(--pink) 55%, var(--burgundy));
     background-clip: text;
     font-size: clamp(2rem, 3.2vw, 3.4rem);
     font-weight: 800;
@@ -290,7 +291,7 @@ div[data-testid="stForm"] {
     border: 1px solid rgba(255, 255, 255, 0.84);
     border-radius: var(--radius-lg);
     background:
-        linear-gradient(135deg, rgba(255, 255, 255, 0.76), rgba(255, 244, 248, 0.54));
+        linear-gradient(135deg, rgba(255, 255, 255, 0.76), rgba(255, 242, 246, 0.54));
     box-shadow: var(--shadow);
     backdrop-filter: blur(22px) saturate(145%);
     -webkit-backdrop-filter: blur(22px) saturate(145%);
@@ -333,8 +334,8 @@ div[data-testid="stForm"] {
     border: 0;
     border-radius: 11px;
     color: #ffffff;
-    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--fuchsia));
-    box-shadow: 0 8px 20px rgba(225, 29, 103, 0.18);
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--burgundy));
+    box-shadow: 0 8px 20px rgba(181, 42, 87, 0.18);
     font-family: var(--mono);
     font-size: 0.67rem;
     font-weight: 800;
@@ -350,7 +351,7 @@ label[data-testid="stWidgetLabel"] p {
 div[data-testid="stTextInput"] input,
 div[data-testid="stNumberInput"] input,
 div[data-testid="stTextArea"] textarea {
-    border: 1px solid rgba(190, 24, 93, 0.12);
+    border: 1px solid rgba(91, 1, 29, 0.12);
     border-radius: var(--radius-sm);
     color: var(--text-1);
     background: rgba(255, 255, 255, 0.7);
@@ -376,21 +377,21 @@ div[data-testid="stTextArea"] textarea {
 div[data-testid="stTextInput"] input:hover,
 div[data-testid="stNumberInput"] input:hover,
 div[data-testid="stTextArea"] textarea:hover {
-    border-color: rgba(236, 72, 153, 0.3);
+    border-color: rgba(221, 68, 115, 0.3);
     background: rgba(255, 255, 255, 0.86);
 }
 
 div[data-testid="stTextInput"] input:focus,
 div[data-testid="stNumberInput"] input:focus,
 div[data-testid="stTextArea"] textarea:focus {
-    border-color: rgba(225, 29, 103, 0.5);
+    border-color: rgba(181, 42, 87, 0.5);
     background: rgba(255, 255, 255, 0.96);
-    box-shadow: 0 0 0 4px rgba(236, 72, 153, 0.1);
+    box-shadow: 0 0 0 4px rgba(221, 68, 115, 0.1);
 }
 
 div[data-testid="stTextInput"] input::placeholder,
 div[data-testid="stTextArea"] textarea::placeholder {
-    color: #b59aa7;
+    color: #b08c98;
 }
 
 div[data-testid="stTextInput"] > div,
@@ -416,11 +417,11 @@ div[data-testid="stDownloadButton"] > button,
 div[data-testid="stFormSubmitButton"] > button {
     min-height: 41px;
     max-width: 100%;
-    border: 1px solid rgba(190, 24, 93, 0.14);
+    border: 1px solid rgba(91, 1, 29, 0.14);
     border-radius: var(--radius-sm);
-    color: #8e3a60;
+    color: #7b2946;
     background: rgba(255, 255, 255, 0.65);
-    box-shadow: 0 7px 20px rgba(190, 24, 93, 0.07);
+    box-shadow: 0 7px 20px rgba(91, 1, 29, 0.07);
     font-size: 0.77rem;
     font-weight: 700;
     white-space: nowrap;
@@ -436,10 +437,10 @@ div[data-testid="stFormSubmitButton"] > button {
 
 div.stButton > button:hover,
 div[data-testid="stDownloadButton"] > button:hover {
-    border-color: rgba(236, 72, 153, 0.34);
+    border-color: rgba(221, 68, 115, 0.34);
     color: var(--rose);
     background: rgba(255, 255, 255, 0.88);
-    box-shadow: 0 12px 28px rgba(190, 24, 93, 0.12);
+    box-shadow: 0 12px 28px rgba(91, 1, 29, 0.12);
     transform: translateY(-2px);
 }
 
@@ -448,8 +449,8 @@ button[data-testid="baseButton-primary"],
 div.stButton > button[kind="primary"] {
     border-color: transparent;
     color: #ffffff;
-    background: linear-gradient(115deg, var(--rose-soft), var(--pink) 50%, var(--fuchsia));
-    box-shadow: 0 12px 28px rgba(225, 29, 103, 0.22);
+    background: linear-gradient(115deg, var(--rose-soft), var(--pink) 50%, var(--burgundy));
+    box-shadow: 0 12px 28px rgba(181, 42, 87, 0.22);
 }
 
 div[data-testid="stFormSubmitButton"] > button:hover,
@@ -457,8 +458,8 @@ button[data-testid="baseButton-primary"]:hover,
 div.stButton > button[kind="primary"]:hover {
     border-color: transparent;
     color: #ffffff;
-    background: linear-gradient(115deg, #fb7185, #db2777 52%, #a21caf);
-    box-shadow: 0 15px 32px rgba(192, 38, 211, 0.25);
+    background: linear-gradient(115deg, #ea7598, #c53160 52%, #5b011d);
+    box-shadow: 0 15px 32px rgba(91, 1, 29, 0.25);
 }
 
 div.stButton > button:active,
@@ -469,8 +470,8 @@ div[data-testid="stFormSubmitButton"] > button:active {
 
 div.stButton > button:disabled,
 div[data-testid="stDownloadButton"] > button:disabled {
-    border-color: rgba(146, 113, 129, 0.12);
-    color: #bda5b1;
+    border-color: rgba(91, 1, 29, 0.12);
+    color: #bea5ae;
     background: rgba(255, 255, 255, 0.42);
     box-shadow: none;
     opacity: 0.72;
@@ -480,7 +481,7 @@ div.stButton > button:focus-visible,
 div[data-testid="stDownloadButton"] > button:focus-visible,
 div[data-testid="stFormSubmitButton"] > button:focus-visible {
     outline: 0;
-    box-shadow: 0 0 0 4px rgba(236, 72, 153, 0.16);
+    box-shadow: 0 0 0 4px rgba(221, 68, 115, 0.16);
 }
 
 div.stButton > button p,
@@ -498,7 +499,7 @@ div[data-testid="stDownloadButton"] > button p {
 
 div[data-testid="stExpander"] details {
     overflow: hidden;
-    border: 1px solid rgba(190, 24, 93, 0.1);
+    border: 1px solid rgba(91, 1, 29, 0.1);
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.48);
     backdrop-filter: blur(14px);
@@ -514,7 +515,7 @@ div[data-testid="stExpander"] summary {
 
 div[data-testid="stExpander"] summary:hover {
     color: var(--rose);
-    background: rgba(253, 232, 241, 0.58);
+    background: rgba(250, 224, 232, 0.58);
 }
 
 div[data-testid="stCheckbox"] label,
@@ -525,16 +526,16 @@ div[data-testid="stToggle"] label {
 
 div[data-testid="stSlider"] div[role="slider"] {
     border: 2px solid #ffffff;
-    background: linear-gradient(135deg, var(--pink), var(--fuchsia));
-    box-shadow: 0 3px 10px rgba(190, 24, 93, 0.22);
+    background: linear-gradient(135deg, var(--pink), var(--burgundy));
+    box-shadow: 0 3px 10px rgba(91, 1, 29, 0.22);
 }
 
 div[data-testid="stAlert"] {
-    border: 1px solid rgba(190, 24, 93, 0.1);
+    border: 1px solid rgba(91, 1, 29, 0.1);
     border-left: 3px solid var(--pink);
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.66);
-    box-shadow: 0 9px 26px rgba(190, 24, 93, 0.07);
+    box-shadow: 0 9px 26px rgba(91, 1, 29, 0.07);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
 }
@@ -562,7 +563,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.neighbor-panel-marker) {
 
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.selection-panel-marker) {
     background:
-        linear-gradient(110deg, rgba(249, 168, 212, 0.14), transparent 42%),
+        linear-gradient(110deg, rgba(243, 167, 190, 0.14), transparent 42%),
         rgba(255, 255, 255, 0.63) !important;
 }
 
@@ -610,7 +611,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.selection-panel-marker) {
     border: 1px solid rgba(255, 255, 255, 0.82);
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.5);
-    box-shadow: 0 8px 24px rgba(190, 24, 93, 0.06);
+    box-shadow: 0 8px 24px rgba(91, 1, 29, 0.06);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
 }
@@ -657,8 +658,8 @@ div[data-testid="stColumn"]:has(.result-card-marker)
     border: 1px solid rgba(255, 255, 255, 0.88) !important;
     border-radius: 19px !important;
     background:
-        linear-gradient(155deg, rgba(255, 255, 255, 0.77), rgba(255, 242, 247, 0.52)) !important;
-    box-shadow: 0 13px 34px rgba(190, 24, 93, 0.09);
+        linear-gradient(155deg, rgba(255, 255, 255, 0.77), rgba(255, 240, 244, 0.52)) !important;
+    box-shadow: 0 13px 34px rgba(91, 1, 29, 0.09);
     backdrop-filter: blur(18px) saturate(145%);
     -webkit-backdrop-filter: blur(18px) saturate(145%);
     transition:
@@ -670,19 +671,19 @@ div[data-testid="stColumn"]:has(.result-card-marker)
 
 div[data-testid="stColumn"]:has(.result-card-marker)
 > div[data-testid="stVerticalBlock"]:hover {
-    border-color: rgba(249, 168, 212, 0.72) !important;
+    border-color: rgba(243, 167, 190, 0.72) !important;
     background:
-        linear-gradient(155deg, rgba(255, 255, 255, 0.9), rgba(253, 232, 241, 0.62)) !important;
+        linear-gradient(155deg, rgba(255, 255, 255, 0.9), rgba(250, 224, 232, 0.62)) !important;
     box-shadow: var(--shadow-hover);
     transform: translateY(-5px);
 }
 
 div[data-testid="stColumn"]:has(.result-card-marker.is-selected)
 > div[data-testid="stVerticalBlock"] {
-    border-color: rgba(225, 29, 103, 0.42) !important;
+    border-color: rgba(181, 42, 87, 0.42) !important;
     box-shadow:
-        0 0 0 2px rgba(236, 72, 153, 0.07),
-        0 18px 44px rgba(190, 24, 93, 0.14);
+        0 0 0 2px rgba(221, 68, 115, 0.07),
+        0 18px 44px rgba(91, 1, 29, 0.14);
 }
 
 div[data-testid="stColumn"]:has(.result-card-marker)
@@ -697,7 +698,7 @@ div[data-testid="stImage"] {
     border-radius: 13px;
     background: var(--bg-1);
     line-height: 0;
-    box-shadow: 0 8px 22px rgba(190, 24, 93, 0.08);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.08);
 }
 
 div[data-testid="stColumn"]:has(.result-card-marker)
@@ -722,17 +723,17 @@ div[data-testid="stImage"] img {
     height: 154px;
     align-items: center;
     justify-content: center;
-    border: 1px dashed rgba(190, 24, 93, 0.18);
+    border: 1px dashed rgba(91, 1, 29, 0.18);
     border-radius: 13px;
-    color: #b17b94;
+    color: #a26b7e;
     background:
-        radial-gradient(circle at 25% 25%, rgba(249, 168, 212, 0.28), transparent 48%),
-        rgba(255, 247, 251, 0.74);
+        radial-gradient(circle at 25% 25%, rgba(243, 167, 190, 0.28), transparent 48%),
+        rgba(255, 246, 249, 0.74);
     font-size: 0.72rem;
 }
 
 .image-placeholder.is-missing {
-    border-color: rgba(217, 119, 6, 0.32);
+    border-color: rgba(154, 91, 0, 0.32);
     color: var(--warning);
     background: rgba(255, 247, 237, 0.7);
 }
@@ -759,15 +760,15 @@ div[data-testid="stImage"] img {
     padding: 0.22rem 0.5rem;
     color: #ffffff;
     background: linear-gradient(135deg, var(--rose-soft), var(--pink));
-    box-shadow: 0 6px 14px rgba(225, 29, 103, 0.16);
+    box-shadow: 0 6px 14px rgba(181, 42, 87, 0.16);
 }
 
 .source-badge {
     max-width: 65%;
     padding: 0.22rem 0.5rem;
     overflow: hidden;
-    color: #9d174d;
-    background: rgba(253, 232, 241, 0.82);
+    color: #741332;
+    background: rgba(250, 224, 232, 0.82);
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -829,8 +830,8 @@ div[data-testid="stImage"] img {
     overflow: hidden;
     border-left: 3px solid var(--pink);
     border-radius: 0 9px 9px 0;
-    color: #85566d;
-    background: rgba(253, 232, 241, 0.54);
+    color: #7c4c5c;
+    background: rgba(250, 224, 232, 0.54);
     font-size: 0.68rem;
     line-height: 1.4;
     -webkit-box-orient: vertical;
@@ -851,7 +852,7 @@ div[data-testid="stImage"] {
     overflow: hidden;
     border-radius: 11px;
     line-height: 0;
-    box-shadow: 0 8px 20px rgba(190, 24, 93, 0.08);
+    box-shadow: 0 8px 20px rgba(91, 1, 29, 0.08);
 }
 
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.neighbor-panel-marker)
@@ -867,10 +868,10 @@ div[data-testid="stImage"] img {
     height: 102px;
     align-items: center;
     justify-content: center;
-    border: 1px dashed rgba(190, 24, 93, 0.18);
+    border: 1px dashed rgba(91, 1, 29, 0.18);
     border-radius: 11px;
     color: var(--text-3);
-    background: rgba(255, 247, 251, 0.68);
+    background: rgba(255, 246, 249, 0.68);
     font-size: 0.67rem;
 }
 
@@ -911,7 +912,7 @@ div[data-testid="stImage"] img {
     border: 1px solid rgba(255, 255, 255, 0.84);
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.56);
-    box-shadow: 0 8px 22px rgba(190, 24, 93, 0.06);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.06);
 }
 
 [data-testid="stMetricLabel"] p {
@@ -932,10 +933,10 @@ div[data-testid="stImage"] img {
 
 div[data-testid="stDataFrame"] {
     overflow: hidden;
-    border: 1px solid rgba(190, 24, 93, 0.09);
+    border: 1px solid rgba(91, 1, 29, 0.09);
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.66);
-    box-shadow: 0 8px 22px rgba(190, 24, 93, 0.05);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.05);
 }
 
 .page-indicator {
@@ -951,7 +952,7 @@ div[data-testid="stDataFrame"] {
 .empty-state {
     margin: 1.6rem 0 0;
     padding: 4.2rem 1.5rem;
-    border: 1px dashed rgba(190, 24, 93, 0.18);
+    border: 1px dashed rgba(91, 1, 29, 0.18);
     border-radius: var(--radius-lg);
     text-align: center;
     background: rgba(255, 255, 255, 0.44);
@@ -969,8 +970,8 @@ div[data-testid="stDataFrame"] {
     margin: 0 auto 1rem;
     border-radius: 15px;
     color: #ffffff;
-    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--fuchsia));
-    box-shadow: 0 12px 28px rgba(225, 29, 103, 0.2);
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--burgundy));
+    box-shadow: 0 12px 28px rgba(181, 42, 87, 0.2);
     font-size: 1.5rem;
 }
 
@@ -988,7 +989,7 @@ div[data-testid="stDataFrame"] {
 
 .app-footer {
     margin-top: 3rem;
-    color: #ad8799;
+    color: #9f7382;
     font-size: 0.66rem;
     letter-spacing: 0.1em;
     text-align: center;
@@ -1010,12 +1011,12 @@ div[data-testid="stDataFrame"] {
 ::-webkit-scrollbar-thumb {
     border: 3px solid transparent;
     border-radius: 999px;
-    background: rgba(225, 29, 103, 0.3);
+    background: rgba(181, 42, 87, 0.3);
     background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(192, 38, 211, 0.42);
+    background: rgba(91, 1, 29, 0.42);
     background-clip: content-box;
 }
 
