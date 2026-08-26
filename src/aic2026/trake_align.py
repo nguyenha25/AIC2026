@@ -279,10 +279,17 @@ def _fps_cua_video(video_id: str) -> float:
 
 
 def khoang_cach_trung_binh(khung: Sequence[Khung]) -> float:
+    """Khoảng cách lớn nhất giữa hai ảnh liên tiếp.
+
+    Giữ tên hàm để không phá API cũ. Trước đây hàm lấy median, khiến một thư
+    mục có đa số ảnh dày nhưng vẫn có lỗ vài giây bị báo ``du_day=True``.
+    Với TRAKE, chỉ một lỗ đúng chỗ đáp án cũng đủ làm mất mốc nên tiêu chí
+    nghiệm thu phải xét trường hợp xấu nhất.
+    """
     if len(khung) < 2:
         return float("inf")
     pts = np.array([k.pts_time for k in khung], dtype=np.float64)
-    return float(np.median(np.diff(pts)))
+    return float(np.max(np.diff(pts)))
 
 
 # ---------------------------------------------------------------------------
