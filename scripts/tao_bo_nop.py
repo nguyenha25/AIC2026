@@ -105,8 +105,8 @@ def so_moc_trake(cau_hoi: str) -> int:
 # Dòng đoán — dùng khi mạch không trả về gì
 # ---------------------------------------------------------------------------
 
-def dong_doan(so_moc: int = 1) -> list[Answer]:
-    """100 dòng lấy từ frame_map THẬT, rải đều khắp kho.
+def dong_doan(so_moc: int = 1, so_dong: int = SO_DONG) -> list[Answer]:
+    """Các dòng lấy từ frame_map THẬT, rải đều khắp kho.
 
     Không bịa số: mọi frame_idx đều là keyframe có thật, nên tệp vẫn hợp lệ
     và vẫn có cơ hội trúng nếu may.
@@ -114,11 +114,41 @@ def dong_doan(so_moc: int = 1) -> list[Answer]:
     from aic2026.frame_map import load_frame_map
 
     bang = load_frame_map()
-    buoc = max(1, len(bang) // (SO_DONG * so_moc))
-    mau = bang.iloc[:: buoc].head(SO_DONG * so_moc)
+
+    # TRAKE: mọi mốc trên MỘT dòng bắt buộc thuộc CÙNG video. Bản cũ lấy
+    # từng lát liên tiếp của toàn frame_map; lát cắt có thể đi qua ranh giới
+    # video nhưng lại gắn video_id của dòng đầu cho tất cả frame, khiến các
+    # frame còn lại không tồn tại dưới video_id đó.
+    if so_moc > 1:
+        bang_xep = bang.sort_values(["video_id", "pts_time"])
+        theo_video: list[tuple[str, list[int]]] = []
+        for video_id, nhom in bang_xep.groupby("video_id", sort=False):
+            frame_ids = [int(x) for x in nhom["frame_idx"]]
+            if len(frame_ids) >= so_moc:
+                theo_video.append((str(video_id), frame_ids))
+
+        ra: list[Answer] = []
+        bat_dau = 0
+        while len(ra) < so_dong:
+            them_duoc = False
+            for video_id, frame_ids in theo_video:
+                chon = frame_ids[bat_dau: bat_dau + so_moc]
+                if len(chon) < so_moc:
+                    continue
+                ra.append(Answer(video_id=video_id, frame_ids=chon))
+                them_duoc = True
+                if len(ra) >= so_dong:
+                    break
+            if not them_duoc:
+                break
+            bat_dau += 1
+        return ra
+
+    buoc = max(1, len(bang) // (so_dong * so_moc))
+    mau = bang.iloc[:: buoc].head(so_dong * so_moc)
 
     ra = []
-    for i in range(SO_DONG):
+    for i in range(so_dong):
         lat = mau.iloc[i * so_moc: (i + 1) * so_moc]
         if len(lat) < so_moc:
             break
@@ -130,6 +160,58 @@ def dong_doan(so_moc: int = 1) -> list[Answer]:
             )
         )
     return ra
+
+
+def bang_tra_nguoc_frame_map() -> dict[tuple[str, int], float]:
+    """(video_id, frame_idx) -> pts_time cho cổng thoát số 5."""
+    from aic2026.frame_map import load_frame_map
+
+    bang = load_frame_map()
+    return {
+        (str(v), int(f)): float(t)
+        for v, f, t in zip(bang["video_id"], bang["frame_idx"], bang["pts_time"])
+    }
+
+
+def loc_cua_so_cau_tra_loi(
+    cau_tra_loi: list[Answer],
+    dang: str,
+    tra_nguoc: dict[tuple[str, int], float] | None = None,
+    cua_so: float | None = None,
+) -> tuple[list[Answer], int, int]:
+    """Giữ hạng tốt nhất và chặn cặp KIS/QA cùng video quá gần.
+
+    Trả về ``(dòng giữ lại, số bỏ vì gần, số bỏ vì frame không tồn tại)``.
+    TRAKE không áp dụng cửa sổ 10 giây nhưng vẫn được giữ nguyên ở đây.
+    """
+    if dang == "trake":
+        return list(cau_tra_loi), 0, 0
+
+    from aic2026.rank.config import cua_so_giay
+    from aic2026.rank.dedupe import EPSILON
+
+    tra = tra_nguoc if tra_nguoc is not None else bang_tra_nguoc_frame_map()
+    nguong = cua_so_giay() if cua_so is None else float(cua_so)
+    da_giu: dict[str, list[float]] = {}
+    ra: list[Answer] = []
+    bo_gan = 0
+    bo_khong_tra = 0
+
+    for a in cau_tra_loi:
+        pts_time = tra.get((str(a.video_id), int(a.frame_ids[0])))
+        if pts_time is None:
+            bo_khong_tra += 1
+            continue
+
+        moc_cu = da_giu.setdefault(str(a.video_id), [])
+        if any(abs(float(pts_time) - t) < nguong - EPSILON for t in moc_cu):
+            bo_gan += 1
+            continue
+
+        moc_cu.append(float(pts_time))
+        ra.append(a)
+
+    return ra, bo_gan, bo_khong_tra
 
 
 # ---------------------------------------------------------------------------
@@ -154,50 +236,145 @@ def tra_mot_de(de: dict, tim, kho_chu=None) -> tuple[list[Answer], str]:
 
     if dang == "trake":
         so_moc = so_moc_trake(de["cau_hoi"])
-        ra = []
-        for h in hits[:SO_DONG]:
-            # Mốc tăng dần quanh ứng viên. Vòng p1 nộp 36/100 dòng có mốc KHÔNG
-            # tăng dần — sự kiện là chuỗi thời gian nên những dòng đó chắc chắn
-            # sai, tức chỗ trống lãng phí.
-            goc = int(h.frame_idx)
-            ra.append(
-                Answer(
-                    video_id=str(h.video_id),
-                    frame_ids=[goc + j * 25 for j in range(so_moc)],
-                )
+        ra: list[Answer] = []
+        ghi_chu_ghep = ""
+
+        # Việc 12: chọn video mạnh nhất rồi căn các sự kiện bằng DP trên ảnh
+        # thật, ưu tiên frames_dense. Bản cũ chỉ bịa [gốc, gốc+25, ...], các
+        # số đó thậm chí không chắc là keyframe có thật.
+        try:
+            from aic2026.trake_align import ghep
+
+            ket = ghep(
+                de["cau_hoi"], hits, so_moc=so_moc,
+                uu_tien_khung_day=True, bo_ma_hoa="b32",
             )
-        return ra, f"{len(ra)} dòng, {so_moc} mốc/dòng"
+            if (
+                len(ket.frame_ids) == so_moc
+                and ket.frame_ids == sorted(ket.frame_ids)
+                and len(set(ket.frame_ids)) == so_moc
+            ):
+                ra.append(Answer(str(ket.video_id), list(ket.frame_ids)))
+                ghi_chu_ghep = (
+                    f"ghep={ket.video_id}, "
+                    f"{'dense' if ket.du_day else 'thua'}"
+                )
+        except Exception as loi:
+            # Máy không có ảnh của video ứng viên vẫn phải sinh tệp hợp lệ.
+            ghi_chu_ghep = f"ghep lỗi {type(loi).__name__} -> keyframe ứng viên"
+
+        # Các dòng còn lại dùng KEYFRAME CÓ THẬT của từng video ứng viên. Lấy
+        # các cửa sổ trượt theo hạng rồi sắp thời gian; tuyệt đối không cộng
+        # một offset fps giả vào frame_idx.
+        theo_video: dict[str, list] = {}
+        thu_tu_video: list[str] = []
+        for h in hits:
+            vid = str(h.video_id)
+            if vid not in theo_video:
+                theo_video[vid] = []
+                thu_tu_video.append(vid)
+            if all(int(x.frame_idx) != int(h.frame_idx) for x in theo_video[vid]):
+                theo_video[vid].append(h)
+
+        da_co = {
+            (a.video_id, tuple(a.frame_ids))
+            for a in ra
+        }
+        for vid in thu_tu_video:
+            ds = theo_video[vid]
+            for bat_dau in range(max(0, len(ds) - so_moc + 1)):
+                chon = sorted(ds[bat_dau: bat_dau + so_moc], key=lambda h: h.pts_time)
+                frame_ids = [int(h.frame_idx) for h in chon]
+                khoa = (vid, tuple(frame_ids))
+                if (
+                    len(frame_ids) == so_moc
+                    and frame_ids == sorted(frame_ids)
+                    and len(set(frame_ids)) == so_moc
+                    and khoa not in da_co
+                ):
+                    da_co.add(khoa)
+                    ra.append(Answer(vid, frame_ids))
+                if len(ra) >= SO_DONG:
+                    break
+            if len(ra) >= SO_DONG:
+                break
+
+        # Một video có đúng 100 hit và 3 mốc chỉ cho 98 cửa sổ liên tiếp.
+        # Bổ sung cửa sổ thưa hơn từ chính các hit đó để đủ 100 dòng; vẫn là
+        # frame thật, cùng video và tăng nghiêm ngặt theo thời gian.
+        if len(ra) < SO_DONG:
+            for buoc in range(2, 11):
+                for vid in thu_tu_video:
+                    ds = theo_video[vid]
+                    do_dai = (so_moc - 1) * buoc + 1
+                    for bat_dau in range(max(0, len(ds) - do_dai + 1)):
+                        chon = sorted(
+                            ds[bat_dau: bat_dau + do_dai: buoc],
+                            key=lambda h: h.pts_time,
+                        )
+                        frame_ids = [int(h.frame_idx) for h in chon]
+                        khoa = (vid, tuple(frame_ids))
+                        if (
+                            len(frame_ids) == so_moc
+                            and frame_ids == sorted(frame_ids)
+                            and len(set(frame_ids)) == so_moc
+                            and khoa not in da_co
+                        ):
+                            da_co.add(khoa)
+                            ra.append(Answer(vid, frame_ids))
+                        if len(ra) >= SO_DONG:
+                            break
+                    if len(ra) >= SO_DONG:
+                        break
+                if len(ra) >= SO_DONG:
+                    break
+
+        return ra[:SO_DONG], (
+            f"{len(ra[:SO_DONG])} dòng, {so_moc} mốc/dòng | {ghi_chu_ghep}"
+        )
+
+    # KIS/QA: lọc trên toàn bộ 300 hit TRƯỚC khi cắt 100. Bản cũ cắt trước,
+    # nên 24/25 tệp production trượt cổng 5 dù mạch tìm kiếm đã trả đủ ứng viên.
+    from aic2026.rank.config import cua_so_giay
+    from aic2026.rank.dedupe import loc_trung
+
+    hits, bao_cao_loc = loc_trung(hits, cua_so_giay=cua_so_giay())
+    ghi_chu_loc = (
+        f"lọc {bao_cao_loc.cua_so_giay:.1f}s "
+        f"{bao_cao_loc.vao}->{bao_cao_loc.ra}"
+    )
 
     if dang == "qa":
-        from aic2026.qa_answer import doan_du_phong, tra_loi
+        from collections import Counter
+
+        from aic2026.qa_answer import doan_du_phong, tra_loi_theo_hang
 
         try:
-            d = tra_loi(de["cau_hoi"], hits[:5])
-            dap_an, nguon = d.van_ban, d.nguon
+            cap = tra_loi_theo_hang(
+                de["cau_hoi"], hits, so_dong=SO_DONG,
+                so_hang_vlm=5, dung_vlm=True, mo_rong_lan_can=False,
+            )
         except Exception as loi:
             d = doan_du_phong(de["cau_hoi"])
-            dap_an, nguon = d.van_ban, f"lỗi {type(loi).__name__} -> dự phòng"
+            cap = [(h, d) for h in hits[:SO_DONG]]
 
-        # RẢI BIẾN THỂ THEO HẠNG, không xoay vòng đều.
-        #
-        # Vòng p1 rải xoay vòng: khung 1 lấy biến thể A, khung 2 lấy B... nên
-        # khung ĐÚNG chỉ được ghép với MỘT biến thể — 1/3 cơ hội. Điểm cuối là
-        # trung bình R@1..R@100 nên hạng đầu đáng giá hơn hẳn; đặt khung tốt
-        # nhất × MỌI biến thể ở hạng 1-3 chỉ tốn 3 suất trong 100.
-        from aic2026.qa_answer import rai_theo_hang
-
-        cap = rai_theo_hang(hits, dap_an, de["cau_hoi"], SO_DONG)
+        # Đáp án phải đi CÙNG khung đã sinh nó. Bản cũ lấy một đáp án từ
+        # top-5 rồi gán cho cả 100 khung; khung đúng ở hạng sau dù OCR/ASR đọc
+        # được đáp án vẫn bị ghi đáp án của khung khác.
         ra = [
-            Answer(str(h.video_id), [int(h.frame_idx)], answer=a) for h, a in cap
+            Answer(
+                str(h.video_id), [int(h.frame_idx)], answer=d.van_ban
+            )
+            for h, d in cap
         ]
-        so_bien_the = len({a for _, a in cap})
+        nguon = Counter(d.nguon for _, d in cap)
         return ra, (
-            f"{len(ra)} dòng, {so_bien_the} biến thể của {dap_an!r} "
-            f"(nguồn {nguon})"
+            f"{len(ra)} dòng, đáp án theo từng khung "
+            f"(nguồn {dict(nguon)}) | {ghi_chu_loc}"
         )
 
     ra = [Answer(str(h.video_id), [int(h.frame_idx)]) for h in hits[:SO_DONG]]
-    return ra, f"{len(ra)} dòng"
+    return ra, f"{len(ra)} dòng | {ghi_chu_loc}"
 
 
 def dung_tim(dung_caption: bool = False):
@@ -290,6 +467,7 @@ def main() -> int:
     (goc / "submission").mkdir(parents=True)
 
     tim = None if args.thu_nghiem else dung_tim(dung_caption=args.dung_caption)
+    tra_nguoc = bang_tra_nguoc_frame_map()
 
     print(f"\n{'câu':<5}{'dạng':<7}{'tệp':<26}ghi chú")
     nho: dict[str, list[Answer]] = {}
@@ -312,6 +490,16 @@ def main() -> int:
 
         so_moc = so_moc_trake(d["cau_hoi"]) if d["dang"] == "trake" else 1
 
+        # Chốt độc lập trên đúng các Answer sắp ghi. Lớp này còn bắt được lỗi
+        # do QA mở rộng khung lân cận hoặc do một nhánh mới quên gọi loc_trung.
+        cau_tra_loi, bo_gan, bo_khong_tra = loc_cua_so_cau_tra_loi(
+            cau_tra_loi, d["dang"], tra_nguoc=tra_nguoc,
+        )
+        if bo_gan:
+            ghi_chu += f" | cổng 5 bỏ {bo_gan} dòng gần"
+        if bo_khong_tra:
+            ghi_chu += f" | bỏ {bo_khong_tra} frame không có trong map"
+
         ngan_sach = SubmissionBudget(task=DANG_BTC[d["dang"]])
         for a in cau_tra_loi:
             ngan_sach.add(a)
@@ -330,13 +518,27 @@ def main() -> int:
             dap_an_qa = (
                 cau_tra_loi[0].answer if d["dang"] == "qa" and cau_tra_loi else None
             )
-            for a in dong_doan(so_moc):
-                if len(ngan_sach) >= SO_DONG:
-                    break
-                ngan_sach.add(
+            if d["dang"] == "qa" and not str(dap_an_qa or "").strip():
+                dap_an_qa = "khong ro"
+            so_du_phong = SO_DONG if d["dang"] == "trake" else SO_DONG * 10
+            du_phong = [
+                (
                     Answer(a.video_id, a.frame_ids, answer=dap_an_qa)
                     if d["dang"] == "qa" else a
                 )
+                for a in dong_doan(so_moc, so_dong=so_du_phong)
+            ]
+
+            # Lọc lại trên tập kết hợp để dòng lấp cũng không xung đột 10 giây
+            # với kết quả thật đã giữ. Sau đó dựng lại ngân sách theo đúng hạng.
+            ket_hop, _, _ = loc_cua_so_cau_tra_loi(
+                [*ngan_sach.answers, *du_phong],
+                d["dang"],
+                tra_nguoc=tra_nguoc,
+            )
+            ngan_sach = SubmissionBudget(task=DANG_BTC[d["dang"]])
+            ngan_sach.extend(ket_hop)
+
             if len(ngan_sach) < SO_DONG:
                 ghi_chu += f" | CHỈ {len(ngan_sach)}/{SO_DONG} dòng"
             elif thieu_truoc:

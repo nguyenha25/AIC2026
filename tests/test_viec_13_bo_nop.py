@@ -22,6 +22,8 @@ from scripts.tao_bo_nop import (  # noqa: E402
     MAU_TEN_DE,
     SO_DONG,
     doc_thu_muc_de,
+    dong_doan,
+    loc_cua_so_cau_tra_loi,
     so_moc_trake,
     tra_mot_de,
     van_tay,
@@ -112,19 +114,122 @@ def test_mach_rong_van_ra_du_dong():
     assert "không trả về gì" in ghi_chu
 
 
+def test_kis_loc_10_giay_truoc_khi_cat_100():
+    """Ba hit gần nhau/video phải còn đúng hit tốt nhất, nhưng vẫn đủ 100."""
+    hits = [
+        _Hit(f"L21_V{i:03d}", j * 25)
+        for i in range(SO_DONG)
+        for j in range(3)
+    ]
+    ra, ghi_chu = tra_mot_de(
+        {"dang": "kis", "cau_hoi": "x"}, lambda c, k: hits,
+    )
+
+    assert len(ra) == SO_DONG
+    assert len({a.video_id for a in ra}) == SO_DONG
+    assert "lọc 10.0s 300->100" in ghi_chu
+
+
+def test_chot_cuoi_loc_ca_dong_qa_va_frame_khong_ton_tai():
+    from aic2026.submit import Answer
+
+    answers = [
+        Answer("V1", [0], answer="a"),
+        Answer("V1", [1], answer="b"),       # cách dòng đầu 9,9 giây
+        Answer("V1", [2], answer="c"),       # cách dòng đầu đúng 10 giây
+        Answer("V2", [999], answer="d"),     # không có trong frame_map
+    ]
+    tra = {("V1", 0): 0.0, ("V1", 1): 9.9, ("V1", 2): 10.0}
+
+    ra, bo_gan, bo_khong_tra = loc_cua_so_cau_tra_loi(
+        answers, "qa", tra_nguoc=tra, cua_so=10.0,
+    )
+
+    assert [a.frame_ids[0] for a in ra] == [0, 2]
+    assert bo_gan == 1
+    assert bo_khong_tra == 1
+
+
+def test_chot_cuoi_khong_ap_10_giay_cho_trake():
+    from aic2026.submit import Answer
+
+    answers = [Answer("V1", [1, 2, 3]), Answer("V1", [2, 3, 4])]
+    ra, bo_gan, bo_khong_tra = loc_cua_so_cau_tra_loi(answers, "trake")
+    assert ra == answers
+    assert (bo_gan, bo_khong_tra) == (0, 0)
+
+
+def test_dong_doan_trake_moi_moc_deu_thuoc_cung_video():
+    import aic2026.frame_map as fm
+
+    bang = fm.load_frame_map()
+    hop_le = {
+        (str(video_id), int(frame_idx))
+        for video_id, frame_idx in zip(bang["video_id"], bang["frame_idx"])
+    }
+    ra = dong_doan(so_moc=3)
+
+    assert len(ra) == SO_DONG
+    assert all(len(a.frame_ids) == 3 for a in ra)
+    assert all(
+        (a.video_id, frame_idx) in hop_le
+        for a in ra
+        for frame_idx in a.frame_ids
+    )
+
+
+def test_validator_qa_khong_nham_dap_an_so_la_frame():
+    from scripts.check_submission import (
+        cot_frame_cua_dong,
+        loai_truy_van_tu_ten,
+    )
+
+    assert loai_truy_van_tu_ten(Path("query-p1-3-qa.csv")) == "qa"
+    assert cot_frame_cua_dong(["L21_V001", "1234", "5"], "qa") == ["1234"]
+    assert cot_frame_cua_dong(["L21_V001", "10", "20", "30"], "trake") == [
+        "10", "20", "30"
+    ]
+
+
 def test_qa_khong_bao_gio_de_o_dap_an_rong(monkeypatch):
     """Vòng p1 một ô trống làm BTC loại NGUYÊN TỆP 100 dòng."""
     import aic2026.qa_answer as qa
 
     monkeypatch.setattr(
-        qa, "tra_loi", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("VLM chết"))
+        qa, "tra_loi_theo_hang",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("VLM chết")),
     )
     ra, _ = tra_mot_de(
         {"dang": "qa", "cau_hoi": "Có bao nhiêu người?"},
         lambda c, k: [_Hit("L21_V001", i * 100) for i in range(SO_DONG)],
     )
-    assert len(ra) == SO_DONG
+    # Nguồn giả đặt 100 hit trong cùng một video, cách nhau 4 giây. Sau cổng
+    # 10 giây, tra_mot_de() chỉ còn 34 ứng viên; main() mới chịu trách nhiệm
+    # lấp đủ 100 dòng bằng frame dự phòng không xung đột.
+    assert ra
+    assert len(ra) < SO_DONG
     assert all(str(a.answer or "").strip() for a in ra)
+
+
+def test_qa_production_giu_dap_an_cua_tung_khung(monkeypatch):
+    import aic2026.qa_answer as qa
+
+    hits = [_Hit("L21_V001", i * 100) for i in range(SO_DONG)]
+    monkeypatch.setattr(
+        qa,
+        "tra_loi_theo_hang",
+        lambda *a, **k: [
+            (h, qa.DapAn(f"dap-{h.frame_idx}", 1.0, "ocr")) for h in hits
+        ],
+    )
+
+    ra, ghi_chu = tra_mot_de(
+        {"dang": "qa", "cau_hoi": "Dòng chữ là gì?"},
+        lambda c, k: hits,
+    )
+    assert len(ra) == SO_DONG
+    assert [a.answer for a in ra[:3]] == ["dap-0", "dap-100", "dap-200"]
+    assert "theo từng khung" in ghi_chu
 
 
 def test_trake_moc_luon_tang_dan():
@@ -141,6 +246,26 @@ def test_trake_moc_luon_tang_dan():
         assert len(a.frame_ids) == 3
         assert a.frame_ids == sorted(a.frame_ids)
         assert len(set(a.frame_ids)) == 3        # tăng NGHIÊM NGẶT
+
+
+def test_trake_production_dat_ket_qua_ghep_len_hang_dau(monkeypatch):
+    import aic2026.trake_align as ta
+
+    class Ket:
+        video_id = "L21_V009"
+        frame_ids = [101, 205, 309]
+        du_day = True
+
+    monkeypatch.setattr(ta, "ghep", lambda *a, **k: Ket())
+
+    hits = [_Hit("L21_V001", i * 100) for i in range(SO_DONG)]
+    ra, ghi_chu = tra_mot_de(
+        {"dang": "trake", "cau_hoi": "E1 a\nE2 b\nE3 c"},
+        lambda c, k: hits,
+    )
+    assert ra[0].video_id == "L21_V009"
+    assert ra[0].frame_ids == [101, 205, 309]
+    assert "dense" in ghi_chu
 
 
 def test_ten_de_tach_dung():
@@ -239,4 +364,4 @@ def test_lap_du_100_dong_du_mach_tra_it():
     i = than.index("if len(ngan_sach) < SO_DONG:")
     j = than.index("ngan_sach = SubmissionBudget")
     assert i > j, "phải lấp SAU khi thêm vào ngân sách, không phải trước"
-    assert "dong_doan(so_moc)" in than[i: i + 800]
+    assert "dong_doan(so_moc, so_dong=so_du_phong)" in than[i: i + 1800]

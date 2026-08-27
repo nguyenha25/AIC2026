@@ -226,6 +226,14 @@ def test_moc_phai_dung_THU_TU_moi_tinh_diem():
     assert cham(q, [194, 74]) == 0.0     # đúng hai số, sai thứ tự -> 0
 
 
+def test_bo_sinh_nop_goi_ghep_trake_thay_vi_cong_25():
+    ma = (_ROOT / "scripts/tao_bo_nop.py").read_text(encoding="utf-8")
+    than = "\n".join(ma.split('"""')[::2])
+    assert "from aic2026.trake_align import ghep" in than
+    assert "ket = ghep(" in than
+    assert "goc + j * 25" not in than
+
+
 def test_chi_tiet_tung_moc_bao_thieu_moc():
     from scripts.chay_trake import chi_tiet_tung_moc
 

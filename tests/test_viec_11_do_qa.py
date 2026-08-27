@@ -99,7 +99,22 @@ def test_qa_answer_duoc_goi_that():
     than = "\n".join(ma.split('"""')[::2])
 
     assert "from aic2026.qa_answer import" in than
-    assert "tra_loi(" in than
+    assert "tra_loi_theo_hang(" in than
+
+
+def test_do_qa_dung_cau_hinh_production_thay_vi_ghi_cung_nhanh_cu():
+    """Phép đo Task 11 phải đọc cùng rrf_weights.yaml với bộ sinh bài nộp.
+
+    Bản cũ ghi cứng CLIP B/32 + OCR + ASR và luôn bật Marian, trong khi
+    production đã chuyển sang CLIP-L. Test này ngăn hai đường lại lệch nhau.
+    """
+    ma = (_ROOT / "scripts/do_qa.py").read_text(encoding="utf-8")
+    than = "\n".join(ma.split('"""')[::2])
+
+    assert "trong_so_theo_dang(\"qa\")" in than
+    assert "dung_clip_l=dung_clip_l" in than
+    assert 'default="nguyen_ban"' in than
+    assert "nguon_clip_l=nguon_clip_l" in than
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +176,148 @@ def test_cau_hoi_ten_thuong_hieu_nhan_dung_dang():
     for c in ["Thương hiệu túi xách là gì?", "Tên chương trình là gì?",
               "Nhãn hiệu nào xuất hiện?"]:
         assert loai_cau_hoi(c) == CHU_TREN_HINH, c
+
+
+def test_cau_ten_xa_duoc_nhan_la_dia_diem_khong_phai_chu_tren_hinh():
+    from aic2026.qa_answer import DIA_DIEM, chon_cum_tot_nhat, loai_cau_hoi
+
+    cau = "Câu lạc bộ trao quà tại một xã thuộc Khánh Hòa. Xã này có tên là gì?"
+    assert loai_cau_hoi(cau) == DIA_DIEM
+    assert chon_cum_tot_nhat(cau, ["chương trình từ thiện", "xã Giang Ly"]) == "xã Giang Ly"
+
+
+@pytest.mark.parametrize(
+    "cau_hoi,nguon_mong_doi",
+    [
+        ("Áo của người phụ nữ màu gì?", "vlm"),
+        ("Tiêu đề trên áp phích là gì?", "ocr"),
+        ("Xã này có tên là gì?", "ocr"),
+        ("Em quyên góp để ủng hộ ai?", "asr"),
+    ],
+)
+def test_tra_loi_dinh_tuyen_nguon_theo_dang_cau(
+    monkeypatch, cau_hoi, nguon_mong_doi
+):
+    import aic2026.qa_answer as qa
+
+    da_goi = []
+
+    def gia(nguon):
+        def _f(*args, **kwargs):
+            da_goi.append(nguon)
+            return qa.DapAn(nguon, 0.8, nguon)
+        return _f
+
+    monkeypatch.setattr(qa, "tra_loi_bang_ocr", gia("ocr"))
+    monkeypatch.setattr(qa, "tra_loi_bang_asr", gia("asr"))
+    monkeypatch.setattr(qa, "tra_loi_bang_vlm", gia("vlm"))
+
+    class Hit:
+        video_id = "V"
+        n = 1
+        frame_idx = 100
+        pts_time = 4.0
+
+    ra = qa.tra_loi(cau_hoi, [Hit()], bo_doc_anh=object(), dung_vlm=True)
+    assert ra.nguon == nguon_mong_doi
+    assert da_goi == [nguon_mong_doi]
+
+
+def test_ocr_cau_tieu_de_doc_them_hai_keyframe_lan_can(monkeypatch):
+    import aic2026.qa_answer as qa
+
+    monkeypatch.setattr(qa, "_doc_ocr_cua_video", lambda video: {
+        89: ({"text": "CÂY TỪ VỰNG", "conf": 0.9},),
+        91: ({"text": "VTV", "conf": 0.99},),
+    })
+    d = qa.tra_loi_bang_ocr("Tiêu đề áp phích là gì?", "V", 91)
+    assert d is not None and "TỪ VỰNG" in d.van_ban.upper()
+
+
+def test_ocr_dia_diem_doc_bien_ten_o_noi_khac_trong_video(monkeypatch):
+    import aic2026.qa_answer as qa
+
+    monkeypatch.setattr(qa, "_doc_ocr_cua_video", lambda video: {
+        9: ({"text": "FANA", "conf": 0.9},),
+        34: ({"text": "Xã Giang Ly huyện Khánh Vĩnh", "conf": 0.8},),
+    })
+    d = qa.tra_loi_bang_ocr("Xã này có tên là gì?", "V", 9)
+    assert d is not None and d.van_ban == "Xã Giang Ly"
+
+
+def test_asr_ung_ho_ai_lay_ve_sau_dong_tu(tmp_path, monkeypatch):
+    import aic2026.paths as paths
+    import aic2026.qa_answer as qa
+
+    tep = tmp_path / "V.jsonl"
+    tep.write_text(json.dumps({
+        "start": 39.53, "end": 45.29,
+        "text": "Em gom tiền trong hai năm để ủng hộ các bạn thiếu nhi miền Bắc.",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "asr_file", lambda video: tep)
+
+    d = qa.tra_loi_bang_asr("Em quyên góp để ủng hộ ai?", "V", 42.0)
+    assert d is not None
+    assert d.van_ban == "ủng hộ các bạn thiếu nhi miền Bắc"
+
+
+def test_no_lan_can_giu_hit_goc_truoc_va_chen_n_tru_hai(monkeypatch):
+    import aic2026.frame_map as fm
+    import aic2026.qa_answer as qa
+
+    monkeypatch.setattr(fm, "lookup", lambda video, n: (n * 10, float(n)))
+
+    class Hit:
+        video_id, n, score = "V", 91, 1.0
+        frame_idx, pts_time, source = 6193, 1.0, "clip_l"
+
+    ra = qa.mo_rong_hit_lan_can([Hit()], so_hit_mo_rong=1)
+    assert [h.n for h in ra[:5]] == [91, 89, 90, 92, 93]
+
+
+def test_tra_loi_theo_hang_giu_dap_an_gan_voi_tung_khung(monkeypatch):
+    import aic2026.qa_answer as qa
+
+    monkeypatch.setattr(qa, "mo_rong_hit_lan_can", lambda hits, **kw: list(hits))
+    monkeypatch.setattr(
+        qa, "tra_loi",
+        lambda cau, hits, **kw: qa.DapAn(f"dap-{hits[0].frame_idx}", 1.0, "ocr"),
+    )
+
+    class Hit:
+        def __init__(self, f):
+            self.video_id, self.n, self.frame_idx = "V", f, f
+            self.pts_time, self.score, self.source = float(f), 1.0, "x"
+
+    cap = qa.tra_loi_theo_hang("x", [Hit(10), Hit(20)])
+    assert [(h.frame_idx, d.van_ban) for h, d in cap] == [(10, "dap-10"), (20, "dap-20")]
+
+
+def test_tra_loi_theo_hang_co_the_tat_mo_rong_lan_can(monkeypatch):
+    import aic2026.qa_answer as qa
+
+    class Hit:
+        def __init__(self, frame_idx):
+            self.video_id = "V"
+            self.frame_idx = frame_idx
+            self.n = frame_idx
+            self.pts_time = float(frame_idx)
+            self.score = 1.0
+            self.source = "test"
+
+    monkeypatch.setattr(
+        qa, "mo_rong_hit_lan_can",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("không được gọi")),
+    )
+    monkeypatch.setattr(
+        qa, "tra_loi",
+        lambda *a, **k: qa.DapAn("x", 1.0, "test"),
+    )
+
+    cap = qa.tra_loi_theo_hang(
+        "x", [Hit(10), Hit(20)], mo_rong_lan_can=False,
+    )
+    assert [h.frame_idx for h, _ in cap] == [10, 20]
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +391,8 @@ def test_rai_khong_trung_dong_va_khong_vuot_han_muc():
     assert len(khoa) == len(set(khoa)), "có dòng trùng — phí suất"
 
 
-def test_bo_sinh_tep_nop_dung_chien_thuat_rai():
+def test_bo_sinh_tep_nop_giu_dap_an_gan_voi_tung_khung():
     ma = (_ROOT / "scripts/tao_bo_nop.py").read_text(encoding="utf-8")
     than = "\n".join(ma.split('"""')[::2])
-    assert "rai_theo_hang" in than, "bộ sinh tệp nộp chưa dùng chiến thuật rải"
+    assert "tra_loi_theo_hang" in than
+    assert "for h, d in cap" in than

@@ -85,6 +85,56 @@ def cham(q: dict, dong: list[dict]) -> float:
     return compute_final_score(gt, dong, QA)["final_score"]
 
 
+def dung_tim_qa_hien_tai(
+    nguon_mo_rong: str = "nguyen_ban",
+    nguon_clip_l: str = "marian",
+    bo_sung_chu: bool = False,
+):
+    """Dựng đúng nguồn tìm kiếm QA mà bộ sinh bài nộp đang dùng.
+
+    Không ghi cứng CLIP B/32 + OCR + ASR như bản cũ. Trọng số và nhánh bật
+    được đọc từ ``config/rrf_weights.yaml`` theo dạng ``qa``; nhờ vậy phép đo
+    Task 11 và ``scripts.tao_bo_nop`` không âm thầm chạy hai pipeline khác nhau.
+    """
+    from aic2026.index.fts_index import TextSearchIndex
+    from aic2026.paths import FTS_DIR
+    from aic2026.rank.config import trong_so_theo_dang
+    from aic2026.rank.hop_nhat import tim_ung_vien_gop
+
+    trong_so = dict(trong_so_theo_dang("qa"))
+    if bo_sung_chu:
+        # Chế độ thử nghiệm Task 11. Chưa ghi đè YAML production khi máy này
+        # mới đo được 5/18 câu QA.
+        trong_so["ocr_fts"] = 1.0
+        trong_so["asr"] = 1.0
+    dung_clip = float(trong_so.get("clip", 0.0)) > 0
+    dung_ocr_fts = float(trong_so.get("ocr_fts", 0.0)) > 0
+    dung_asr = float(trong_so.get("asr", 0.0)) > 0
+    dung_clip_l = float(trong_so.get("clip_l", 0.0)) > 0
+
+    # Chỉ mở SQLite khi một nhánh chữ thật sự được bật. Cấu hình QA hiện tại
+    # chỉ dùng CLIP-L nên không bắt máy phải có FTS chỉ để chạy nghiệm thu.
+    kho_chu = None
+    if dung_ocr_fts or dung_asr:
+        kho_chu = TextSearchIndex(FTS_DIR / "text.sqlite")
+
+    mo_rong = nguon_mo_rong != "nguyen_ban"
+    tim = tim_ung_vien_gop(
+        kho_chu=kho_chu,
+        dung_clip=dung_clip,
+        dung_ocr_fts=dung_ocr_fts,
+        dung_asr=dung_asr,
+        dung_clip_l=dung_clip_l,
+        mo_rong_truy_van=mo_rong,
+        nguon_mo_rong=nguon_mo_rong if mo_rong else None,
+        # Đây là cấu hình production hiện được tao_bo_nop dùng cho CLIP-L.
+        nguon_clip_l=nguon_clip_l if dung_clip_l else None,
+        dang_cau="qa",
+        trong_so=trong_so,
+    )
+    return tim, trong_so
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Việc 11 — đo đường sinh đáp án Q&A")
     p.add_argument("--tep", default=str(DEV_QUERIES_PATH))
@@ -93,8 +143,22 @@ def main() -> int:
                    help="đọc bao nhiêu ứng viên đầu để rút đáp án")
     p.add_argument("--khong-vlm", action="store_true",
                    help="chỉ dùng OCR/ASR, không nạp mô hình đọc ảnh")
-    p.add_argument("--nguon-mo-rong", default="marian",
-                   choices=["tu_dien", "marian", "llm"])
+    p.add_argument(
+        "--bo-sung-chu", action="store_true",
+        help="thử OCR FTS + ASR trọng số 1.0; không sửa YAML production",
+    )
+    p.add_argument(
+        "--nguon-mo-rong",
+        default="nguyen_ban",
+        choices=["nguyen_ban", "tu_dien", "marian", "llm"],
+        help="mở rộng riêng CLIP B/32; mặc định giữ tiếng Việt theo Task 5",
+    )
+    p.add_argument(
+        "--nguon-clip-l",
+        default="marian",
+        choices=["tu_dien", "marian", "llm"],
+        help="nguồn tiếng Anh cho CLIP-L; mặc định khớp bộ sinh bài nộp",
+    )
     args = p.parse_args()
 
     cau = doc_cau_qa(Path(args.tep))
@@ -116,22 +180,24 @@ def main() -> int:
         )
     print()
 
-    import os
+    from aic2026.qa_answer import BoDocAnh, tra_loi_theo_hang
 
-    os.environ["AIC_NGUON_MO_RONG"] = args.nguon_mo_rong
-
-    from aic2026.index.fts_index import TextSearchIndex
-    from aic2026.paths import FTS_DIR
-    from aic2026.qa_answer import BoDocAnh, tra_loi
-    from aic2026.rank.hop_nhat import tim_ung_vien_gop
-
-    tim = tim_ung_vien_gop(
-        kho_chu=TextSearchIndex(FTS_DIR / "text.sqlite"),
-        dung_clip=True,
-        dung_ocr_fts=True,
-        dung_asr=True,
-        mo_rong_truy_van=True,
-        dang_cau="qa",
+    tim, trong_so = dung_tim_qa_hien_tai(
+        nguon_mo_rong=args.nguon_mo_rong,
+        nguon_clip_l=args.nguon_clip_l,
+        bo_sung_chu=args.bo_sung_chu,
+    )
+    # Chỉ in những nguồn THỰC SỰ được dựng ở dung_tim_qa_hien_tai(). Các khóa
+    # ocr/caption có thể còn trọng số kế thừa dương nhưng không có engine được
+    # truyền vào; in chúng là bật sẽ làm chẩn đoán sai.
+    nhanh_bat = []
+    for ten in ("clip", "ocr_fts", "asr", "clip_l"):
+        if float(trong_so.get(ten, 0.0)) > 0:
+            nhanh_bat.append(ten)
+    print(f"Pipeline QA: {nhanh_bat} | trọng số: {trong_so}")
+    print(
+        f"CLIP B/32: {args.nguon_mo_rong} | "
+        f"CLIP-L: {args.nguon_clip_l if 'clip_l' in nhanh_bat else 'tắt'}\n"
     )
     bo_doc = None if args.khong_vlm else BoDocAnh()
 
@@ -150,26 +216,43 @@ def main() -> int:
             print(f"{q['id']:<5}{0.0:>7.3f}{0.0:>7.3f}{0.0:>7.3f}  mạch không trả gì")
             continue
 
-        # A — đáp án ĐÚNG điền sẵn: trần của câu này
+        # Sinh đáp án RIÊNG cho từng khung. Bản cũ lấy một đáp án từ top-5
+        # rồi gán nó cho cả 100 khung.
+        bat_dau = time.perf_counter()
+        cap = tra_loi_theo_hang(
+            q["cau_hoi"], hits, so_dong=SO_DONG,
+            so_hang_vlm=args.so_doc, bo_doc_anh=bo_doc,
+            dung_vlm=not args.khong_vlm,
+        )
+        giay = time.perf_counter() - bat_dau
+
+        # Trần trên chính dãy khung đã nở lân cận.
         tran = cham(q, [
             {"video_id": str(h.video_id), "frame_id": int(h.frame_idx),
              "answer": q["cau_tra_loi"]}
-            for h in hits
+            for h, _ in cap
         ])
-
-        # B — đáp án TỰ SINH
-        bat_dau = time.perf_counter()
-        d = tra_loi(q["cau_hoi"], hits, so_ung_vien_doc=args.so_doc,
-                    bo_doc_anh=bo_doc, dung_vlm=not args.khong_vlm)
-        giay = time.perf_counter() - bat_dau
 
         that = cham(q, [
             {"video_id": str(h.video_id), "frame_id": int(h.frame_idx),
-             "answer": d.van_ban}
-            for h in hits
+             "answer": d_hang.van_ban}
+            for h, d_hang in cap
         ])
 
-        khop = is_semantic_match(q["cau_tra_loi"], d.van_ban)
+        cap_gt = [
+            (h, d_hang) for h, d_hang in cap
+            if str(h.video_id) == str(q["video_id"])
+            and int(q["frame_start"]) <= int(h.frame_idx) <= int(q["frame_end"])
+        ]
+        d = next(
+            (d_hang for _, d_hang in cap_gt
+             if is_semantic_match(q["cau_tra_loi"], d_hang.van_ban)),
+            cap[0][1],
+        )
+        khop = any(
+            is_semantic_match(q["cau_tra_loi"], d_hang.van_ban)
+            for _, d_hang in cap_gt
+        )
         dem_nguon[d.nguon] = dem_nguon.get(d.nguon, 0) + 1
 
         bao_cao.append({

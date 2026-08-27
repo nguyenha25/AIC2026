@@ -36,6 +36,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -67,6 +68,13 @@ KHAC = "khac"
 
 _MAU_CAU = [
     (DEM, ["bao nhieu", "may nguoi", "may cai", "may chiec", "so luong", "dem duoc"]),
+    # Đặt địa điểm TRƯỚC chữ trên hình. Câu "xã này có tên là gì" chứa cả
+    # "tên là gì", nhưng đáp án nằm trong lời nói chứ không nhất thiết là chữ
+    # trên ảnh. Bản cũ nhận nhầm thành CHU_TREN_HINH và OCR rác chặn ASR.
+    (DIA_DIEM, [
+        "o dau", "dia diem nao", "tinh nao", "thanh pho nao", "noi nao",
+        "xa nao", "xa nay", "ten xa", "phuong nao", "huyen nao",
+    ]),
     (CHU_TREN_HINH, [
         "dong chu", "chu tren", "bien so", "so hieu", "ten chuong trinh",
         "tieu de", "khau hieu", "bang hieu", "ghi gi", "viet gi", "so dien thoai",
@@ -77,7 +85,6 @@ _MAU_CAU = [
     ]),
     (MAU, ["mau gi", "mau sac", "mau nao"]),
     (THOI_GIAN, ["nam nao", "ngay nao", "thang nao", "luc may gio", "thoi gian nao"]),
-    (DIA_DIEM, ["o dau", "dia diem nao", "tinh nao", "thanh pho nao", "noi nao"]),
 ]
 
 
@@ -208,6 +215,18 @@ def _diem_ung_vien(cum: str, loai: str) -> float:
         if len(gon) <= 2:
             diem -= 2.5
 
+    elif loai == DIA_DIEM:
+        # Địa danh Việt Nam thường đi sau loại đơn vị hành chính. Ưu tiên
+        # cụm "xã Giang Ly" hơn những câu ASR ngắn nhưng không phải địa điểm.
+        if re.search(
+            r"\b(xã|phường|huyện|tỉnh|thành phố|thị trấn|thôn|ấp|bản)\b",
+            gon,
+            flags=re.IGNORECASE,
+        ):
+            diem += 3.0
+        if any(ch.isupper() for ch in gon[1:]) and len(gon.split()) <= 5:
+            diem += 1.0
+
     # Cụm cực ngắn mà KHÔNG phải số thì gần như luôn là rác OCR.
     if len(gon) <= 2 and not gon.isdigit():
         diem -= 1.5
@@ -246,14 +265,16 @@ def chon_cum_tot_nhat(cau_hoi: str, ung_vien: list[str]) -> str | None:
 # Nguồn 1 — OCR trên đúng khung hình
 # ---------------------------------------------------------------------------
 
-def _doc_ocr_cua_khung(video_id: str, n: int) -> list[dict]:
-    """Các hộp OCR của MỘT keyframe, đọc từ derived/ocr/<video>.jsonl."""
+@lru_cache(maxsize=256)
+def _doc_ocr_cua_video(video_id: str) -> dict[int, tuple[dict, ...]]:
+    """Đọc OCR của một video MỘT LẦN rồi tra theo ``n`` trong RAM."""
     from .paths import ocr_file
 
     tep = ocr_file(video_id)
     if not tep.exists():
-        return []
+        return {}
 
+    ra: dict[int, tuple[dict, ...]] = {}
     for dong in tep.open("r", encoding="utf-8"):
         dong = dong.strip()
         if not dong:
@@ -262,22 +283,69 @@ def _doc_ocr_cua_khung(video_id: str, n: int) -> list[dict]:
             d = json.loads(dong)
         except json.JSONDecodeError:
             continue
-        if int(d.get("n", -1)) == int(n):
-            return d.get("boxes") or []
-    return []
+        try:
+            n = int(d.get("n", -1))
+        except (TypeError, ValueError):
+            continue
+        ra[n] = tuple(d.get("boxes") or [])
+    return ra
+
+
+def _doc_ocr_cua_khung(video_id: str, n: int) -> list[dict]:
+    """Các hộp OCR của MỘT keyframe."""
+    return list(_doc_ocr_cua_video(video_id).get(int(n), ()))
+
+
+def _rut_dia_diem_ocr(van_ban: str) -> str | None:
+    """Rút ``xã Giang Ly`` khỏi một dòng địa chỉ dài hơn."""
+    khop = re.search(
+        r"\b((?i:xã|phường|huyện|tỉnh|thành phố|thị trấn|thôn|ấp|bản))\s+"
+        r"([A-ZÀ-Ỹ][A-Za-zÀ-ỹ`'_’\-]*"
+        r"(?:\s+[A-ZÀ-Ỹ][A-Za-zÀ-ỹ`'_’\-]*){0,3})",
+        van_ban or "",
+    )
+    return khop.group(0).title() if khop else None
 
 
 def tra_loi_bang_ocr(cau_hoi: str, video_id: str, n: int) -> DapAn | None:
-    """Rút đáp án từ chữ đọc được trên đúng tấm ảnh đó."""
-    hop = _doc_ocr_cua_khung(video_id, n)
+    """Rút đáp án từ khung đang xét và ngữ cảnh cần thiết của cùng video."""
+    loai = loai_cau_hoi(cau_hoi)
+    bang = _doc_ocr_cua_video(video_id)
+    if loai == DIA_DIEM:
+        hop = [b for boxes in bang.values() for b in boxes]
+    elif loai in (CHU_TREN_HINH, THOI_GIAN):
+        hop = [
+            b
+            for n_lan_can in range(max(1, int(n) - 2), int(n) + 3)
+            for b in bang.get(n_lan_can, ())
+        ]
+    else:
+        hop = list(bang.get(int(n), ()))
     if not hop:
         return None
-
-    loai = loai_cau_hoi(cau_hoi)
 
     # Hộp có độ tin cao đứng trước. 60% hộp dưới 0,40 (trung vị 0,276) nên
     # phải xếp theo conf chứ không lấy bừa hộp đầu tiên.
     hop = sorted(hop, key=lambda b: float(b.get("conf", 0.0)), reverse=True)
+
+    if loai == DIA_DIEM:
+        dia_diem = [
+            (d, float(b.get("conf", 0.5)))
+            for b in hop
+            for d in [_rut_dia_diem_ocr(str(b.get("text", "")))]
+            if d
+        ]
+        if dia_diem:
+            dem = Counter(_khong_dau(d) for d, _ in dia_diem)
+            pho_bien = dem.most_common(1)[0][0]
+            d, conf = max(
+                ((d, c) for d, c in dia_diem if _khong_dau(d) == pho_bien),
+                key=lambda x: x[1],
+            )
+            return DapAn(
+                d, conf, "ocr", video_id, -1,
+                "địa danh đọc từ các biển tên trong cùng video",
+            )
 
     if loai == THOI_GIAN:
         for b in hop:
@@ -439,7 +507,7 @@ def tra_loi_bang_asr(
     if not tep.exists():
         return None
 
-    gan_nhat = None
+    gan: list[tuple[float, str]] = []
     for dong in tep.open("r", encoding="utf-8"):
         dong = dong.strip()
         if not dong:
@@ -450,27 +518,47 @@ def tra_loi_bang_asr(
             continue
         bat_dau, ket_thuc = float(d.get("start", 0)), float(d.get("end", 0))
         if bat_dau - cua_so_giay <= pts_time <= ket_thuc + cua_so_giay:
-            khoang_cach = min(abs(pts_time - bat_dau), abs(pts_time - ket_thuc))
-            if gan_nhat is None or khoang_cach < gan_nhat[0]:
-                gan_nhat = (khoang_cach, d.get("text", ""))
+            khoang_cach = (
+                0.0 if bat_dau <= pts_time <= ket_thuc
+                else min(abs(pts_time - bat_dau), abs(pts_time - ket_thuc))
+            )
+            van_ban = str(d.get("text", "")).strip()
+            if van_ban:
+                gan.append((khoang_cach, van_ban))
 
-    if not gan_nhat or not gan_nhat[1].strip():
+    if not gan:
         return None
 
+    gan.sort(key=lambda x: x[0])
+
     if loai_cau_hoi(cau_hoi) == THOI_GIAN:
-        khop = re.search(r"\b(19|20)\d{2}\b", gan_nhat[1])
-        if khop:
-            return DapAn(khop.group(0), 0.5, "asr", video_id, -1, "năm nghe được")
+        for _, van_ban in gan:
+            khop = re.search(r"\b(19|20)\d{2}\b", van_ban)
+            if khop:
+                return DapAn(khop.group(0), 0.5, "asr", video_id, -1, "năm nghe được")
+
+    cau_khong_dau = _khong_dau(cau_hoi)
+    if "ung ho ai" in cau_khong_dau or (
+        "quyen gop" in cau_khong_dau and "ung ho" in cau_khong_dau
+    ):
+        for khoang_cach, van_ban in gan:
+            khop = re.search(r"\bủng hộ\s+([^,.;!?]+)", van_ban, re.IGNORECASE)
+            if khop:
+                return DapAn(
+                    "ủng hộ " + khop.group(1).strip(), 0.65, "asr", video_id, -1,
+                    f"vế trả lời sau 'ủng hộ', cách mốc {khoang_cach:.1f} giây",
+                )
 
     # Cắt câu nói thành cụm rồi chọn theo dạng câu hỏi. Bản đầu trả nguyên
     # 120 ký tự đầu — đáp án bộ dev dài 1-4 chữ nên không bao giờ khớp.
-    chon = chon_cum_tot_nhat(cau_hoi, _tach_cum(gan_nhat[1]))
+    ung_vien = [c for _, van_ban in gan for c in _tach_cum(van_ban)]
+    chon = chon_cum_tot_nhat(cau_hoi, ung_vien)
     if not chon:
         return None
 
     return DapAn(
         chon, 0.35, "asr", video_id, -1,
-        f"cụm trong lời nói cách mốc {gan_nhat[0]:.1f} giây",
+        f"cụm tốt nhất trong cửa sổ ±{cua_so_giay:.0f} giây",
     )
 
 
@@ -518,27 +606,38 @@ def tra_loi(
         return doan_du_phong(cau_hoi)
 
     thu_duoc: list[DapAn] = []
+    loai = loai_cau_hoi(cau_hoi)
 
     for h in ung_vien:
         vid, n = str(h.video_id), int(h.n)
 
-        d = tra_loi_bang_ocr(cau_hoi, vid, n)
-        if d is not None:
-            d.frame_idx = int(h.frame_idx)
-            thu_duoc.append(d)
-            continue
+        def bang_ocr():
+            return tra_loi_bang_ocr(cau_hoi, vid, n)
 
-        if dung_vlm:
+        def bang_asr():
+            return tra_loi_bang_asr(cau_hoi, vid, float(h.pts_time))
+
+        def bang_vlm():
+            if not dung_vlm:
+                return None
             d = tra_loi_bang_vlm(cau_hoi, vid, n, bo_doc_anh)
-            if d is not None and d.nguon != "du_phong":
+            return None if d is not None and d.nguon == "du_phong" else d
+
+        # Không dùng một thứ tự cho mọi câu. BLIP-VQA base không đọc tốt chữ
+        # và tên riêng; OCR rác lại không được phép chặn ASR ở câu địa điểm.
+        if loai in (DEM, MAU):
+            thu_tu = (bang_vlm, bang_ocr, bang_asr)
+        elif loai in (CHU_TREN_HINH, THOI_GIAN, DIA_DIEM):
+            thu_tu = (bang_ocr, bang_asr, bang_vlm)
+        else:  # KHAC: thông tin thường nằm trong lời nói
+            thu_tu = (bang_asr, bang_ocr, bang_vlm)
+
+        for doc in thu_tu:
+            d = doc()
+            if d is not None:
                 d.frame_idx = int(h.frame_idx)
                 thu_duoc.append(d)
-                continue
-
-        d = tra_loi_bang_asr(cau_hoi, vid, float(h.pts_time))
-        if d is not None:
-            d.frame_idx = int(h.frame_idx)
-            thu_duoc.append(d)
+                break
 
     if not thu_duoc:
         du_phong = doan_du_phong(cau_hoi)
@@ -562,6 +661,82 @@ def tra_loi(
         d.van_ban for d in thu_duoc if _khong_dau(d.van_ban) != pho_bien
     ][:4]
     return tot_nhat
+
+
+@dataclass(frozen=True)
+class HitQALanCan:
+    video_id: str
+    n: int
+    score: float
+    frame_idx: int
+    pts_time: float
+    source: str
+
+
+def mo_rong_hit_lan_can(
+    hits: Sequence,
+    so_hit_mo_rong: int = 10,
+    ban_kinh: int = 2,
+    so_dong: int = 100,
+) -> list:
+    """Chèn keyframe ``n±2`` sau các hit đầu, vẫn giữ hit gốc đứng trước."""
+    from .frame_map import lookup
+
+    ra: list = []
+    da_co: set[tuple[str, int]] = set()
+
+    def them(h) -> None:
+        khoa = (str(h.video_id), int(h.n))
+        if khoa not in da_co and len(ra) < so_dong:
+            da_co.add(khoa)
+            ra.append(h)
+
+    for i, h in enumerate(hits):
+        them(h)
+        if i >= so_hit_mo_rong:
+            continue
+        for lech in list(range(-ban_kinh, 0)) + list(range(1, ban_kinh + 1)):
+            n_moi = int(h.n) + lech
+            if n_moi < 1:
+                continue
+            try:
+                frame_idx, pts_time = lookup(str(h.video_id), n_moi)
+            except KeyError:
+                continue
+            them(HitQALanCan(
+                video_id=str(h.video_id), n=n_moi,
+                score=float(getattr(h, "score", 0.0)),
+                frame_idx=int(frame_idx), pts_time=float(pts_time),
+                source=f"{getattr(h, 'source', 'qa')}+lan_can",
+            ))
+        if len(ra) >= so_dong:
+            break
+    return ra[:so_dong]
+
+
+def tra_loi_theo_hang(
+    cau_hoi: str,
+    hits: Sequence,
+    so_dong: int = 100,
+    so_hang_vlm: int = 5,
+    bo_doc_anh: BoDocAnh | None = None,
+    dung_vlm: bool = True,
+    mo_rong_lan_can: bool = True,
+) -> list[tuple[Any, DapAn]]:
+    """Sinh đáp án RIÊNG cho từng khung và giữ nguyên cặp khung–đáp án."""
+    da_mo_rong = (
+        mo_rong_hit_lan_can(hits, so_dong=so_dong)
+        if mo_rong_lan_can
+        else list(hits)[:so_dong]
+    )
+    ra: list[tuple[Any, DapAn]] = []
+    for i, h in enumerate(da_mo_rong):
+        d = tra_loi(
+            cau_hoi, [h], so_ung_vien_doc=1, bo_doc_anh=bo_doc_anh,
+            dung_vlm=dung_vlm and i < so_hang_vlm,
+        )
+        ra.append((h, d))
+    return ra
 
 
 def kiem_khong_o_trong(dap_an_theo_cau: dict[str, str]) -> list[str]:
