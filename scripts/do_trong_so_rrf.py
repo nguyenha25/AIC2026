@@ -112,6 +112,8 @@ def dung_cac_nguon(
     nguon_clip_l: str | None = None,
     rerank: bool = False,
     rerank_so_dau: int = 100,
+    chi_clip_caption: bool = False,
+    nguon_caption: str | None = None,
 ):
     """Trả về {tên nhánh: hàm (câu chữ, số ứng viên) -> list[dict]}.
 
@@ -167,21 +169,22 @@ def dung_cac_nguon(
         return [hit_sang_dict(h) for h in _tim(cau, k)]
 
     nguon["clip"] = _clip
-    nguon["ocr_fts"] = lambda cau, k: kho_chu.search_text(
-        cau, top_k=k, loc_hiem=loc_token_hiem_ocr
-    )
-    nguon["asr"] = lambda cau, k: [
-        hit_sang_dict(h) for h in no_khoang_asr(kho_chu.search_asr(cau, top_k=k))
-    ]
+    if not chi_clip_caption:
+        nguon["ocr_fts"] = lambda cau, k: kho_chu.search_text(
+            cau, top_k=k, loc_hiem=loc_token_hiem_ocr
+        )
+        nguon["asr"] = lambda cau, k: [
+            hit_sang_dict(h) for h in no_khoang_asr(kho_chu.search_asr(cau, top_k=k))
+        ]
 
-    if dung_object or loc_vat_the:
+    if (dung_object or loc_vat_the) and not chi_clip_caption:
         from aic2026.index.objects_index import ObjectSearchIndex
 
         kho_vt = ObjectSearchIndex()
         if dung_object:
             nguon["object"] = lambda cau, k: kho_vt.tra_bang_cau_viet(cau, top_k=k)
 
-    if loc_vat_the:
+    if loc_vat_the and not chi_clip_caption:
         # Bọc MỌI nhánh: bộ lọc chạy trước, nhánh nào cũng chỉ thấy phần khung
         # còn lại. Đây là điểm khác căn bản với nhánh xếp hạng — nó tác động
         # lên cả CLIP, OCR và ASR chứ không chỉ góp thêm một bảng.
@@ -222,7 +225,15 @@ def dung_cac_nguon(
     if dung_caption:
         from aic2026.enrich.caption import CaptionSearchIndex
 
-        kho_cap = CaptionSearchIndex()
+        kho_cap = CaptionSearchIndex(
+            nguon_dich=nguon_caption,
+            bat_buoc_dich=bool(nguon_caption),
+        )
+        thong_ke = kho_cap.thong_ke()
+        if thong_ke["so_ban_ghi_caption"] == 0:
+            raise RuntimeError(
+                "caption_fts đang rỗng. Chạy scripts.run_caption_batch trước."
+            )
         nguon["caption"] = lambda cau, k: kho_cap.tra_cuu(cau, top_k=k)
 
     return nguon
@@ -354,6 +365,22 @@ def main() -> int:
                    help="Việc 4: xếp lại top-N bằng mô hình mạnh hơn")
     p.add_argument("--rerank-so-dau", type=int, default=100)
     p.add_argument("--khong-caption", action="store_true")
+    p.add_argument(
+        "--chi-mo-ta",
+        action="store_true",
+        help="Việc 10: chỉ đo các câu loai_truy_van=mo_ta (thuần thị giác)",
+    )
+    p.add_argument(
+        "--chi-clip-caption",
+        action="store_true",
+        help="Việc 10: chỉ giữ hai nhánh CLIP và caption để đo đóng góp thuần",
+    )
+    p.add_argument(
+        "--nguon-caption",
+        choices=["tu_dien", "marian", "llm"],
+        default=None,
+        help="nguồn dịch Việt→Anh cho caption; bật chế độ bắt buộc, không fallback im lặng",
+    )
     p.add_argument("--min", action="store_true", help="quét tinh quanh bản đang chốt")
     p.add_argument("--chi-do-rieng", action="store_true")
     p.add_argument("--nguon-mo-rong", choices=["tu_dien", "marian", "llm"],
@@ -363,6 +390,14 @@ def main() -> int:
     args = p.parse_args()
 
     cau_hoi = doc_dev_questions(Path(args.tep))
+    if args.chi_mo_ta:
+        cau_hoi = [q for q in cau_hoi if q.get("loai_truy_van") == "mo_ta"]
+    if args.chi_clip_caption and args.khong_caption:
+        p.error("--chi-clip-caption không thể đi cùng --khong-caption")
+    if args.chi_clip_caption and not args.chi_mo_ta:
+        p.error("--chi-clip-caption phải đi cùng --chi-mo-ta")
+    if args.chi_clip_caption and not args.nguon_caption:
+        p.error("phép đo caption bắt buộc chọn --nguon-caption")
     so_kis_qa = sum(
         1 for q in cau_hoi if q.get("loai_truy_van") in ("mo_ta", "hoi_dap")
     )
@@ -412,6 +447,23 @@ def main() -> int:
             )
             return 1
 
+    if not args.khong_caption and args.nguon_caption:
+        from aic2026.query_expand import LuiNhanhKhongMongMuon, mo_rong as _mr_caption
+
+        try:
+            thu_caption = _mr_caption(
+                "một người đàn ông cầm ô",
+                nguon=args.nguon_caption,
+                bat_buoc=True,
+            )
+        except LuiNhanhKhongMongMuon as loi:
+            print(f"DỊCH CHO CAPTION KHÔNG DÙNG ĐƯỢC\n  {loi}")
+            return 1
+        print(
+            f"Thử dịch caption ({args.nguon_caption}): "
+            f"'một người đàn ông cầm ô' -> {thu_caption.cum_chinh!r}"
+        )
+
     nguon = dung_cac_nguon(
         dung_caption=not args.khong_caption,
         dung_object=not args.khong_object,
@@ -422,6 +474,8 @@ def main() -> int:
         nguon_clip_l=args.nguon_clip_l,
         rerank=args.rerank,
         rerank_so_dau=args.rerank_so_dau,
+        chi_clip_caption=args.chi_clip_caption,
+        nguon_caption=args.nguon_caption,
     )
     print(
         f"Nhánh bật: {', '.join(nguon)} | nhánh CLIP: "
@@ -525,7 +579,15 @@ def main() -> int:
     def _bo(**kw):
         return {t: float(kw.get(t, 0.0)) for t in nguon}
 
-    if "clip_l" in nguon:
+    if args.chi_clip_caption:
+        tham_chieu = {
+            "chỉ clip": _bo(clip=1),
+            "chỉ caption": _bo(caption=1),
+            "clip + caption 0.2": _bo(clip=1, caption=0.2),
+            "clip + caption 0.5": _bo(clip=1, caption=0.5),
+            "clip + caption 1.0": _bo(clip=1, caption=1.0),
+        }
+    elif "clip_l" in nguon:
         tham_chieu = {
             "chỉ clip": _bo(clip=1),
             "chỉ clip_l": _bo(clip_l=1),
@@ -666,12 +728,17 @@ def main() -> int:
         ),
     }
 
-    TEP_TRONG_SO.parent.mkdir(parents=True, exist_ok=True)
-    with TEP_TRONG_SO.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(ghi, f, allow_unicode=True, sort_keys=False)
+    if not args.chi_mo_ta:
+        TEP_TRONG_SO.parent.mkdir(parents=True, exist_ok=True)
+        with TEP_TRONG_SO.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(ghi, f, allow_unicode=True, sort_keys=False)
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    with (RUNS_DIR / "do_trong_so_rrf.json").open("w", encoding="utf-8") as f:
+    ten_bao_cao = (
+        "task10_caption_mo_ta.json" if args.chi_mo_ta else "do_trong_so_rrf.json"
+    )
+    tep_bao_cao = RUNS_DIR / ten_bao_cao
+    with tep_bao_cao.open("w", encoding="utf-8") as f:
         json.dump(
             {
                 "so_cau": len(cau_hoi),
@@ -694,8 +761,11 @@ def main() -> int:
             indent=2,
         )
 
-    print(f"\nĐã ghi {TEP_TRONG_SO}")
-    print(f"Đã ghi {RUNS_DIR / 'do_trong_so_rrf.json'}")
+    if args.chi_mo_ta:
+        print("\nKhông sửa config/rrf_weights.yaml vì đây là phép đo riêng nhóm mo_ta.")
+    else:
+        print(f"\nĐã ghi {TEP_TRONG_SO}")
+    print(f"Đã ghi {tep_bao_cao}")
 
     print(
         "\nĐỪNG chốt bộ trọng số mới nếu điểm chỉ hơn bộ cũ dưới mức sai số của "

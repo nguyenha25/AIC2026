@@ -68,8 +68,8 @@ def chon_video(args) -> list[str]:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--video", nargs="*", default=None)
-    p.add_argument("--shard", nargs="*", default=None, help="ví dụ L23 L27 L30")
+    p.add_argument("--video", nargs="+", default=None)
+    p.add_argument("--shard", nargs="+", default=None, help="ví dụ L23 L27 L30")
     p.add_argument("--mo-hinh", default=MO_HINH_MAC_DINH)
     p.add_argument("--thiet-bi", default=None, help="cpu / cuda")
     p.add_argument("--lo", type=int, default=8)
@@ -77,6 +77,9 @@ def main() -> int:
     p.add_argument("--chi-nap", action="store_true", help="chỉ nạp JSONL vào FTS")
     p.add_argument("--thu", nargs=2, metavar=("VIDEO", "SO_ANH"), default=None)
     args = p.parse_args()
+
+    if args.lo < 1:
+        p.error("--lo phải >= 1")
 
     if args.thu:
         from aic2026.kf_index import hang_sang_moc, so_hang
@@ -109,18 +112,27 @@ def main() -> int:
             bat_dau = time.perf_counter()
             kq = sinh_cho_video(vid, bo_sinh, lam_lai=args.lam_lai)
             if kq["bo_qua"]:
-                print(f"  [{thu_tu}/{len(video_ids)}] {vid}: đã có, bỏ qua")
+                print(
+                    f"  [{thu_tu}/{len(video_ids)}] {vid}: đã đủ "
+                    f"{kq['so_caption']:,}/{kq['so_dong']:,} caption, bỏ qua"
+                )
             else:
                 print(
-                    f"  [{thu_tu}/{len(video_ids)}] {vid}: {kq['so_dong']:,} caption "
+                    f"  [{thu_tu}/{len(video_ids)}] {vid}: "
+                    f"{kq['so_caption']:,}/{kq['so_dong']:,} caption "
                     f"({time.perf_counter() - bat_dau:.0f}s"
+                    + (f", chạy tiếp từ {kq['tiep_tuc_tu']}" if kq.get("tiep_tuc_tu") else "")
                     + (f", thiếu {kq['so_thieu_anh']} ảnh" if kq.get("so_thieu_anh") else "")
+                    + (f", rỗng {kq['so_caption_rong']}" if kq.get("so_caption_rong") else "")
                     + ")"
                 )
 
     print("\nNạp vào bảng caption_fts...")
     kho = CaptionSearchIndex()
-    kq = kho.nap_tu_thu_muc(video_ids=video_ids or None)
+    # --chi-nap không kèm bộ lọc phải nạp toàn bộ JSONL, kể cả caption đồng
+    # đội gửi sang khi máy này không giữ keyframe gốc của video đó.
+    bo_loc_nap = video_ids if (args.video or args.shard or not args.chi_nap) else None
+    kq = kho.nap_tu_thu_muc(video_ids=bo_loc_nap)
     print(f"  {kq['so_tep']} tệp, {kq['so_dong_nap']:,} dòng")
     for k, v in kho.thong_ke().items():
         print(f"  {k:<26} {v:,}")

@@ -200,22 +200,39 @@ def tra_mot_de(de: dict, tim, kho_chu=None) -> tuple[list[Answer], str]:
     return ra, f"{len(ra)} dòng"
 
 
-def dung_tim():
+def dung_tim(dung_caption: bool = False):
     from aic2026.index.fts_index import TextSearchIndex
     from aic2026.paths import FTS_DIR
     from aic2026.rank.config import trong_so_theo_dang
     from aic2026.rank.hop_nhat import tim_ung_vien_gop
 
     kho_chu = TextSearchIndex(FTS_DIR / "text.sqlite")
+    kho_caption = None
+    if dung_caption:
+        from aic2026.enrich.caption import CaptionSearchIndex
+
+        kho_caption = CaptionSearchIndex(nguon_dich="marian", bat_buoc_dich=True)
+        if kho_caption.thong_ke()["so_ban_ghi_caption"] == 0:
+            raise RuntimeError(
+                "--dung-caption đã bật nhưng caption_fts rỗng; chạy "
+                "scripts.run_caption_batch --chi-nap trước."
+            )
 
     def dung_mot_dang(dang):
-        trong_so = trong_so_theo_dang(dang)
+        trong_so = dict(trong_so_theo_dang(dang))
+        dung_caption_dang_nay = dung_caption and dang == "kis"
+        if dung_caption_dang_nay and float(trong_so.get("caption", 0.0)) <= 0:
+            # Giá trị khởi đầu để chạy thử. Sau phép đo task 10, ghi con số
+            # chốt vào rrf_weights.yaml thì giá trị đo được sẽ thắng chỗ này.
+            trong_so["caption"] = 0.5
 
         return tim_ung_vien_gop(
             kho_chu=kho_chu,
+            kho_caption=kho_caption,
             dung_clip=float(trong_so.get("clip", 0.0)) > 0,
             dung_ocr_fts=float(trong_so.get("ocr_fts", 0.0)) > 0,
             dung_asr=float(trong_so.get("asr", 0.0)) > 0,
+            dung_caption=dung_caption_dang_nay,
             dung_clip_l=float(trong_so.get("clip_l", 0.0)) > 0,
             mo_rong_truy_van=False,
             nguon_clip_l="marian",
@@ -237,6 +254,11 @@ def main() -> int:
     p.add_argument("--ra", default="nop", help="tên thư mục kết quả")
     p.add_argument("--thu-nghiem", action="store_true",
                    help="không tra kho, chỉ sinh dòng đoán — để kiểm định dạng")
+    p.add_argument(
+        "--dung-caption",
+        action="store_true",
+        help="bật nhánh caption cho câu KIS sau khi đã nghiệm thu/đo task 10",
+    )
     args = p.parse_args()
 
     thu_muc_de = Path(args.de)
@@ -267,7 +289,7 @@ def main() -> int:
         shutil.rmtree(goc)
     (goc / "submission").mkdir(parents=True)
 
-    tim = None if args.thu_nghiem else dung_tim()
+    tim = None if args.thu_nghiem else dung_tim(dung_caption=args.dung_caption)
 
     print(f"\n{'câu':<5}{'dạng':<7}{'tệp':<26}ghi chú")
     nho: dict[str, list[Answer]] = {}

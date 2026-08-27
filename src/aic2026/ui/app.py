@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -119,7 +120,7 @@ from aic2026.index.faiss_index import Hit                          # noqa: E402
 from aic2026.rank import config as cfg                             # noqa: E402
 from aic2026.rank.dedupe import loc_trung                          # noqa: E402
 from aic2026.rank.search import tim_ung_vien_clip                  # noqa: E402
-from aic2026.rank.hop_nhat import NGUON_CLIP_L
+from aic2026.rank.hop_nhat import NGUON_CAPTION, NGUON_CLIP_L
 from aic2026.rank.hop_nhat import (                                # noqa: E402
     NGUON_ASR, NGUON_CLIP, NGUON_OCR, NGUON_OCR_FTS,
     tim_ung_vien_gop,
@@ -146,6 +147,11 @@ def _nap_mem(ten_hien: str, duong_dan: str, ten_doi_tuong: str):
 
 
 _TextSearchIndex = _nap_mem("Kho chữ FTS5", "aic2026.index.fts_index", "TextSearchIndex")
+_CaptionSearchIndex = _nap_mem(
+    "Caption AI",
+    "aic2026.enrich.caption",
+    "CaptionSearchIndex",
+)
 _load_frame_map = _nap_mem("Bảng đối chiếu", "aic2026.frame_map", "load_frame_map")
 _lookup = _nap_mem("Tra ngược frame", "aic2026.frame_map", "lookup")
 
@@ -559,6 +565,59 @@ def lay_kho_chu():
         return None
 
 
+@st.cache_resource(show_spinner="Đang mở kho Caption AI...")
+def lay_kho_caption():
+    """Mở nhánh caption; thiếu dữ liệu thì trả None để UI tự khóa công tắc."""
+
+    if _CaptionSearchIndex is None or not TEP_FTS.exists():
+        return None
+
+    try:
+        kho = _CaptionSearchIndex(
+            db_path=TEP_FTS,
+            nguon_dich="marian",
+            bat_buoc_dich=True,
+        )
+        if kho.thong_ke().get("so_ban_ghi_caption", 0) <= 0:
+            return None
+        return kho
+    except Exception:
+        return None
+
+
+def lay_caption_hien_thi(cac_hit) -> dict[str, str]:
+    """Đọc caption của cả trang kết quả bằng một câu SQL duy nhất."""
+
+    khoa = list(dict.fromkeys(
+        (str(hit.video_id), int(hit.n)) for hit in cac_hit
+    ))
+    if not khoa or not TEP_FTS.exists():
+        return {}
+
+    # Mỗi hit dùng hai tham số; số kết quả của UI nhỏ hơn xa giới hạn SQLite.
+    gia_tri = ", ".join("(?, ?)" for _ in khoa)
+    tham_so = [gia_tri_con for cap in khoa for gia_tri_con in cap]
+
+    try:
+        with sqlite3.connect(TEP_FTS) as conn:
+            dong = conn.execute(
+                "WITH can_doc(video_id, n) AS (VALUES " + gia_tri + ") "
+                "SELECT c.video_id, c.n, c.caption "
+                "FROM caption_fts AS c "
+                "JOIN can_doc AS w "
+                "ON c.video_id = w.video_id AND c.n = w.n",
+                tham_so,
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+
+    return {
+        f"{video_id}#{int(n)}": str(caption).strip()
+        for video_id, n, caption in dong
+        if str(caption or "").strip()
+    }
+
+
 @st.cache_resource(show_spinner="Đang nạp kho OCR (khớp từ khoá)...")
 def lay_ocr_reranker():
     """
@@ -694,9 +753,10 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
     """
     Lướt tìm — KHÔNG ghi tệp. Chỉ ghi khi người dùng bấm xuất.
 
-    cac_nguon: tập con của {clip, ocr, ocr_fts, asr}. Bật/tắt độc lập nên chạy
-    được cả nguồn đơn lẫn mọi tổ hợp, đi qua ĐÚNG MỘT đường ống — giống hệt
-    scripts/benchmark_rrf.py, nên kết quả trên giao diện so được với số nghiệm thu.
+    cac_nguon: tập con của {clip, clip_l, caption, ocr, ocr_fts, asr}.
+    Bật/tắt độc lập nên chạy được cả nguồn đơn lẫn mọi tổ hợp, đi qua ĐÚNG
+    MỘT đường ống — giống phép benchmark nên kết quả trên giao diện so được
+    với số nghiệm thu.
     """
 
     nhat_ky = nhat_ky or NhatKyBuoc()
@@ -720,6 +780,13 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
     if NGUON_OCR in cac_nguon and ocr_engine is None:
         raise RuntimeError("Không nạp được OCRReranker (kiểm tra derived/ocr/).")
 
+    kho_caption = lay_kho_caption() if NGUON_CAPTION in cac_nguon else None
+
+    if NGUON_CAPTION in cac_nguon and kho_caption is None:
+        raise RuntimeError(
+            "Caption AI chưa sẵn sàng. Chạy scripts.run_caption_batch --chi-nap."
+        )
+
     # Chữ OCR để hiện dưới mỗi ảnh. Lấy từ kho FTS vì nó trả sẵn text theo
     # frame; nhánh OCRReranker không dùng cho việc hiển thị.
     if kho_chu is not None and NGUON_OCR_FTS in cac_nguon:
@@ -732,9 +799,21 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         except Exception:
             pass
 
+    # Caption AI là chế độ cứu hộ đã đo riêng trên 46 câu mô tả. Nó không thay
+    # đổi cấu hình mặc định: chỉ khi người dùng bật công tắc mới dùng đúng bộ
+    # CLIP-L 1.0 + CLIP B/32 0.2 + caption 0.6 của lần thử Task 10.
+    trong_so_caption = None
+    if NGUON_CAPTION in cac_nguon:
+        trong_so_caption = {
+            NGUON_CLIP_L: 1.0,
+            NGUON_CLIP: 0.2,
+            NGUON_CAPTION: 0.6,
+        }
+
     nguon = tim_ung_vien_gop(
         ocr_engine=ocr_engine,
         kho_chu=kho_chu,
+        kho_caption=kho_caption,
         dung_clip=NGUON_CLIP in cac_nguon,
         dung_clip_l=NGUON_CLIP_L in cac_nguon,
         nguon_clip_l=(
@@ -745,13 +824,16 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         dung_ocr=NGUON_OCR in cac_nguon,
         dung_ocr_fts=NGUON_OCR_FTS in cac_nguon,
         dung_asr=NGUON_ASR in cac_nguon,
+        dung_caption=NGUON_CAPTION in cac_nguon,
+        mo_rong_truy_van=NGUON_CLIP in cac_nguon,
+        nguon_mo_rong=("marian" if NGUON_CLIP in cac_nguon else None),
         # VIỆC 6: để None thì đọc config/rrf_weights.yaml. Truyền cứng
         # TRONG_SO_MAC_DINH như bản cũ là đè lên tệp đó, và mọi con số đo
         # được ở Việc 6 không tới được giao diện.
         #
         # Giao diện chưa có ô chọn dạng câu nên dùng bộ "mac_dinh" (= bộ của
         # KIS). Thêm ô chọn dạng thì truyền dang_cau vào đây — việc của Thi.
-        trong_so=None,
+        trong_so=trong_so_caption,
         k_rrf=cfg.rrf_k(),
     )
 
@@ -794,11 +876,17 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         for h in sach:
             dem_tinh_trang[tinh_trang_anh(h.video_id, h.n)] += 1
 
+    chu_caption: dict[str, str] = {}
+    if NGUON_CAPTION in cac_nguon:
+        with nhat_ky.buoc("Lấy Caption AI để hiển thị"):
+            chu_caption = lay_caption_hien_thi(sach)
+
     return {
         "hits": sach,
         "so_tho": so_tho,
         "so_bo_qua": so_bo_qua,
         "chu_ocr": chu_ocr,
+        "chu_caption": chu_caption,
         "so_bi_nguong": so_bi_nguong,
         "so_sach": len(sach),
         "dem_tinh_trang": dem_tinh_trang,
@@ -848,6 +936,8 @@ def _ten_nguon(che_do: str) -> str:
 
     bang_ten = {
         NGUON_CLIP: "CLIP",
+        NGUON_CLIP_L: "CLIP-L",
+        NGUON_CAPTION: "Caption AI",
         NGUON_OCR: "OCR từ khoá",
         NGUON_OCR_FTS: "OCR BM25",
         NGUON_ASR: "ASR",
@@ -929,10 +1019,13 @@ if _canh_bao_he_thong:
 # ============================================================
 
 co_kho_chu = _TextSearchIndex is not None and TEP_FTS.exists()
+co_kho_caption = lay_kho_caption() is not None
 
 if not co_kho_chu:
     st.session_state["ng_ocr_fts"] = False
     st.session_state["ng_asr"] = False
+if not co_kho_caption:
+    st.session_state["ng_caption"] = False
 
 with st.form("form_tim_kiem", clear_on_submit=False):
     st.markdown(
@@ -976,7 +1069,7 @@ with st.form("form_tim_kiem", clear_on_submit=False):
     with st.expander("Tùy chọn tìm kiếm", expanded=False):
         st.caption("Nguồn dữ liệu")
 
-        cot_clip, cot_ocr, cot_fts, cot_asr = st.columns(4)
+        cot_clip, cot_caption = st.columns(2)
 
         bat_clip = cot_clip.checkbox(
             "Hình ảnh mạnh (CLIP-L)",
@@ -984,26 +1077,49 @@ with st.form("form_tim_kiem", clear_on_submit=False):
             key="ng_clip",
             help="Tìm theo độ tương đồng ngữ nghĩa hình ảnh - văn bản.",
         )
+        bat_caption = cot_caption.checkbox(
+            "Caption AI",
+            value=False,
+            key="ng_caption",
+            disabled=not co_kho_caption,
+            help=(
+                "Chế độ thử nghiệm: gộp CLIP-L 1.0, CLIP B/32 0.2 và "
+                "caption 0.6. Mặc định tắt vì mức tăng trên dev còn nhỏ."
+            ),
+        )
+
+        st.caption("Nguồn chữ hỗ trợ")
+        cot_ocr, cot_fts, cot_asr = st.columns(3)
+
         bat_ocr = cot_ocr.checkbox(
             "OCR từ khoá",
             value=False,
             key="ng_ocr",
+            disabled=bat_caption,
             help="Khớp từ khoá xuất hiện trong khung hình.",
         )
         bat_ocr_fts = cot_fts.checkbox(
             "OCR BM25",
             value=co_kho_chu,
             key="ng_ocr_fts",
-            disabled=not co_kho_chu,
+            disabled=not co_kho_chu or bat_caption,
             help="Tìm văn bản trên ảnh bằng chỉ mục BM25.",
         )
         bat_asr = cot_asr.checkbox(
             "Lời nói (ASR)",
             value=co_kho_chu,
             key="ng_asr",
-            disabled=not co_kho_chu,
+            disabled=not co_kho_chu or bat_caption,
             help="Tìm nội dung được nói trong video.",
         )
+
+        if bat_caption:
+            st.markdown(
+                '<div class="ai-mode-note"><strong>Caption AI đang bật</strong>'
+                '<span>Chế độ cứu hộ · CLIP-L 1.0 + CLIP 0.2 + caption 0.6</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
         cot_loc, cot_nguong = st.columns(2)
 
@@ -1027,17 +1143,26 @@ with st.form("form_tim_kiem", clear_on_submit=False):
 
         if not co_kho_chu:
             st.caption("Kho chữ chưa sẵn sàng nên OCR BM25 và ASR đang tắt.")
+        if not co_kho_caption:
+            st.caption(
+                "Caption AI chưa sẵn sàng; chạy "
+                "python -u -m scripts.run_caption_batch --chi-nap."
+            )
 
     cac_nguon = set()
 
-    if bat_clip:
-        cac_nguon.add(NGUON_CLIP_L)
-    if bat_ocr:
-        cac_nguon.add(NGUON_OCR)
-    if bat_ocr_fts:
-        cac_nguon.add(NGUON_OCR_FTS)
-    if bat_asr:
-        cac_nguon.add(NGUON_ASR)
+    if bat_caption:
+        # Công tắc là một CHẾ ĐỘ đã đo, không phải nhánh caption đứng riêng.
+        cac_nguon.update({NGUON_CLIP_L, NGUON_CLIP, NGUON_CAPTION})
+    else:
+        if bat_clip:
+            cac_nguon.add(NGUON_CLIP_L)
+        if bat_ocr:
+            cac_nguon.add(NGUON_OCR)
+        if bat_ocr_fts:
+            cac_nguon.add(NGUON_OCR_FTS)
+        if bat_asr:
+            cac_nguon.add(NGUON_ASR)
 
 
 # ============================================================
@@ -1437,6 +1562,29 @@ if "ket_qua" in st.session_state:
                     chu = ket_qua.get("chu_ocr", {}).get(
                         f"{hit.video_id}#{hit.n}"
                     )
+
+                    chu_ai = ket_qua.get("chu_caption", {}).get(
+                        f"{hit.video_id}#{hit.n}"
+                    )
+
+                    if NGUON_CAPTION in ket_qua.get("che_do", "").split("+"):
+                        if chu_ai:
+                            chu_ai_gon = (
+                                chu_ai if len(chu_ai) <= 150 else chu_ai[:150] + "…"
+                            )
+                            st.markdown(
+                                '<div class="ai-caption-snippet" title="'
+                                f'{html.escape(chu_ai, quote=True)}">'
+                                '<span>MÔ TẢ AI · EN</span>'
+                                f'<p>{html.escape(chu_ai_gon)}</p></div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                '<div class="ai-caption-snippet is-empty" '
+                                'aria-hidden="true">&nbsp;</div>',
+                                unsafe_allow_html=True,
+                            )
 
                     if chu:
                         chu_gon = chu if len(chu) <= 120 else chu[:120] + "…"

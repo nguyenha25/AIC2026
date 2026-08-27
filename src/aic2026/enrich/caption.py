@@ -35,6 +35,7 @@ và làm SAU khi Việc 4 với Việc 5 đã đo xong — đúng thứ tự che
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
@@ -44,6 +45,65 @@ BANG_CAPTION = "caption_fts"
 MO_HINH_MAC_DINH = "Salesforce/blip-image-captioning-base"
 SO_BEAM = 3
 DAI_TOI_DA = 40
+
+_TU_DUNG_TIEN_ANH = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "in", "is", "it", "of", "on", "or", "that", "the", "their", "this",
+    "to", "with",
+}
+
+
+def _ghi_jsonl(tep: Path, cac_ban_ghi: Iterable[dict]) -> None:
+    tep.parent.mkdir(parents=True, exist_ok=True)
+    with tep.open("w", encoding="utf-8") as f:
+        for ban_ghi in cac_ban_ghi:
+            f.write(json.dumps(ban_ghi, ensure_ascii=False) + "\n")
+
+
+def _doc_ban_ghi_theo_n(tep: Path) -> dict[int, dict]:
+    """Đọc các dòng hợp lệ, bỏ qua dòng cuối bị đứt do tiến trình dừng."""
+    ket_qua: dict[int, dict] = {}
+    if not tep.exists():
+        return ket_qua
+    with tep.open("r", encoding="utf-8") as f:
+        for dong in f:
+            try:
+                ban_ghi = json.loads(dong)
+                n = int(ban_ghi["n"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            ket_qua[n] = ban_ghi
+    return ket_qua
+
+
+def _tao_ban_ghi(video_id: str, moc: Any, caption: str, engine: str, status: str) -> dict:
+    return {
+        "video_id": video_id,
+        "n": int(moc.n),
+        "frame_idx": int(moc.frame_idx),
+        "pts_time": float(moc.pts_time),
+        "caption": caption,
+        "engine": engine,
+        "status": status,
+    }
+
+
+def _chuan_hoa_ban_ghi(video_id: str, moc: Any, ban_ghi: dict, engine: str) -> dict | None:
+    """Chỉ tái dùng caption nếu nó vẫn khớp map-keyframes hiện tại."""
+    try:
+        if str(ban_ghi.get("video_id")) != video_id:
+            return None
+        if int(ban_ghi.get("frame_idx")) != int(moc.frame_idx):
+            return None
+        if abs(float(ban_ghi.get("pts_time")) - float(moc.pts_time)) > 1e-3:
+            return None
+    except (TypeError, ValueError):
+        return None
+    caption = str(ban_ghi.get("caption") or "").strip()
+    status = str(ban_ghi.get("status") or ("ok" if caption else "empty_caption"))
+    return _tao_ban_ghi(
+        video_id, moc, caption, str(ban_ghi.get("engine") or engine), status
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +182,11 @@ def sinh_cho_video(
     bo_sinh: BoSinhCaption,
     lam_lai: bool = False,
     in_tien_do: bool = True,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Sinh caption cho toàn bộ keyframe của MỘT video -> derived/captions/<v>.jsonl.
 
-    Ghi qua tệp .partial rồi mới đổi tên: đứt điện giữa chừng không để lại
-    tệp JSONL cụt mà lần sau tưởng là đã xong.
+    Mỗi keyframe có đúng một bản ghi, kể cả ảnh thiếu/caption rỗng. Tệp
+    .partial được flush sau từng lô nên lần chạy sau tiếp tục phần còn thiếu.
     """
     try:
         from ..kf_index import hang_sang_moc, so_hang
@@ -140,62 +200,86 @@ def sinh_cho_video(
 
     dich = captions_file(video_id)
 
-    if dich.exists() and not lam_lai:
-        so_dong = sum(1 for _ in dich.open("r", encoding="utf-8"))
-        if so_dong >= so_hang(video_id):
-            return {"video_id": video_id, "bo_qua": 1, "so_dong": so_dong}
-
     tong = so_hang(video_id)
     dich.parent.mkdir(parents=True, exist_ok=True)
-    tam = dich.with_suffix(".partial")
+    tam = dich.with_suffix(dich.suffix + ".partial")
+    cac_moc = [hang_sang_moc(video_id, i) for i in range(tong)]
+    moc_theo_n = {m.n: m for m in cac_moc}
 
-    so_ghi = so_thieu_anh = 0
+    da_co: dict[int, dict] = {}
+    if not lam_lai:
+        # .partial đọc sau để ưu tiên phần mới nhất của lần chạy bị ngắt.
+        for nguon in (dich, tam):
+            for n, ban_ghi in _doc_ban_ghi_theo_n(nguon).items():
+                if n in moc_theo_n:
+                    chuan = _chuan_hoa_ban_ghi(
+                        video_id, moc_theo_n[n], ban_ghi, bo_sinh.ten_mo_hinh
+                    )
+                    if chuan is not None:
+                        da_co[n] = chuan
 
-    with tam.open("w", encoding="utf-8") as f:
-        for dau_lo in range(0, tong, bo_sinh.kich_thuoc_lo):
-            moc = [
-                hang_sang_moc(video_id, i)
-                for i in range(dau_lo, min(dau_lo + bo_sinh.kich_thuoc_lo, tong))
-            ]
+    thieu = [m for m in cac_moc if m.n not in da_co]
+    if not thieu:
+        # Nâng file cũ lên schema có status mà không chạy lại mô hình.
+        _ghi_jsonl(tam, (da_co[m.n] for m in cac_moc))
+        tam.replace(dich)
+        so_caption = sum(bool(x["caption"]) for x in da_co.values())
+        return {
+            "video_id": video_id,
+            "bo_qua": 1,
+            "so_dong": tong,
+            "so_caption": so_caption,
+            "so_caption_rong": tong - so_caption,
+            "so_thieu_anh": sum(x["status"] == "missing_image" for x in da_co.values()),
+            "tiep_tuc_tu": tong,
+        }
+
+    _ghi_jsonl(tam, (da_co[n] for n in sorted(da_co)))
+    with tam.open("a", encoding="utf-8") as f:
+        for dau_lo in range(0, len(thieu), bo_sinh.kich_thuoc_lo):
+            moc = thieu[dau_lo : dau_lo + bo_sinh.kich_thuoc_lo]
             duong_dan = [keyframe_image(video_id, m.n) for m in moc]
-
-            co_anh = [p.exists() for p in duong_dan]
-            so_thieu_anh += co_anh.count(False)
-
+            ton_tai = [p.exists() for p in duong_dan]
             caption = bo_sinh.sinh(duong_dan)
 
-            for m, p, c, co in zip(moc, duong_dan, caption, co_anh):
-                if not co or not c:
-                    continue
-                f.write(
-                    json.dumps(
-                        {
-                            "video_id": m.video_id,
-                            "n": m.n,
-                            "frame_idx": m.frame_idx,
-                            "pts_time": m.pts_time,
-                            "caption": c,
-                            "engine": bo_sinh.ten_mo_hinh,
-                        },
-                        ensure_ascii=False,
+            for m, c, co_anh in zip(moc, caption, ton_tai):
+                c = c.strip()
+                if not co_anh:
+                    ban_ghi = _tao_ban_ghi(
+                        video_id, m, "", bo_sinh.ten_mo_hinh, "missing_image"
                     )
-                    + "\n"
-                )
-                so_ghi += 1
+                else:
+                    trang_thai = "ok" if c else "empty_caption"
+                    ban_ghi = _tao_ban_ghi(
+                        video_id, m, c, bo_sinh.ten_mo_hinh, trang_thai
+                    )
+                da_co[m.n] = ban_ghi
+                f.write(json.dumps(ban_ghi, ensure_ascii=False) + "\n")
+            f.flush()
 
             if in_tien_do:
                 print(
-                    f"    {min(dau_lo + bo_sinh.kich_thuoc_lo, tong)}/{tong}",
+                    f"    {len(da_co)}/{tong} (+{min(dau_lo + len(moc), len(thieu))}/{len(thieu)})",
                     end="\r",
                     flush=True,
                 )
 
-    tam.replace(dich)
+    if set(da_co) != set(moc_theo_n):
+        raise RuntimeError(f"Caption chưa phủ đủ {video_id}; giữ {tam} để chạy tiếp")
+
+    san_sang = dich.with_suffix(dich.suffix + ".ready.partial")
+    _ghi_jsonl(san_sang, (da_co[m.n] for m in cac_moc))
+    san_sang.replace(dich)
+    tam.unlink(missing_ok=True)
+    so_caption = sum(bool(x["caption"]) for x in da_co.values())
     return {
         "video_id": video_id,
         "bo_qua": 0,
-        "so_dong": so_ghi,
-        "so_thieu_anh": so_thieu_anh,
+        "so_dong": tong,
+        "so_caption": so_caption,
+        "so_caption_rong": tong - so_caption,
+        "so_thieu_anh": sum(x["status"] == "missing_image" for x in da_co.values()),
+        "tiep_tuc_tu": tong - len(thieu),
     }
 
 
@@ -206,7 +290,13 @@ def sinh_cho_video(
 class CaptionSearchIndex:
     """Bảng caption_fts trong cùng tệp index/fts/text.sqlite."""
 
-    def __init__(self, db_path: Path | None = None, tu_dich_cau_hoi: bool = True):
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        tu_dich_cau_hoi: bool = True,
+        nguon_dich: str | None = None,
+        bat_buoc_dich: bool = False,
+    ):
         if db_path is None:
             from ..paths import FTS_DIR
 
@@ -214,6 +304,8 @@ class CaptionSearchIndex:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.tu_dich_cau_hoi = tu_dich_cau_hoi
+        self.nguon_dich = nguon_dich
+        self.bat_buoc_dich = bat_buoc_dich
         self._init_db()
 
     def _conn(self):
@@ -245,7 +337,7 @@ class CaptionSearchIndex:
 
         captions_dir = captions_dir or CAPTIONS_DIR
         tep = sorted(captions_dir.glob("*.jsonl"))
-        if video_ids:
+        if video_ids is not None:
             giu = set(video_ids)
             tep = [t for t in tep if t.stem in giu]
 
@@ -253,7 +345,7 @@ class CaptionSearchIndex:
         with self._conn() as conn:
             cur = conn.cursor()
             if xoa_truoc:
-                if video_ids:
+                if video_ids is not None:
                     cur.executemany(
                         f"DELETE FROM {BANG_CAPTION} WHERE video_id = ?",
                         [(v,) for v in video_ids],
@@ -307,11 +399,21 @@ class CaptionSearchIndex:
             try:
                 from ..query_expand import mo_rong
 
-                cau_tra = mo_rong(cau_hoi).cum_chinh
+                cau_tra = mo_rong(
+                    cau_hoi,
+                    nguon=self.nguon_dich,
+                    bat_buoc=self.bat_buoc_dich,
+                ).cum_chinh
             except Exception:
+                if self.bat_buoc_dich:
+                    raise
                 cau_tra = cau_hoi
 
-        tu = [t for t in cau_tra.split() if t]
+        tat_ca_tu = re.findall(r"[a-z0-9]+", cau_tra.lower())
+        tu = [t for t in tat_ca_tu if len(t) >= 2 and t not in _TU_DUNG_TIEN_ANH]
+        if not tu:
+            tu = [t for t in tat_ca_tu if len(t) >= 2]
+        tu = list(dict.fromkeys(tu))[:20]
         if not tu:
             return []
 
@@ -319,9 +421,8 @@ class CaptionSearchIndex:
 
         with self._conn() as conn:
             cur = conn.cursor()
-            ra = self._chay(cur, " AND ".join(boc), top_k)
-            if not ra and len(boc) > 1:
-                ra = self._chay(cur, " OR ".join(boc), top_k)
+            # Caption ngắn: OR bền hơn AND với câu hỏi mô tả dài.
+            ra = self._chay(cur, " OR ".join(boc), top_k)
         return ra
 
     def _chay(self, cur, bieu_thuc: str, top_k: int) -> list[dict[str, Any]]:

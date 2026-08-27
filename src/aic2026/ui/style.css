@@ -524,6 +524,38 @@ div[data-testid="stToggle"] label {
     font-size: 0.77rem;
 }
 
+.ai-mode-note {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    margin: 0.35rem 0 0.7rem;
+    padding: 0.62rem 0.75rem;
+    border: 1px solid rgba(181, 42, 87, 0.16);
+    border-radius: 11px;
+    color: var(--text-2);
+    background:
+        linear-gradient(110deg, rgba(243, 167, 190, 0.2), transparent 60%),
+        rgba(255, 255, 255, 0.58);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.06);
+}
+
+.ai-mode-note strong {
+    flex: 0 0 auto;
+    color: var(--rose);
+    font-size: 0.74rem;
+}
+
+.ai-mode-note span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 div[data-testid="stSlider"] div[role="slider"] {
     border: 2px solid #ffffff;
     background: linear-gradient(135deg, var(--pink), var(--burgundy));
@@ -838,6 +870,49 @@ div[data-testid="stImage"] img {
     -webkit-line-clamp: 3;
 }
 
+.ai-caption-snippet {
+    display: flex;
+    box-sizing: border-box;
+    height: 4.15rem;
+    min-height: 4.15rem;
+    max-height: 4.15rem;
+    flex-direction: column;
+    gap: 0.22rem;
+    padding: 0.45rem 0.58rem;
+    overflow: hidden;
+    border: 1px solid rgba(181, 42, 87, 0.12);
+    border-left: 3px solid var(--burgundy);
+    border-radius: 0 9px 9px 0;
+    color: #6f4050;
+    background:
+        linear-gradient(120deg, rgba(250, 224, 232, 0.68), rgba(255, 255, 255, 0.58));
+}
+
+.ai-caption-snippet span {
+    color: var(--rose);
+    font-family: var(--mono);
+    font-size: 0.56rem;
+    font-weight: 850;
+    letter-spacing: 0.07em;
+}
+
+.ai-caption-snippet p {
+    display: -webkit-box;
+    margin: 0;
+    overflow: hidden;
+    color: inherit;
+    font-size: 0.67rem;
+    line-height: 1.35;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.ai-caption-snippet.is-empty {
+    visibility: hidden;
+    border-left-color: transparent;
+    user-select: none;
+}
+
 .ocr-snippet.is-empty {
     visibility: hidden;
     border-left-color: transparent;
@@ -1049,6 +1124,16 @@ div[data-testid="stDataFrame"] {
 
     .query-summary span {
         max-width: 100%;
+    }
+
+    .ai-mode-note {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .ai-mode-note span {
+        white-space: normal;
     }
 }
 
