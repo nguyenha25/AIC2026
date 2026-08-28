@@ -1,0 +1,268 @@
+# Việc 3 — TỪ TIẾNG VIỆT TRONG ĐỀ  ->  NHÃN TIẾNG ANH CỦA raw/objects/
+#
+# Nhãn bên phải là detection_class_entities do Faster R-CNN (bộ nhãn Open
+# Images) sinh ra. Viết ĐÚNG chính tả và ĐÚNG hoa/thường như trong tệp JSON,
+# vì FTS5 khớp theo chuỗi.
+#
+# Cách thêm nhãn mới (2 phút):
+#   python -m scripts.build_objects_index --liet-ke-nhan
+# In ra 100 nhãn hay gặp nhất trong kho. Thấy nhãn nào chưa có ở đây thì thêm.
+#
+# Một từ tiếng Việt được phép trỏ tới NHIỀU nhãn: "xe" gom cả ô tô lẫn xe tải.
+# Khoá so khớp đã hạ chữ thường và bỏ dấu bằng Python trước khi tra, nên viết
+# có dấu ở đây là được, không cần viết thêm bản không dấu.
+
+anh_xa:
+  # --- người ---
+  người: [Person, Man, Woman]
+  đàn ông: [Man]
+  phụ nữ: [Woman]
+  cô gái: [Girl, Woman]
+  em bé: [Boy, Girl, Human face]
+  trẻ em: [Boy, Girl]
+  khuôn mặt: [Human face]
+  bàn tay: [Human hand]
+
+  # --- nhạc cụ (câu p1 có "bộ trống đỏ và piano") ---
+  # Musical keyboard xuất hiện CÙNG Piano trong kho thật — thiếu nó thì truy
+  # vấn AND "trống + piano" hụt mất một phần khung có đàn.
+  đàn piano: [Piano, Musical keyboard]
+  piano: [Piano, Musical keyboard]
+  dương cầm: [Piano, Musical keyboard]
+  đàn organ: [Musical keyboard]
+  # "một CÂY ĐÀN piano" — "cây" ở đây là LOẠI TỪ, không phải cái cây. Cụm dài
+  # khớp trước và ăn luôn đoạn chữ, nên "cây" không còn để khớp thành Tree.
+  # Phát hiện từ đề thật p1 câu 25: nhãn rút ra có cả Tree, Houseplant, Plant.
+  cây đàn piano: [Piano, Musical keyboard]
+  cây đàn: [Musical instrument, Guitar, Piano]
+  bàn phím đàn: [Musical keyboard]
+  trống: [Drum]
+  bộ trống: [Drum]
+  ghi ta: [Guitar]
+  guitar: [Guitar]
+  đàn: [Guitar, Piano, Musical instrument]
+  vi ô lông: [Violin]
+  kèn: [Trumpet, Saxophone]
+  micro: [Microphone]
+
+  # --- đồ ăn (câu p1 có "ba ổ bánh mì") ---
+  bánh mì: [Bread]
+  ổ bánh: [Bread]
+  bánh ngọt: [Cake, Pastry]
+  bánh sừng bò: [Croissant]
+  đồ ăn vặt: [Snack]
+  đồ uống: [Drink]
+  nước uống: [Drink]
+  salad: [Salad]
+  rau trộn: [Salad]
+  mì ống: [Pasta]
+  nĩa: [Fork]
+  dĩa: [Fork]
+  đũa: [Chopsticks]
+  bánh: [Bread, Cake]
+  trái cây: [Fruit]
+  hoa quả: [Fruit]
+  chuối: [Banana]
+  cam: [Orange]
+  táo: [Apple]
+  rau: [Vegetable]
+  cá: [Fish]
+  thịt: [Meat]
+  đồ ăn: [Food]
+  món ăn: [Food]
+  bát: [Bowl]
+  chén: [Bowl]
+  đĩa: [Plate]
+  ly: [Wine glass, Drinking straw]
+  cốc: [Coffee cup, Mug]
+  chai: [Bottle]
+
+  # --- quần áo, vật đội đầu (câu p1 có "ba nón đỏ") ---
+  nón: [Hat, Sun hat, Cowboy hat, Fedora]
+  mũ: [Hat, Sun hat, Helmet]
+  mũ bảo hiểm: [Helmet, Bicycle helmet]
+  nón lá: [Sun hat, Hat]
+  áo: [Clothing, Shirt, Jacket]
+  áo khoác: [Jacket, Coat]
+  vest: [Suit]
+  com lê: [Suit]
+  quần jean: [Jeans]
+  quần đùi: [Shorts]
+  phụ kiện: [Fashion accessory]
+  váy: [Dress, Skirt]
+  giày: [Footwear, Shoe]
+  kính: [Glasses, Sunglasses]
+  cà vạt: [Tie]
+  túi xách: [Handbag]
+  ba lô: [Backpack]
+
+  # --- dụng cụ ---
+  kéo: [Scissors]
+  dao: [Knife]
+  thìa: [Spoon]
+  muỗng: [Spoon]
+  búa: [Hammer]
+  bút: [Pen]
+  sách: [Book]
+  điện thoại: [Mobile phone, Telephone]
+  máy tính: [Computer monitor, Laptop, Computer keyboard]
+  máy ảnh: [Camera]
+  đồng hồ: [Clock, Watch]
+  ô: [Umbrella]
+  dù: [Umbrella]
+
+  # --- phương tiện ---
+  xe hơi: [Car]
+  ô tô: [Car]
+  xe ô tô: [Car]
+  xe máy: [Motorcycle]
+  xe đạp: [Bicycle]
+  xe tải: [Truck]
+  xe buýt: [Bus]
+  tàu: [Train, Boat]
+  tàu hoả: [Train]
+  thuyền: [Boat]
+  máy bay: [Airplane]
+  xe: [Car, Truck, Bus, Motorcycle, Vehicle, Land vehicle]
+  xe van: [Van]
+  bánh xe: [Wheel, Bicycle wheel]
+  lốp xe: [Tire]
+  xuồng: [Canoe]
+  ca nô: [Canoe]
+  tàu thuyền: [Watercraft, Boat]
+
+  # --- động vật ---
+  chó: [Dog]
+  mèo: [Cat]
+  chim: [Bird]
+  ngựa: [Horse]
+  bò: [Cattle]
+  trâu: [Cattle]
+  lợn: [Pig]
+  heo: [Pig]
+  gà: [Chicken]
+  voi: [Elephant]
+  khỉ: [Monkey]
+  chim cánh cụt: [Penguin]
+  động vật: [Animal]
+  con vật: [Animal]
+
+  # --- cảnh, đồ vật lớn ---
+  cây: [Tree, Houseplant, Plant]
+  cây cối: [Tree, Plant]
+  cây dừa: [Palm tree]
+  cây cọ: [Palm tree]
+  chậu cây: [Flowerpot, Houseplant]
+  chậu hoa: [Flowerpot]
+  hoa: [Flower]
+  hoa hướng dương: [Sunflower]
+  nhà: [House, Building]
+  toà nhà: [Building, Skyscraper]
+  cao ốc: [Skyscraper]
+  toà nhà văn phòng: [Office building]
+  tháp: [Tower]
+  tượng: [Sculpture]
+  hồ bơi: [Swimming pool]
+  bể bơi: [Swimming pool]
+  cửa hàng tiện lợi: [Convenience store]
+  lều: [Tent]
+  rèm: [Curtain]
+  kệ: [Shelf]
+  thùng: [Box]
+  hộp: [Box]
+  khung ảnh: [Picture frame]
+  bảng trắng: [Whiteboard]
+  đồ nội thất: [Furniture]
+  cửa: [Door]
+  cửa sổ: [Window]
+  bàn: [Table, Desk]
+  ghế: [Chair]
+  giường: [Bed]
+  sân khấu: [Stage]
+  màn hình: [Television, Computer monitor]
+  ti vi: [Television]
+  đèn: [Lamp, Light bulb]
+  biển báo: [Traffic sign, Street sign]
+  biển số: [Vehicle registration plate]
+  biển số xe: [Vehicle registration plate]
+  áp phích: [Poster]
+  pa nô: [Billboard, Poster]
+  biển quảng cáo: [Billboard]
+  đèn đường: [Street light]
+  đèn lồng: [Lantern]
+  bóng bay: [Balloon]
+  đồ chơi: [Toy]
+  thiết bị y tế: [Medical equipment]
+  cờ: [Flag]
+  bóng: [Ball, Football]
+  bóng đá: [Football]
+
+# ---------------------------------------------------------------------------
+# CỤM PHẢI GẠCH ĐI TRƯỚC KHI TRA NHÃN
+# ---------------------------------------------------------------------------
+# Đây là các cụm ghép mà một từ bên trong CÓ trong bảng trên, nhưng cả cụm thì
+# KHÔNG nói về vật thể đó. Ranh giới từ không cứu được, vì "nhà" trong "trong
+# nhà" đúng là một từ trọn vẹn — chỉ có cách gạch cả cụm đi.
+#
+# Phát hiện từ lần chạy thật đầu tiên trên 873 video: câu "một cảnh quay TRONG
+# NHÀ lúc trời mưa" trả về toàn ảnh có ngôi nhà, trong khi ý người hỏi là bối
+# cảnh trong nhà.
+#
+# Thêm cụm mới vào đây khi thấy nhánh vật thể trả kết quả lạc đề.
+
+bo_qua:
+  # nhà
+  - trong nhà
+  - ở nhà
+  - về nhà
+  - cả nhà
+  - nhà báo
+  - nhà hàng
+  - nhà nước
+  - nhà máy
+  - nhà trường
+  - nhà khoa học
+  - nhà thơ
+  - nhà văn
+  - nhà đầu tư
+  - nhà tài trợ
+  - nhà lãnh đạo
+  # cửa
+  - cửa hàng
+  - cửa khẩu
+  - cửa ngõ
+  # kéo, dao — động từ
+  - kéo dài
+  - kéo theo
+  - lôi kéo
+  - kéo đến
+  - dao động
+  # kính ngữ
+  - kính thưa
+  - kính chào
+  - kính trọng
+  - kính mời
+  # sách
+  - chính sách
+  - kế sách
+  - sách lược
+  # bàn — động từ
+  - bàn giao
+  - bàn bạc
+  - bàn luận
+  - bàn về
+  # cây
+  - cây cầu
+  - cây số
+  - cây xăng
+  # cá, cam, bóng, ly, cờ, ô, hoa
+  - cá nhân
+  - cá tính
+  - cam kết
+  - cam go
+  - bóng dáng
+  - bóng tối
+  - ly hôn
+  - cờ bạc
+  - ô nhiễm
+  - hoa hậu

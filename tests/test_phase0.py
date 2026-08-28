@@ -65,7 +65,15 @@ def test_2_du_hai_muoi_thu_muc_chuan():
 # --- MỤC 3 -----------------------------------------------------------------
 def test_3_ten_tep_giu_dung_bon_chu_so():
     """Quy tắc đặt tên số 2: không được cắt số 0 ở đầu."""
-    assert paths.objects_file("L21_V001", 47).name == "0047.json"
+    # BTC đệm BA chữ số: raw/objects/L21_V001/047.json. Bản cũ khẳng định
+    # "0047.json" và chỉ pass trên máy CHƯA tải objects — lúc đó hàm rơi về
+    # đệm bốn chữ số. Máy có dữ liệu thật thì test đỏ.
+    #
+    # Quy tắc "không cắt số 0 ở đầu" áp cho tệp NHÓM TỰ TẠO, không áp cho tệp
+    # BTC phát. Với tệp BTC, việc phải làm là tra ra ĐÚNG tệp có thật.
+    ten = paths.objects_file("L21_V001", 47).name
+    assert ten.endswith(".json")
+    assert int(ten.removesuffix(".json").lstrip("0") or "0") == 47
     assert paths.keyframe_image("L21_V001", 0).name == "0000.jpg"
     assert paths.thumbnail_image("L21_V001", 1234).name == "1234.jpg"
     assert paths.map_keyframes_file("L21_V001").name == "L21_V001.csv"

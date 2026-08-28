@@ -1,711 +1,1188 @@
-/* ==========================================================
-   11.0 — BIẾN THIẾT KẾ
-   ----------------------------------------------------------
-   Đúng bảng màu của bản gốc, chỉ gom lại thành biến để sửa một
-   chỗ ăn cả trang. Không thêm màu nào ngoài danh sách này.
-   --aic-cao-anh là nguồn DUY NHẤT cho chiều cao ảnh trong lưới.
-   ========================================================== */
+/* AIC 2026 - Berry Rose Glassmorphism UI
+   Reference palette: #DD4473 + #5B011D */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+
 :root {
-    --aic-nen:        #0b0f19;
-    --aic-mat-1:      #111827;
-    --aic-mat-2:      #141d2e;
-    --aic-mat-3:      #1e293b;
-    --aic-vien:       #263653;
-    --aic-vien-o:     #334155;
-    --aic-vien-nut:   #3b4a68;
-    --aic-nhan:       #6366f1;
-    --aic-nhan-dam:   #4f46e5;
-    --aic-nhan-nhat:  #818cf8;
-    --aic-nhan-tim:   #8b5cf6;
-    --aic-chu-1:      #f8fafc;
-    --aic-chu-2:      #e2e8f0;
-    --aic-chu-3:      #cbd5e1;
-    --aic-chu-4:      #94a3b8;
-    --aic-diem:       #c4b5fd;
-    --aic-xanh:       #16a34a;
-    --aic-cam:        #f59e0b;
-    --aic-muot:       170ms cubic-bezier(0.4, 0, 0.2, 1);
-    --aic-cao-anh:    132px;
-    --aic-chu-so:     ui-monospace, Consolas, monospace;
+    --bg-0: #fff8fa;
+    --bg-1: #fff0f4;
+    --surface-1: rgba(255, 255, 255, 0.62);
+    --surface-2: rgba(255, 246, 249, 0.78);
+    --surface-3: rgba(250, 224, 232, 0.8);
+    --glass: rgba(255, 255, 255, 0.58);
+    --glass-strong: rgba(255, 255, 255, 0.78);
+    --line: rgba(91, 1, 29, 0.1);
+    --line-strong: rgba(91, 1, 29, 0.2);
+    --text-1: #320a17;
+    --text-2: #663346;
+    --text-3: #956c7a;
+    --pink: #dd4473;
+    --pink-soft: #f3a7be;
+    --rose: #b52a57;
+    --rose-soft: #ea7598;
+    --burgundy: #5b011d;
+    --success: #8f173c;
+    --warning: #9a5b00;
+    --danger: #a81443;
+    --shadow: 0 20px 54px rgba(91, 1, 29, 0.09);
+    --shadow-hover: 0 24px 58px rgba(91, 1, 29, 0.16);
+    --radius-lg: 22px;
+    --radius-md: 15px;
+    --radius-sm: 11px;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    --ease: 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-/* ==========================================================
-   11.1 — NỀN VÀ LUẬT CHỐNG TRÀN
-   ========================================================== */
-.stApp { background: var(--aic-nen); color: var(--aic-chu-1); }
+html,
+body,
+.stApp,
+.stApp button,
+.stApp input,
+.stApp textarea,
+.stApp select {
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
 
-.stApp p, .stApp li, .stApp span, .stApp label { color: var(--aic-chu-4); }
+.stApp {
+    min-height: 100vh;
+    color: var(--text-1);
+    background:
+        radial-gradient(circle at 6% 8%, rgba(221, 68, 115, 0.34) 0, rgba(243, 167, 190, 0.18) 18rem, transparent 32rem),
+        radial-gradient(circle at 94% 78%, rgba(91, 1, 29, 0.13) 0, rgba(221, 68, 115, 0.14) 20rem, transparent 35rem),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.84), rgba(255, 240, 244, 0.78)),
+        var(--bg-0);
+    background-repeat: no-repeat;
+    background-size: 42rem 42rem, 48rem 48rem, 100% 100%, auto;
+    animation: roseBackdrop 18s ease-in-out infinite alternate;
+}
 
-.stApp h1, .stApp h2, .stApp h3, .stApp h4 { color: var(--aic-chu-1); }
+@keyframes roseBackdrop {
+    from {
+        background-position: -9rem -10rem, calc(100% + 11rem) calc(100% + 12rem), 0 0, 0 0;
+    }
+    to {
+        background-position: -4rem -5rem, calc(100% + 6rem) calc(100% + 7rem), 0 0, 0 0;
+    }
+}
 
-/* Để trong suốt cho liền nền, nhưng KHÔNG ẩn — nút mở thanh bên
-   nằm trong đó, ẩn đi là mất đường vào khi thanh bên đang đóng. */
-header[data-testid="stHeader"] { background: transparent; }
+header[data-testid="stHeader"] {
+    background: transparent;
+}
 
-.block-container { max-width: 1600px; padding-top: 1.5rem; padding-bottom: 4rem; }
+.block-container {
+    max-width: 1480px;
+    padding-top: 1.25rem;
+    padding-bottom: 5rem;
+}
 
-/* Luật chống tràn, phải đặt trước mọi thứ khác.
-   Mặc định của flexbox là min-width: auto — một ô cột KHÔNG chịu co
-   hẹp hơn nội dung bên trong nó, nên chỉ cần một nhãn nút hơi dài là
-   cả hàng đội ra ngoài viền thẻ. Đặt min-width: 0 để cột chịu co lại. */
 div[data-testid="stColumn"],
 div[data-testid="column"],
-div[data-testid="stHorizontalBlock"] { min-width: 0; }
-
-/* Mã video và số liệu dài không được phép đẩy rộng thẻ */
-.result-video, .result-meta, .aic-subtitle {
-    overflow-wrap: anywhere;
-    word-break: break-word;
-}
-
-hr, [data-testid="stDivider"] hr {
-    border: none;
-    height: 1px;
-    background: var(--aic-vien);
-}
-
-/* ==========================================================
-   11.2 — ĐẦU TRANG
-   ========================================================== */
-.aic-title {
-    font-size: 32px;
-    font-weight: 800;
-    letter-spacing: -1px;
-    color: var(--aic-chu-1);
-}
-
-.aic-subtitle { color: var(--aic-chu-4); font-size: 14px; margin-bottom: 10px; }
-
-/* ==========================================================
-   11.3 — Ô SỐ LIỆU (st.metric)
-   ========================================================== */
-[data-testid="stMetric"] {
-    background: var(--aic-mat-1);
-    border: none;
-    border-radius: 12px;
-    padding: 12px 16px;
-    overflow: hidden;
+div[data-testid="stHorizontalBlock"] {
     min-width: 0;
-    transition: border-color var(--aic-muot);
 }
 
-[data-testid="stMetric"]:hover { background: var(--aic-mat-2); }
-
-/* Dòng phụ kiểu "133 thô -> 100 sau lọc trùng" dài hơn ô rất nhiều.
-   Mặc định nó không xuống dòng nên chữ chạy đè ra ngoài viền ô. */
-[data-testid="stMetric"] * { white-space: normal; overflow-wrap: anywhere; }
-
-[data-testid="stMetricLabel"] p {
-    color: var(--aic-chu-4);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
+.stApp h1,
+.stApp h2,
+.stApp h3,
+.stApp h4,
+.stApp strong {
+    color: var(--text-1);
 }
 
-[data-testid="stMetricValue"] {
-    color: var(--aic-chu-1);
-    font-size: 23px;
+.stApp p,
+.stApp label {
+    color: var(--text-2);
+}
+
+hr,
+[data-testid="stDivider"] hr {
+    border: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(91, 1, 29, 0.14), transparent);
+}
+
+
+/* Glass navigation */
+
+.app-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 2.7rem;
+    padding: 0.72rem 0.9rem;
+    border: 1px solid rgba(255, 255, 255, 0.82);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.57);
+    box-shadow: 0 12px 38px rgba(91, 1, 29, 0.09);
+    backdrop-filter: blur(22px) saturate(145%);
+    -webkit-backdrop-filter: blur(22px) saturate(145%);
+}
+
+.nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.72rem;
+}
+
+.nav-mark {
+    display: inline-flex;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    color: #ffffff;
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--burgundy));
+    box-shadow: 0 9px 22px rgba(181, 42, 87, 0.22);
+    font-size: 0.92rem;
+    font-weight: 800;
+    transition: transform var(--ease), box-shadow var(--ease);
+}
+
+.app-nav:hover .nav-mark {
+    box-shadow: 0 12px 28px rgba(91, 1, 29, 0.22);
+    transform: translateY(-2px) rotate(-4deg);
+}
+
+.nav-copy strong,
+.nav-copy small {
+    display: block;
+}
+
+.nav-copy strong {
+    font-size: 0.84rem;
+    letter-spacing: -0.01em;
+}
+
+.nav-copy small {
+    margin-top: 0.12rem;
+    color: var(--text-3);
+    font-size: 0.67rem;
+}
+
+.nav-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.72rem;
+    border-radius: 999px;
+    color: #741332;
+    background: rgba(250, 224, 232, 0.76);
+    font-size: 0.7rem;
     font-weight: 700;
+}
+
+.status-pulse {
+    position: relative;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--rose);
+}
+
+.status-pulse::after {
+    position: absolute;
+    inset: -4px;
+    border: 1px solid rgba(221, 68, 115, 0.48);
+    border-radius: 50%;
+    content: "";
+    animation: statusPulse 1.9s ease-out infinite;
+}
+
+@keyframes statusPulse {
+    0% { opacity: 0.8; transform: scale(0.45); }
+    75%, 100% { opacity: 0; transform: scale(1.65); }
+}
+
+
+/* Hero */
+
+.app-hero {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 2.5rem;
+    margin: 0 0 2rem;
+    padding: 0 0.25rem;
+}
+
+.brand-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.85rem;
+    color: var(--rose);
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.15em;
+}
+
+.brand-kicker::before {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--pink), var(--burgundy));
+    box-shadow: 0 0 0 5px rgba(221, 68, 115, 0.1);
+    content: "";
+}
+
+.app-hero h1 {
+    max-width: 820px;
+    margin: 0;
+    color: var(--text-1);
+    background: linear-gradient(110deg, var(--text-1) 12%, var(--pink) 55%, var(--burgundy));
+    background-clip: text;
+    font-size: clamp(2rem, 3.2vw, 3.4rem);
+    font-weight: 800;
+    letter-spacing: -0.055em;
+    line-height: 1.02;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.app-hero p {
+    margin: 0.8rem 0 0;
+    color: var(--text-3);
+    font-size: 0.94rem;
+    line-height: 1.6;
+}
+
+.hero-progress {
+    display: flex;
+    min-width: 195px;
+    flex-direction: column;
+    align-items: flex-end;
+    padding: 1rem 1.1rem;
+    border: 1px solid rgba(255, 255, 255, 0.82);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.58);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    transition: transform var(--ease), box-shadow var(--ease);
+}
+
+.hero-progress:hover {
+    box-shadow: var(--shadow-hover);
+    transform: translateY(-3px);
+}
+
+.hero-progress strong {
+    color: var(--rose);
+    font-size: 1.65rem;
     font-variant-numeric: tabular-nums;
+    line-height: 1;
 }
 
-[data-testid="stMetricDelta"] {
-    color: var(--aic-chu-4);
-    font-size: 11.5px;
-    font-family: var(--aic-chu-so);
+.hero-progress span {
+    margin-top: 0.38rem;
+    color: var(--text-3);
+    font-size: 0.7rem;
 }
 
-[data-testid="stMetricDelta"] svg { display: none; }
 
-/* ==========================================================
-   11.4 — KHUNG TÌM KIẾM
-   ----------------------------------------------------------
-   KHÔNG dùng position: sticky. Đã thử và sai: khung nổi lên trên
-   thì nó đè thẳng vào phần đầu của lưới kết quả bên dưới.
-   ========================================================== */
+/* Forms and fields */
+
 div[data-testid="stForm"] {
-    background: var(--aic-mat-2);
-    border: none;
-    border-radius: 16px;
-    padding: 16px;
+    margin-bottom: 1.2rem;
+    padding: 1.45rem 1.5rem 1.2rem;
+    border: 1px solid rgba(255, 255, 255, 0.84);
+    border-radius: var(--radius-lg);
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.76), rgba(255, 242, 246, 0.54));
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(22px) saturate(145%);
+    -webkit-backdrop-filter: blur(22px) saturate(145%);
 }
 
-.search-label {
-    color: var(--aic-chu-3);
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 6px;
+.form-intro,
+.section-heading,
+.results-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    margin-bottom: 1rem;
 }
 
-/* ==========================================================
-   11.5 — Ô NHẬP, CHỌN, TRƯỢT
-   ========================================================== */
+.form-intro strong,
+.section-heading strong,
+.results-heading strong {
+    display: block;
+    font-size: 0.96rem;
+    font-weight: 750;
+}
+
+.form-intro small,
+.section-heading small,
+.results-heading small {
+    display: block;
+    margin-top: 0.18rem;
+    color: var(--text-3);
+    font-size: 0.74rem;
+    font-weight: 500;
+}
+
+.form-step {
+    display: inline-flex;
+    width: 33px;
+    height: 33px;
+    flex: 0 0 33px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 11px;
+    color: #ffffff;
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--burgundy));
+    box-shadow: 0 8px 20px rgba(181, 42, 87, 0.18);
+    font-family: var(--mono);
+    font-size: 0.67rem;
+    font-weight: 800;
+}
+
+label[data-testid="stWidgetLabel"] p {
+    margin-bottom: 0.32rem;
+    color: var(--text-2);
+    font-size: 0.75rem;
+    font-weight: 650;
+}
+
 div[data-testid="stTextInput"] input,
-div[data-testid="stNumberInput"] input {
-    background: var(--aic-mat-1);
-    border: 1px solid var(--aic-mat-3);
-    color: var(--aic-chu-1);
-    border-radius: 10px;
-    min-height: 44px;
-    font-size: 15px;
-    transition: border-color var(--aic-muot), box-shadow var(--aic-muot);
+div[data-testid="stNumberInput"] input,
+div[data-testid="stTextArea"] textarea {
+    border: 1px solid rgba(91, 1, 29, 0.12);
+    border-radius: var(--radius-sm);
+    color: var(--text-1);
+    background: rgba(255, 255, 255, 0.7);
+    caret-color: var(--rose);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76);
+    transition:
+        border-color var(--ease),
+        box-shadow var(--ease),
+        background var(--ease);
 }
 
-div[data-testid="stTextInput"] input::placeholder { color: #55627a; }
+div[data-testid="stTextInput"] input {
+    min-height: 47px;
+}
+
+div[data-testid="stTextArea"] textarea {
+    min-height: 90px;
+    padding: 0.75rem 0.85rem;
+    resize: vertical;
+    line-height: 1.5;
+}
 
 div[data-testid="stTextInput"] input:hover,
-div[data-testid="stNumberInput"] input:hover { border-color: var(--aic-vien-nut); }
+div[data-testid="stNumberInput"] input:hover,
+div[data-testid="stTextArea"] textarea:hover {
+    border-color: rgba(221, 68, 115, 0.3);
+    background: rgba(255, 255, 255, 0.86);
+}
 
 div[data-testid="stTextInput"] input:focus,
-div[data-testid="stNumberInput"] input:focus {
-    border-color: var(--aic-nhan-tim);
-    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
+div[data-testid="stNumberInput"] input:focus,
+div[data-testid="stTextArea"] textarea:focus {
+    border-color: rgba(181, 42, 87, 0.5);
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 0 0 4px rgba(221, 68, 115, 0.1);
+}
+
+div[data-testid="stTextInput"] input::placeholder,
+div[data-testid="stTextArea"] textarea::placeholder {
+    color: #b08c98;
 }
 
 div[data-testid="stTextInput"] > div,
-div[data-testid="stNumberInput"] > div { border: none; background: transparent; }
-
-div[data-baseweb="select"] > div {
-    background: var(--aic-mat-1);
-    border: 1px solid var(--aic-vien-o);
-    border-radius: 10px;
-    min-height: 44px;
-    color: var(--aic-chu-1);
-    transition: border-color var(--aic-muot), box-shadow var(--aic-muot);
+div[data-testid="stNumberInput"] > div,
+div[data-testid="stTextArea"] > div {
+    border: 0;
+    background: transparent;
 }
 
-div[data-baseweb="select"] > div:hover { border-color: var(--aic-vien-nut); }
-
-div[data-baseweb="select"]:focus-within > div {
-    border-color: var(--aic-nhan-tim);
-    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
+div[data-testid="stTextArea"] div[data-testid="InputInstructions"] {
+    display: none;
 }
 
-div[data-baseweb="popover"] ul {
-    background: var(--aic-mat-2);
-    border: 1px solid var(--aic-vien);
-    border-radius: 10px;
+.submit-spacer {
+    height: 1.55rem;
 }
 
-div[data-baseweb="popover"] li:hover { background: var(--aic-mat-3); }
 
-label[data-testid="stWidgetLabel"] p {
-    color: var(--aic-chu-3);
-    font-size: 12.5px;
-    font-weight: 600;
-}
+/* Buttons */
 
-div[data-testid="stSlider"] div[role="slider"] {
-    border: 2px solid var(--aic-nhan-tim);
-    transition: box-shadow var(--aic-muot);
-}
-
-div[data-testid="stSlider"] div[role="slider"]:hover {
-    box-shadow: 0 0 0 6px rgba(139, 92, 246, 0.20);
-}
-
-div[data-testid="stCheckbox"] label { color: var(--aic-chu-3); font-size: 13px; }
-
-/* Ô tìm kiếm nhiều dòng — xem chú thích ở mục 14.
-   field-sizing: content là thứ làm ô tự cao dần theo chữ, giống khung
-   chat. Chrome/Edge 123 trở lên mới hiểu; bản cũ hơn thì ô đứng yên ở
-   chiều cao mặc định và hiện thanh cuộn, vẫn đọc được cả câu. */
-div[data-testid="stTextArea"] textarea {
-    background: var(--aic-mat-1);
-    border: 1px solid var(--aic-mat-3);
-    color: var(--aic-chu-1);
-    border-radius: 10px;
-    font-size: 15px;
-    line-height: 1.5;
-    padding: 11px 13px;
-    resize: none;
-    field-sizing: content;
-    min-height: 44px;
-    max-height: 220px;
-    transition: border-color var(--aic-muot), box-shadow var(--aic-muot);
-}
-
-div[data-testid="stTextArea"] textarea::placeholder { color: #55627a; }
-
-div[data-testid="stTextArea"] textarea:hover { border-color: var(--aic-vien-nut); }
-
-div[data-testid="stTextArea"] textarea:focus {
-    border-color: var(--aic-nhan-tim);
-    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
-}
-
-div[data-testid="stTextArea"] > div { border: none; background: transparent; }
-
-/* Streamlit gắn sẵn dòng "Press Ctrl+Enter to apply" dưới ô nhiều dòng.
-   Trong biểu mẫu thì nó sai — nút Tìm kiếm mới là thứ gửi đi. */
-div[data-testid="stTextArea"] div[data-testid="InputInstructions"] { display: none; }
-
-/* ==========================================================
-   11.6 — NÚT
-   ========================================================== */
-div[data-testid="stFormSubmitButton"] button {
-    min-height: 44px;
-    border-radius: 10px;
-    border: none;
-    background: var(--aic-nhan);
-    color: #ffffff;
-    font-weight: 700;
-    transition: background var(--aic-muot), transform var(--aic-muot);
-}
-
-div[data-testid="stFormSubmitButton"] button:hover {
-    background: var(--aic-nhan-dam);
-    transform: translateY(-1px);
-}
-
-div[data-testid="stFormSubmitButton"] button:active { transform: translateY(0); }
-
-/* Nhãn nút không được xuống dòng — đó là thứ làm lưới vỡ */
 div.stButton > button,
-div[data-testid="stDownloadButton"] > button {
-    border-radius: 8px;
-    border: 1px solid var(--aic-vien-nut);
-    background: var(--aic-mat-1);
-    color: var(--aic-chu-2);
-    font-weight: 600;
-    font-size: 12px;
-    white-space: nowrap;
-    padding: 4px 8px;
-    min-height: 32px;
+div[data-testid="stDownloadButton"] > button,
+div[data-testid="stFormSubmitButton"] > button {
+    min-height: 41px;
     max-width: 100%;
-    transition: border-color var(--aic-muot), background var(--aic-muot),
-                color var(--aic-muot);
+    border: 1px solid rgba(91, 1, 29, 0.14);
+    border-radius: var(--radius-sm);
+    color: #7b2946;
+    background: rgba(255, 255, 255, 0.65);
+    box-shadow: 0 7px 20px rgba(91, 1, 29, 0.07);
+    font-size: 0.77rem;
+    font-weight: 700;
+    white-space: nowrap;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition:
+        transform var(--ease),
+        border-color var(--ease),
+        box-shadow var(--ease),
+        background var(--ease),
+        color var(--ease);
 }
 
 div.stButton > button:hover,
 div[data-testid="stDownloadButton"] > button:hover {
-    border-color: var(--aic-nhan-nhat);
-    background: var(--aic-mat-3);
-    color: #ffffff;
+    border-color: rgba(221, 68, 115, 0.34);
+    color: var(--rose);
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow: 0 12px 28px rgba(91, 1, 29, 0.12);
+    transform: translateY(-2px);
 }
 
-/* Nhãn dài thì cắt bằng dấu ba chấm, tuyệt đối không nong rộng ô */
-div.stButton > button p,
-div[data-testid="stDownloadButton"] > button p {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
-    margin: 0;
+div[data-testid="stFormSubmitButton"] > button,
+button[data-testid="baseButton-primary"],
+div.stButton > button[kind="primary"] {
+    border-color: transparent;
+    color: #ffffff;
+    background: linear-gradient(115deg, var(--rose-soft), var(--pink) 50%, var(--burgundy));
+    box-shadow: 0 12px 28px rgba(181, 42, 87, 0.22);
+}
+
+div[data-testid="stFormSubmitButton"] > button:hover,
+button[data-testid="baseButton-primary"]:hover,
+div.stButton > button[kind="primary"]:hover {
+    border-color: transparent;
+    color: #ffffff;
+    background: linear-gradient(115deg, #ea7598, #c53160 52%, #5b011d);
+    box-shadow: 0 15px 32px rgba(91, 1, 29, 0.25);
+}
+
+div.stButton > button:active,
+div[data-testid="stDownloadButton"] > button:active,
+div[data-testid="stFormSubmitButton"] > button:active {
+    transform: translateY(0) scale(0.985);
 }
 
 div.stButton > button:disabled,
 div[data-testid="stDownloadButton"] > button:disabled {
-    opacity: 0.45;
-    border-color: var(--aic-vien);
+    border-color: rgba(91, 1, 29, 0.12);
+    color: #bea5ae;
+    background: rgba(255, 255, 255, 0.42);
+    box-shadow: none;
+    opacity: 0.72;
 }
 
 div.stButton > button:focus-visible,
-div[data-testid="stDownloadButton"] > button:focus-visible {
-    border-color: var(--aic-nhan-tim);
-    box-shadow: 0 0 0 1px var(--aic-nhan-tim);
-    outline: none;
+div[data-testid="stDownloadButton"] > button:focus-visible,
+div[data-testid="stFormSubmitButton"] > button:focus-visible {
+    outline: 0;
+    box-shadow: 0 0 0 4px rgba(221, 68, 115, 0.16);
 }
 
-/* Nút phụ trong hàng ngang của thẻ (Lân cận / Ảnh gốc / Đóng) chìm
-   hơn nút chính, để mắt bắt được nút Chọn trước. */
-div[data-testid="stVerticalBlockBorderWrapper"]
-div[data-testid="stHorizontalBlock"] div.stButton > button {
-    background: transparent;
-    border-color: var(--aic-vien);
-    color: var(--aic-chu-4);
-    font-size: 11.5px;
-    min-height: 30px;
-}
-
-div[data-testid="stVerticalBlockBorderWrapper"]
-div[data-testid="stHorizontalBlock"] div.stButton > button:hover {
-    color: #ffffff;
-    border-color: var(--aic-nhan-nhat);
-    background: var(--aic-mat-3);
-}
-
-/* ==========================================================
-   11.7 — THẺ KẾT QUẢ
-   ========================================================== */
-div[data-testid="stVerticalBlockBorderWrapper"] {
-    border: 1px solid transparent !important;
-    background: var(--aic-mat-1) !important;
-    border-radius: 14px !important;
-    /* Ép đệm tường minh: bốn máy có thể chạy bản Streamlit khác nhau,
-       mỗi bản đặt padding một chỗ khác nhau. Ghi rõ ở đây thì nội dung
-       không bao giờ dính sát vào viền. */
-    padding: 15px !important;
-    box-sizing: border-box;
-    min-width: 0;
-    overflow: hidden;
-    transition: border-color var(--aic-muot), transform var(--aic-muot);
-}
-
-div[data-testid="stVerticalBlockBorderWrapper"]:hover {
-    border-color: var(--aic-nhan-dam) !important;
-    transform: translateY(-2px);
-}
-
-/* Khoảng cách giữa ảnh, chữ và nút bên trong thẻ.
-   Mặc định 1rem làm thẻ cao lêu nghêu, chữ trôi xa ảnh. */
-div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"] {
-    gap: 0.5rem;
-}
-
-/* ==========================================================
-   11.8 — ẢNH TRONG LƯỚI
-   ----------------------------------------------------------
-   Ép mọi ảnh cùng chiều cao để các thẻ thẳng hàng. Khung ngoài cắt
-   phần thừa nên phóng nhẹ khi rê chuột không xô các thẻ bên cạnh.
-   ========================================================== */
-div[data-testid="stImage"] {
-    overflow: hidden;
-    border-radius: 8px;
-    line-height: 0;
-    background: var(--aic-nen);
-}
-
-div[data-testid="stImage"] img {
-    border-radius: 8px;
-    height: var(--aic-cao-anh);
-    width: 100%;
-    object-fit: cover;
-    transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-div[data-testid="stImage"]:hover img { transform: scale(1.05); }
-
-/* ==========================================================
-   11.8b — ẢNH KEYFRAME GỐC (mục 17)
-   ----------------------------------------------------------
-   Luật cắt 132px ở trên phải được MIỄN TRỪ ở đây, nếu không thì
-   đúng tấm ảnh người ta cần soi kỹ lại là tấm bị xén thành một
-   dải ngang. Phải phủ ba đường vào, vì mục 17 có hai nhánh và
-   tên định danh hộp thoại đổi theo phiên bản Streamlit:
-
-     div[role="dialog"]   BaseWeb luôn đặt, chuẩn nhất
-     stDialog / stModal   tên riêng của Streamlit, đổi theo bản
-     :has([stMetric])     nhánh dự phòng khi máy không có
-                          st.dialog — ảnh vẽ trong container viền
-                          thường. Nhận ra nó nhờ bốn ô metric
-                          Video/Frame/Thời điểm/Keyframe; không
-                          thẻ nào khác trong app có metric.
-   ========================================================== */
-div[role="dialog"] div[data-testid="stImage"],
-div[data-testid="stDialog"] div[data-testid="stImage"],
-div[data-testid="stModal"] div[data-testid="stImage"],
-div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"])
-div[data-testid="stImage"] {
-    overflow: visible;
-    text-align: center;
-    line-height: normal;
-    background: var(--aic-nen);
-    border: none;
-    padding: 8px;
-}
-
-div[role="dialog"] div[data-testid="stImage"] img,
-div[data-testid="stDialog"] div[data-testid="stImage"] img,
-div[data-testid="stModal"] div[data-testid="stImage"] img,
-div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"])
-div[data-testid="stImage"] img {
-    height: auto;
-    /* width: auto để ảnh nhỏ không bị kéo giãn thành mờ nhoè.
-       max-height theo chiều cao màn hình để ảnh dọc không đẩy bốn ô
-       thông tin bên dưới rơi khỏi tầm nhìn. */
-    width: auto;
+div.stButton > button p,
+div[data-testid="stDownloadButton"] > button p {
     max-width: 100%;
-    max-height: 68vh;
-    object-fit: contain;
-    margin: 0 auto;
-    display: block;
-    border-radius: 8px;
-    transform: none !important;
-}
-
-/* Bốn ô thông tin dưới ảnh: hộp thoại hẹp hơn trang chính nhiều nên
-   cỡ chữ của trang chính làm chúng chen nhau. */
-div[role="dialog"] [data-testid="stMetricValue"],
-div[data-testid="stDialog"] [data-testid="stMetricValue"],
-div[data-testid="stModal"] [data-testid="stMetricValue"],
-div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"])
-[data-testid="stMetricValue"] {
-    font-size: 17px;
-}
-
-/* Panel dự phòng không nên nhấc lên khi rê chuột như thẻ kết quả */
-div[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stMetric"]):hover {
-    transform: none;
-}
-
-/* ==========================================================
-   11.9 — NHÃN VÀ CHỮ TRONG THẺ
-   ========================================================== */
-.result-rank {
-    display: inline-block;
-    background: var(--aic-nhan-dam);
-    color: #ffffff;
-    border-radius: 6px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 800;
-}
-
-.result-rank-chon { background: var(--aic-xanh); }
-
-.nhan-nguon {
-    display: inline-block;
-    background: var(--aic-mat-3);
-    color: var(--aic-chu-4);
-    border-radius: 5px;
-    padding: 1px 6px;
-    font-size: 10px;
-    margin-left: 4px;
-    vertical-align: middle;
-}
-
-.result-video {
-    color: var(--aic-chu-1);
-    font-size: 14px;
-    font-weight: 700;
-    margin-top: 4px;
-}
-
-.result-meta {
-    color: var(--aic-chu-4);
-    font-size: 11.5px;
-    line-height: 1.55;
-    font-family: var(--aic-chu-so);
-    font-variant-numeric: tabular-nums;
-    margin-bottom: 6px;
-}
-
-.result-score { color: var(--aic-diem); font-weight: 700; }
-
-/* ==========================================================
-   11.10 — Ô THAY ẢNH
-   ----------------------------------------------------------
-   Hai trạng thái phải nhìn là phân biệt được ngay:
-   chưa tải shard  = bình thường, xám chìm
-   thiếu ảnh       = bất thường, viền cam
-   ========================================================== */
-.o-anh {
-    height: var(--aic-cao-anh);
-    border-radius: 8px;
-    font-size: 11.5px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    line-height: 1.4;
-}
-
-.o-chua-tai { border: 1px dashed #2b3a54; color: #55627a; background: #0e1524; }
-
-.o-thieu-anh {
-    border: 1px dashed #b45309;
-    color: var(--aic-cam);
-    background:
-        repeating-linear-gradient(135deg, rgba(245, 158, 11, 0.09) 0 10px,
-                                  transparent 10px 20px),
-        #1c1408;
-}
-
-/* ==========================================================
-   11.11 — HỘP THÔNG BÁO
-   ========================================================== */
-div[data-testid="stAlert"] {
-    border-radius: 10px;
-    border: none;
-    border-left: 3px solid var(--aic-nhan);
-    background: var(--aic-mat-1);
-}
-
-div[data-testid="stAlert"] p { color: var(--aic-chu-3); font-size: 13px; }
-
-div[data-testid="stAlert"]:has([data-testid*="Warning"]) {
-    border-left-color: var(--aic-cam);
-}
-
-div[data-testid="stAlert"]:has([data-testid*="Error"]) {
-    border-left-color: #dc2626;
-}
-
-div[data-testid="stAlert"]:has([data-testid*="Success"]) {
-    border-left-color: var(--aic-xanh);
-}
-
-/* ==========================================================
-   11.12 — KHUNG GẤP VÀ KHUNG TRẠNG THÁI
-   ========================================================== */
-div[data-testid="stExpander"] details {
-    background: var(--aic-mat-1);
-    border: none;
-    border-radius: 10px;
+    margin: 0;
     overflow: hidden;
+    color: inherit;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+
+/* Controls, expanders and alerts */
+
+div[data-testid="stExpander"] details {
+    overflow: hidden;
+    border: 1px solid rgba(91, 1, 29, 0.1);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.48);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
 }
 
 div[data-testid="stExpander"] summary {
-    color: var(--aic-chu-3);
-    font-size: 13px;
-    font-weight: 600;
-    transition: background var(--aic-muot), color var(--aic-muot);
+    color: var(--text-2);
+    font-size: 0.78rem;
+    font-weight: 650;
+    transition: color var(--ease), background var(--ease);
 }
 
 div[data-testid="stExpander"] summary:hover {
-    background: var(--aic-mat-3);
-    color: #ffffff;
+    color: var(--rose);
+    background: rgba(250, 224, 232, 0.58);
 }
 
-/* ==========================================================
-   11.13 — BẢNG
-   ========================================================== */
-div[data-testid="stDataFrame"] {
-    border: none;
-    border-radius: 10px;
+div[data-testid="stCheckbox"] label,
+div[data-testid="stToggle"] label {
+    color: var(--text-2);
+    font-size: 0.77rem;
+}
+
+.ai-mode-note {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    margin: 0.35rem 0 0.7rem;
+    padding: 0.62rem 0.75rem;
+    border: 1px solid rgba(181, 42, 87, 0.16);
+    border-radius: 11px;
+    color: var(--text-2);
+    background:
+        linear-gradient(110deg, rgba(243, 167, 190, 0.2), transparent 60%),
+        rgba(255, 255, 255, 0.58);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.06);
+}
+
+.ai-mode-note strong {
+    flex: 0 0 auto;
+    color: var(--rose);
+    font-size: 0.74rem;
+}
+
+.ai-mode-note span {
+    min-width: 0;
     overflow: hidden;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-/* ==========================================================
-   11.14 — THANH BÊN
-   ========================================================== */
-section[data-testid="stSidebar"] > div {
-    background: var(--aic-mat-2);
-    border-right: 1px solid var(--aic-vien);
+div[data-testid="stSlider"] div[role="slider"] {
+    border: 2px solid #ffffff;
+    background: linear-gradient(135deg, var(--pink), var(--burgundy));
+    box-shadow: 0 3px 10px rgba(91, 1, 29, 0.22);
 }
 
-section[data-testid="stSidebar"] h3 {
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 0.9px;
-    text-transform: uppercase;
-    color: var(--aic-chu-4);
+div[data-testid="stAlert"] {
+    border: 1px solid rgba(91, 1, 29, 0.1);
+    border-left: 3px solid var(--pink);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.66);
+    box-shadow: 0 9px 26px rgba(91, 1, 29, 0.07);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
 }
 
-section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
-    font-size: 11.5px;
-    font-family: var(--aic-chu-so);
-    color: var(--aic-chu-4);
-    word-break: break-all;
+div[data-testid="stAlert"] p {
+    color: var(--text-2);
+    font-size: 0.8rem;
 }
 
-/* Nút lịch sử: canh trái và cắt bằng dấu ba chấm, đỡ vỡ hàng */
-section[data-testid="stSidebar"] div.stButton > button {
-    justify-content: flex-start;
-    text-align: left;
-    font-weight: 500;
+
+/* Glass workspace panels */
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.selection-panel-marker),
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.viewer-panel-marker),
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.neighbor-panel-marker) {
+    margin: 1rem 0 1.35rem;
+    padding: 1.1rem 1.2rem !important;
+    border: 1px solid rgba(255, 255, 255, 0.85) !important;
+    border-radius: var(--radius-lg) !important;
+    background: rgba(255, 255, 255, 0.57) !important;
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(20px) saturate(145%);
+    -webkit-backdrop-filter: blur(20px) saturate(145%);
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.selection-panel-marker) {
+    background:
+        linear-gradient(110deg, rgba(243, 167, 190, 0.14), transparent 42%),
+        rgba(255, 255, 255, 0.63) !important;
+}
+
+.selection-panel-marker,
+.viewer-panel-marker,
+.neighbor-panel-marker,
+.result-card-marker {
+    height: 0;
+    margin: 0;
+    padding: 0;
+}
+
+.section-heading,
+.results-heading {
+    margin: 0;
+}
+
+.panel-title {
+    color: var(--text-1);
+    font-size: 0.98rem;
+    font-weight: 750;
+}
+
+.panel-subtitle {
+    margin-top: 0.2rem;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.7rem;
+}
+
+
+/* Result heading and query */
+
+.results-heading {
+    margin: 1.8rem 0 0.75rem;
+}
+
+.query-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 0.35rem 0 1rem;
+    padding: 0.8rem 0.95rem;
+    border: 1px solid rgba(255, 255, 255, 0.82);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 8px 24px rgba(91, 1, 29, 0.06);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+
+.query-summary span {
+    min-width: 0;
     overflow: hidden;
+    color: var(--text-2);
+    font-size: 0.81rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-section[data-testid="stSidebar"] div.stButton > button p {
-    text-align: left;
+.query-summary small {
+    flex: 0 0 auto;
+    color: var(--text-3);
+    font-size: 0.7rem;
+}
+
+
+/* Result cards - keep the single-column wrapper to prevent nested frames */
+
+div[data-testid="stHorizontalBlock"]:has(
+    > div[data-testid="stColumn"] .result-card-marker
+) {
+    align-items: stretch;
+    margin-bottom: 0.95rem;
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker) {
+    display: flex;
+    align-self: stretch;
+    flex-direction: column;
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker)
+> div[data-testid="stVerticalBlock"] {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    height: 100%;
+    min-height: 100%;
+    padding: 0.75rem !important;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.88) !important;
+    border-radius: 19px !important;
+    background:
+        linear-gradient(155deg, rgba(255, 255, 255, 0.77), rgba(255, 240, 244, 0.52)) !important;
+    box-shadow: 0 13px 34px rgba(91, 1, 29, 0.09);
+    backdrop-filter: blur(18px) saturate(145%);
+    -webkit-backdrop-filter: blur(18px) saturate(145%);
+    transition:
+        transform var(--ease),
+        border-color var(--ease),
+        box-shadow var(--ease),
+        background var(--ease);
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker)
+> div[data-testid="stVerticalBlock"]:hover {
+    border-color: rgba(243, 167, 190, 0.72) !important;
+    background:
+        linear-gradient(155deg, rgba(255, 255, 255, 0.9), rgba(250, 224, 232, 0.62)) !important;
+    box-shadow: var(--shadow-hover);
+    transform: translateY(-5px);
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker.is-selected)
+> div[data-testid="stVerticalBlock"] {
+    border-color: rgba(181, 42, 87, 0.42) !important;
+    box-shadow:
+        0 0 0 2px rgba(221, 68, 115, 0.07),
+        0 18px 44px rgba(91, 1, 29, 0.14);
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker)
+> div[data-testid="stVerticalBlock"] {
+    gap: 0.56rem;
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker)
+> div[data-testid="stVerticalBlock"]
+div[data-testid="stImage"] {
+    overflow: hidden;
+    border-radius: 13px;
+    background: var(--bg-1);
+    line-height: 0;
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.08);
+}
+
+div[data-testid="stColumn"]:has(.result-card-marker)
+> div[data-testid="stVerticalBlock"]
+div[data-testid="stImage"] img {
     width: 100%;
+    height: 154px;
+    border-radius: 13px;
+    object-fit: cover;
+    transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1), filter var(--ease);
 }
 
-/* ==========================================================
-   11.15 — HỘP THOẠI
-   ========================================================== */
-div[data-testid="stDialog"] > div,
-div[data-testid="stModal"] > div,
-div[role="dialog"] {
-    background: var(--aic-mat-2);
-    border: 1px solid var(--aic-vien);
-    border-radius: 16px;
+div[data-testid="stColumn"]:has(.result-card-marker)
+> div[data-testid="stVerticalBlock"]:hover
+div[data-testid="stImage"] img {
+    filter: saturate(1.05) contrast(1.02);
+    transform: scale(1.035);
 }
 
-/* ==========================================================
-   11.16 — THANH CUỘN
-   ========================================================== */
-::-webkit-scrollbar { width: 11px; height: 11px; }
-::-webkit-scrollbar-track { background: transparent; }
+.image-placeholder {
+    display: flex;
+    height: 154px;
+    align-items: center;
+    justify-content: center;
+    border: 1px dashed rgba(91, 1, 29, 0.18);
+    border-radius: 13px;
+    color: #a26b7e;
+    background:
+        radial-gradient(circle at 25% 25%, rgba(243, 167, 190, 0.28), transparent 48%),
+        rgba(255, 246, 249, 0.74);
+    font-size: 0.72rem;
+}
+
+.image-placeholder.is-missing {
+    border-color: rgba(154, 91, 0, 0.32);
+    color: var(--warning);
+    background: rgba(255, 247, 237, 0.7);
+}
+
+.card-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.rank-badge,
+.source-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    font-size: 0.64rem;
+    font-weight: 800;
+}
+
+.rank-badge {
+    min-width: 2rem;
+    padding: 0.22rem 0.5rem;
+    color: #ffffff;
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink));
+    box-shadow: 0 6px 14px rgba(181, 42, 87, 0.16);
+}
+
+.source-badge {
+    max-width: 65%;
+    padding: 0.22rem 0.5rem;
+    overflow: hidden;
+    color: #741332;
+    background: rgba(250, 224, 232, 0.82);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.video-id {
+    overflow: hidden;
+    color: var(--text-1);
+    font-family: var(--mono);
+    font-size: 0.88rem;
+    font-weight: 750;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.frame-meta {
+    display: flex;
+    min-height: 2.2rem;
+    flex-direction: column;
+    gap: 0.2rem;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.35;
+}
+
+.frame-meta-primary,
+.frame-meta-secondary {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+}
+
+.frame-meta strong {
+    color: var(--text-2);
+    font-size: 0.72rem;
+}
+
+.frame-meta-secondary {
+    min-height: 0.95rem;
+}
+
+.score-value {
+    flex: 0 0 auto;
+    margin-left: auto;
+    color: var(--rose);
+    font-weight: 800;
+}
+
+.ocr-snippet {
+    display: -webkit-box;
+    box-sizing: border-box;
+    height: 3.65rem;
+    min-height: 3.65rem;
+    max-height: 3.65rem;
+    padding: 0.48rem 0.58rem;
+    overflow: hidden;
+    border-left: 3px solid var(--pink);
+    border-radius: 0 9px 9px 0;
+    color: #7c4c5c;
+    background: rgba(250, 224, 232, 0.54);
+    font-size: 0.68rem;
+    line-height: 1.4;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+}
+
+.ai-caption-snippet {
+    display: flex;
+    box-sizing: border-box;
+    height: 4.15rem;
+    min-height: 4.15rem;
+    max-height: 4.15rem;
+    flex-direction: column;
+    gap: 0.22rem;
+    padding: 0.45rem 0.58rem;
+    overflow: hidden;
+    border: 1px solid rgba(181, 42, 87, 0.12);
+    border-left: 3px solid var(--burgundy);
+    border-radius: 0 9px 9px 0;
+    color: #6f4050;
+    background:
+        linear-gradient(120deg, rgba(250, 224, 232, 0.68), rgba(255, 255, 255, 0.58));
+}
+
+.ai-caption-snippet span {
+    color: var(--rose);
+    font-family: var(--mono);
+    font-size: 0.56rem;
+    font-weight: 850;
+    letter-spacing: 0.07em;
+}
+
+.ai-caption-snippet p {
+    display: -webkit-box;
+    margin: 0;
+    overflow: hidden;
+    color: inherit;
+    font-size: 0.67rem;
+    line-height: 1.35;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.ai-caption-snippet.is-empty {
+    visibility: hidden;
+    border-left-color: transparent;
+    user-select: none;
+}
+
+.ocr-snippet.is-empty {
+    visibility: hidden;
+    border-left-color: transparent;
+    user-select: none;
+}
+
+
+/* Neighbor and original-image viewers */
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.neighbor-panel-marker)
+div[data-testid="stImage"] {
+    overflow: hidden;
+    border-radius: 11px;
+    line-height: 0;
+    box-shadow: 0 8px 20px rgba(91, 1, 29, 0.08);
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.neighbor-panel-marker)
+div[data-testid="stImage"] img {
+    width: 100%;
+    height: 102px;
+    border-radius: 11px;
+    object-fit: cover;
+}
+
+.neighbor-placeholder {
+    display: flex;
+    height: 102px;
+    align-items: center;
+    justify-content: center;
+    border: 1px dashed rgba(91, 1, 29, 0.18);
+    border-radius: 11px;
+    color: var(--text-3);
+    background: rgba(255, 246, 249, 0.68);
+    font-size: 0.67rem;
+}
+
+.neighbor-meta {
+    min-height: 2.8rem;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    line-height: 1.45;
+}
+
+.neighbor-meta.is-center {
+    color: var(--rose);
+    font-weight: 750;
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.viewer-panel-marker)
+div[data-testid="stImage"] {
+    padding: 0.55rem;
+    border-radius: 15px;
+    text-align: center;
+    background: rgba(255, 255, 255, 0.64);
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.viewer-panel-marker)
+div[data-testid="stImage"] img {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: 68vh;
+    margin: 0 auto;
+    object-fit: contain;
+}
+
+[data-testid="stMetric"] {
+    padding: 0.75rem 0.85rem;
+    border: 1px solid rgba(255, 255, 255, 0.84);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.56);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.06);
+}
+
+[data-testid="stMetricLabel"] p {
+    color: var(--text-3);
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+[data-testid="stMetricValue"] {
+    color: var(--rose);
+    font-family: var(--mono);
+    font-size: 1rem;
+}
+
+
+/* Tables, pagination and empty state */
+
+div[data-testid="stDataFrame"] {
+    overflow: hidden;
+    border: 1px solid rgba(91, 1, 29, 0.09);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.66);
+    box-shadow: 0 8px 22px rgba(91, 1, 29, 0.05);
+}
+
+.page-indicator {
+    display: flex;
+    min-height: 41px;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.74rem;
+}
+
+.empty-state {
+    margin: 1.6rem 0 0;
+    padding: 4.2rem 1.5rem;
+    border: 1px dashed rgba(91, 1, 29, 0.18);
+    border-radius: var(--radius-lg);
+    text-align: center;
+    background: rgba(255, 255, 255, 0.44);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+}
+
+.empty-icon {
+    display: flex;
+    width: 52px;
+    height: 52px;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 1rem;
+    border-radius: 15px;
+    color: #ffffff;
+    background: linear-gradient(135deg, var(--rose-soft), var(--pink), var(--burgundy));
+    box-shadow: 0 12px 28px rgba(181, 42, 87, 0.2);
+    font-size: 1.5rem;
+}
+
+.empty-state strong {
+    font-size: 1rem;
+}
+
+.empty-state p {
+    max-width: 590px;
+    margin: 0.6rem auto 0;
+    color: var(--text-3);
+    font-size: 0.8rem;
+    line-height: 1.65;
+}
+
+.app-footer {
+    margin-top: 3rem;
+    color: #9f7382;
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-align: center;
+    text-transform: uppercase;
+}
+
+
+/* Scrollbars and responsive layout */
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
 
 ::-webkit-scrollbar-thumb {
-    background: var(--aic-vien);
-    border-radius: 999px;
     border: 3px solid transparent;
+    border-radius: 999px;
+    background: rgba(181, 42, 87, 0.3);
     background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: var(--aic-vien-nut);
+    background: rgba(91, 1, 29, 0.42);
     background-clip: content-box;
 }
 
-/* ==========================================================
-   11.17 — CO GIÃN THEO MÀN HÌNH
-   ----------------------------------------------------------
-   st.columns cố định số cột. Cho hàng ngang xuống dòng khi màn
-   hình hẹp thì lưới 4 cột tự thành 2 cột rồi 1 cột, không phải
-   sửa SO_COT ở mục 3.
-   ========================================================== */
-@media (max-width: 1200px) {
-    div[data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+@media (max-width: 900px) {
+    .block-container {
+        padding-right: 1rem;
+        padding-left: 1rem;
+    }
 
-    /* flex-basis 260px là GỢI Ý bề rộng, min-width giữ nguyên 0 để cột
-       vẫn co được. Đặt min-width: 260px ở đây là sai: hai nút bên trong
-       thẻ rộng 280px sẽ bị ép mỗi nút 260px và tràn ra ngoài viền. */
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-        flex: 1 1 260px;
+    .app-nav {
+        margin-bottom: 2rem;
+    }
+
+    .app-hero {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 1.2rem;
+    }
+
+    .hero-progress {
         min-width: 0;
+        align-items: flex-start;
     }
 
-    /* Hàng nút bên trong thẻ giữ nguyên hai nút cạnh nhau */
-    div[data-testid="stVerticalBlockBorderWrapper"]
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
-    div[data-testid="stVerticalBlockBorderWrapper"]
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-        flex: 1 1 0;
-    }
-}
-
-@media (max-width: 720px) {
-    .block-container { padding-left: 1rem; padding-right: 1rem; }
-
-    .aic-title { font-size: 26px; }
-
-    div[data-testid="stForm"] { padding: 14px; }
-
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-        flex: 1 1 100%;
+    .query-summary {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.4rem;
     }
 
-    /* Vẫn trừ hàng nút trong thẻ: xếp chồng lên nhau thì thẻ cao gấp đôi */
-    div[data-testid="stVerticalBlockBorderWrapper"]
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
-    div[data-testid="stVerticalBlockBorderWrapper"]
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-        flex: 1 1 0;
+    .query-summary span {
+        max-width: 100%;
+    }
+
+    .ai-mode-note {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .ai-mode-note span {
+        white-space: normal;
     }
 }
 
-/* Máy nào bật chế độ giảm chuyển động thì tắt hết hiệu ứng */
+@media (max-width: 640px) {
+    .block-container {
+        padding-top: 0.8rem;
+    }
+
+    .app-nav {
+        padding: 0.65rem 0.72rem;
+    }
+
+    .nav-copy small {
+        display: none;
+    }
+
+    .nav-status {
+        padding: 0.45rem 0.6rem;
+        font-size: 0.64rem;
+    }
+
+    .app-hero h1 {
+        font-size: 2rem;
+    }
+
+    div[data-testid="stForm"] {
+        padding: 1.1rem;
+    }
+
+    .submit-spacer {
+        display: none;
+    }
+
+    .form-intro small {
+        display: none;
+    }
+}
+
 @media (prefers-reduced-motion: reduce) {
-    * { transition: none !important; animation: none !important; }
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        transition: none !important;
+        animation: none !important;
+    }
 
-    div[data-testid="stImage"]:hover img,
-    div[data-testid="stVerticalBlockBorderWrapper"]:hover { transform: none; }
-}
-
-/* ==========================================================
-   11.14 — CHỮ OCR ĐỌC ĐƯỢC
-   ----------------------------------------------------------
-   Ở chế độ OCR, phần lớn kết quả thuộc shard chưa tải nên không
-   có ảnh. Dòng chữ này là căn cứ duy nhất để phán đoán tấm ảnh
-   có đúng hay không.
-   ========================================================== */
-.chu-ocr {
-    color: var(--aic-chu-4);
-    background: var(--aic-mat-2);
-    border-left: 2px solid var(--aic-nhan-tim);
-    border-radius: 0;
-    padding: 5px 7px;
-    margin: 4px 0 6px 0;
-    font-size: 11px;
-    line-height: 1.45;
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    div[data-testid="stColumn"]:has(.result-card-marker)
+    > div[data-testid="stVerticalBlock"]:hover {
+        transform: none;
+    }
 }

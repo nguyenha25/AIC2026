@@ -3,6 +3,9 @@
 Kho mã nguồn của nhóm. **Chỉ chứa chương trình, không chứa dữ liệu.**
 Dữ liệu nằm ở một thư mục riêng, khai báo trong `.env` của từng máy.
 
+Chuẩn bị Task 4 (rerank top-100): xem
+[`docs/decisions/task4_rerank_chuan_bi.md`](docs/decisions/task4_rerank_chuan_bi.md).
+
 ---
 
 ## Cài lần đầu (làm một lần)
@@ -311,3 +314,52 @@ chỗ khác, xem `docs/layout.md`.
 
 Mọi lệnh chạy **từ thư mục gốc dự án** và dùng `python -m`, không phải
 `python scripts/xxx.py` — chạy kiểu sau sẽ không import được `src`.
+
+---
+
+# Việc 9 — trích khung dày cho TRAKE
+
+TRAKE cần khung cách nhau **dưới 0,5 giây**. Đối chiếu bộ dev hiện tại cho
+thấy cửa sổ ngắn nhất chỉ 4 frame, nên script lấy mẫu mặc định mỗi 0,16 giây
+(tối đa 4 frame ở 25/30 fps), đặt tên ảnh bằng đúng `frame_idx` và ghi vào:
+
+```
+derived/frames_dense/<video_id>/<frame_idx 6 chữ số>.jpg
+```
+
+## Chạy cho danh sách video nghi ngờ
+
+Chép `config/trake_dense_videos.example.txt` thành
+`config/trake_dense_videos.txt`, điền mỗi dòng một `video_id`, rồi chạy:
+
+```powershell
+python -u -m scripts.trich_khung_day --danh-sach config/trake_dense_videos.txt
+python -u -m scripts.verify_task9_acceptance --danh-sach config/trake_dense_videos.txt
+```
+
+Cũng có thể đưa `runs/<lần-chạy>/top10.jsonl` của **riêng truy vấn TRAKE** vào
+`--danh-sach`; script tự lấy khóa `video_id`, loại trùng và giữ thứ tự xuất
+hiện. Dùng `--top-video 5` để chỉ trích 5 video đầu tiên.
+
+## Thử nhanh một đoạn trước khi chạy toàn video
+
+```powershell
+python -u -m scripts.trich_khung_day --video L23_V025 --giay 120 180
+python -u -m scripts.verify_task9_acceptance --video L23_V025
+```
+
+Để trích và nghiệm thu đúng toàn bộ câu TRAKE trong bộ dev:
+
+```powershell
+python -u -m scripts.trich_khung_day --tu-dev
+python -u -m scripts.verify_task9_acceptance --tep-dev D:/aic-data/dev/dev_questions.jsonl
+```
+
+Lệnh nghiệm thu phải báo đủ cả số video và `50/50 cửa sổ TRAKE` đối với phiên
+bản `dev_questions.jsonl` gồm 12 câu TRAKE hiện tại.
+
+Nghiệm thu chỉ báo `ĐẠT` khi tên ảnh hợp lệ, manifest phủ đủ vùng đã trích và
+**khoảng cách lớn nhất** giữa hai ảnh liên tiếp trong từng vùng nhỏ hơn
+0,5 giây. Nếu máy có `raw/keyframes`, script còn đối chiếu ảnh ở cùng
+`frame_idx` để bắt lỗi đánh số; thiếu keyframe BTC chỉ tạo cảnh báo vì đầu vào
+bắt buộc của Việc 9 là video gốc và map-keyframes.

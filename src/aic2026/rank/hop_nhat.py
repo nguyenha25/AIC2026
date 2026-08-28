@@ -36,12 +36,15 @@ from typing import Callable, Mapping, Sequence
 
 from aic2026.frame_map import lookup
 from aic2026.index.faiss_index import Hit
-from aic2026.rank.fuse import reciprocal_rank_fusion
+from aic2026.rank.fuse import khoa_gop, reciprocal_rank_fusion
 
 NGUON_CLIP = "clip"
 NGUON_OCR = "ocr"          # OCR qua OCRReranker (khớp từ khoá trên derived/ocr/)
 NGUON_OCR_FTS = "ocr_fts"  # OCR qua TextSearchIndex (BM25 trên bảng ocr_fts)
 NGUON_ASR = "asr"          # Lời nói qua TextSearchIndex (BM25 trên bảng asr_fts)
+NGUON_OBJECT = "object"    # Vật thể qua ObjectSearchIndex (Việc 3, bảng objects_fts)
+NGUON_CAPTION = "caption"  # Mô tả tự sinh qua CaptionSearchIndex (Việc 10)
+NGUON_CLIP_L = "clip_l"    # Chỉ mục ảnh THỨ HAI, mô hình mạnh hơn (Việc 8)
 
 # Trọng số bất đối xứng: chữ làm tie-breaker, không lật đổ hình ảnh.
 #
@@ -57,6 +60,15 @@ TRONG_SO_MAC_DINH = {
     # con số đã khai thay vì tự đặt số khác.
     NGUON_OCR_FTS: 0.6,
     NGUON_ASR: 0.6,
+    # Việc 3 và Việc 10 — CHƯA hiệu chỉnh, đây chỉ là số khởi đầu để chạy
+    # được. Việc 6 quét lưới trên dev v2 rồi ghi số chốt vào
+    # config/rrf_weights.yaml.
+    NGUON_OBJECT: 0.4,
+    NGUON_CAPTION: 0.5,
+    # Việc 8 — mặc định 0. Bật lên chỉ sau khi do_trong_so_rrf đo được. Chỉ
+    # mục này có thể chỉ phủ một phần kho (mỗi máy mã hoá shard của mình), nên
+    # trọng số phải do phép đo quyết định, không đoán.
+    NGUON_CLIP_L: 0.0,
 }
 
 
@@ -231,16 +243,19 @@ def gop_nguon(
     if not cac_nguon_that:
         return []
 
-    goc: dict[tuple[str, int], Hit] = {}
+    # VIỆC 7: khoá là (video_id, pts_time), KHÔNG phải (video_id, frame_idx).
+    # Xem phần đầu rank/fuse.py để biết vì sao khoá cũ gộp nhầm hai tấm ảnh.
+    goc: dict[tuple, Hit] = {}
     dau_vao: dict[str, list[dict]] = {}
 
     for ten, danh_sach in cac_nguon_that.items():
         dau_vao[ten] = []
         for h in danh_sach:
-            khoa = (str(h.video_id), int(h.frame_idx))
+            d = hit_sang_dict(h)
+            khoa = khoa_gop(d)
             if khoa not in goc:
                 goc[khoa] = h
-            dau_vao[ten].append(hit_sang_dict(h))
+            dau_vao[ten].append(d)
 
     ket_qua = reciprocal_rank_fusion(
         dau_vao,
@@ -250,7 +265,7 @@ def gop_nguon(
 
     ra: list[Hit] = []
     for r in ket_qua:
-        khoa = (str(r["video_id"]), int(r["frame_idx"]))
+        khoa = khoa_gop(r)
         h_goc = goc.get(khoa)
         if h_goc is None:
             continue
@@ -275,10 +290,21 @@ def gop_nguon(
 def tim_ung_vien_gop(
     ocr_engine=None,
     kho_chu=None,
+    kho_vat_the=None,
+    kho_caption=None,
     dung_clip: bool = True,
     dung_ocr: bool = False,
     dung_ocr_fts: bool = False,
     dung_asr: bool = False,
+    dung_object: bool = False,
+    loc_vat_the: bool = False,
+    loc_token_hiem_ocr: bool = False,
+    dung_caption: bool = False,
+    dung_clip_l: bool = False,
+    mo_rong_truy_van: bool = False,
+    nguon_mo_rong: str | None = None,
+    nguon_clip_l: str | None = None,
+    dang_cau: str | None = None,
     trong_so=None,
     k_rrf: int = 60,
 ):
@@ -299,9 +325,39 @@ def tim_ung_vien_gop(
     OCRReranker). Bật riêng từng cái mới trả lời được cái nào tốt hơn, thay vì
     đoán.
 
+        dung_object   Vật thể làm NHÁNH XẾP HẠNG — BM25 trên bảng objects_fts
+        loc_vat_the   Vật thể làm BỘ LỌC, thu hẹp ứng viên TRƯỚC khi gộp.
+                      Đây mới là cách checklist yêu cầu. Hai cờ độc lập nhau,
+                      bật cả hai được, nhưng nên đo riêng từng cờ.
+        dung_caption  Mô tả tự sinh qua CaptionSearchIndex — BM25 trên caption_fts
+
     ocr_engine cần cho dung_ocr; kho_chu (TextSearchIndex) cần cho dung_ocr_fts
-    và dung_asr.
+    và dung_asr; kho_vat_the cho dung_object; kho_caption cho dung_caption.
+
+    VIỆC 5 — mo_rong_truy_van CHỈ ĐỔI CÂU CHO NHÁNH CLIP
+    ----------------------------------------------------
+    Bật lên thì nhánh CLIP nhận cụm TIẾNG ANH đã rút gọn, còn bốn nhánh chữ
+    (ocr, ocr_fts, asr, object) vẫn nhận NGUYÊN câu tiếng Việt. Đưa câu tiếng
+    Anh vào nhánh OCR/ASR là bảo đảm 0 kết quả — chữ trên hình và lời nói
+    trong video đều là tiếng Việt.
     """
+    # VIỆC 6 — TRỌNG SỐ TÁCH THEO DẠNG CÂU.
+    #
+    # Đo trên 24 câu dev: nhánh ASR chạy một mình được KIS 0,0000 nhưng
+    # Q&A 0,1667. Nhánh OCR ngược lại: KIS 0,3000, Q&A 0,0000. Dùng CHUNG một
+    # vector trọng số cho cả hai dạng là bắt mỗi dạng gánh nhánh vô dụng của
+    # dạng kia — đo được: thêm ASR vào KIS làm điểm TỤT 0,3833 -> 0,3500.
+    #
+    # Thứ tự ưu tiên: tham số truyền vào > config/rrf_weights.yaml theo dạng
+    # > settings.yaml > bảng mặc định ở đầu tệp này.
+    if trong_so is None:
+        try:
+            from aic2026.rank.config import trong_so_theo_dang
+
+            trong_so = trong_so_theo_dang(dang_cau)
+        except Exception:
+            trong_so = TRONG_SO_MAC_DINH
+
     trong_so = trong_so or TRONG_SO_MAC_DINH
 
     def _tim(cau_hoi: str, so_ung_vien: int):
@@ -311,9 +367,14 @@ def tim_ung_vien_gop(
             # Import TRONG hàm để giữ đúng thứ tự torch-trước-faiss mà Ngân đã ghi
             # trong search.py: nạp faiss trước torch trên Windows thì tiến trình
             # chết với 0xC0000005, không traceback, màn hình trống.
-            from aic2026.rank.search import tim_ung_vien_clip
+            if mo_rong_truy_van:
+                from aic2026.query_expand import tim_ung_vien_clip_mo_rong
 
-            cac_nguon[NGUON_CLIP] = list(tim_ung_vien_clip(cau_hoi, so_ung_vien))
+                _clip = tim_ung_vien_clip_mo_rong(nguon=nguon_mo_rong)
+            else:
+                from aic2026.rank.search import tim_ung_vien_clip as _clip
+
+            cac_nguon[NGUON_CLIP] = list(_clip(cau_hoi, so_ung_vien))
 
         if dung_ocr and ocr_engine is not None:
             tho = ocr_engine.search_ocr(cau_hoi, top_k=so_ung_vien)
@@ -322,7 +383,13 @@ def tim_ung_vien_gop(
 
         if dung_ocr_fts and kho_chu is not None:
             # search_text() trả sẵn cả n lẫn frame_idx nên đổi thẳng sang Hit được.
-            tho = kho_chu.search_text(cau_hoi, top_k=so_ung_vien)
+            # loc_token_hiem_ocr: bỏ token phổ biến khỏi truy vấn OCR.
+            # Câu dev 11 có ~20 token nên AND luôn rỗng rồi rơi về OR trên
+            # toàn bộ; khung đúng bật ra ngoài 1000. Chỉ tra "Mac Cuu" thì nó
+            # ở hạng 6.
+            tho = kho_chu.search_text(
+                cau_hoi, top_k=so_ung_vien, loc_hiem=loc_token_hiem_ocr
+            )
             hits = [dict_sang_hit(d, NGUON_OCR_FTS) for d in tho]
             cac_nguon[NGUON_OCR_FTS] = [h for h in hits if h is not None]
 
@@ -331,6 +398,68 @@ def tim_ung_vien_gop(
             # khoảng ra khung hình có thật. Xem no_khoang_asr().
             tho = kho_chu.search_asr(cau_hoi, top_k=so_ung_vien)
             cac_nguon[NGUON_ASR] = no_khoang_asr(tho)
+
+        if loc_vat_the and kho_vat_the is not None:
+            # VIỆC 3 — BỘ LỌC, chạy TRƯỚC khi gộp.
+            #
+            # Checklist viết: "lọc theo vật thể thu hẹp 177.321 keyframe xuống
+            # vài trăm TRƯỚC khi tính CLIP". Bản đầu dựng nhánh vật thể thành
+            # một bảng xếp hạng song song rồi gộp RRF — sai kiến trúc, và đo
+            # được 0,0167, tức gần như vô dụng.
+            #
+            # Ở đây nó làm đúng việc của mình: giữ lại các khung CÓ vật thể
+            # hiếm mà câu hỏi nhắc tới, bỏ phần còn lại. Không tìm thấy khái
+            # niệm hiếm nào thì khung_chua() trả None và KHÔNG lọc gì — thà
+            # mất cơ hội thu hẹp còn hơn giết mất đáp án đúng.
+            tap_giu = kho_vat_the.khung_chua(cau_hoi)
+            if tap_giu is not None:
+                for ten, ds in cac_nguon.items():
+                    cac_nguon[ten] = [
+                        h for h in ds
+                        if (str(h.video_id), round(float(h.pts_time), 3)) in tap_giu
+                    ] or ds       # lọc sạch một nhánh thì trả nhánh đó về nguyên
+
+        if dung_object and kho_vat_the is not None:
+            # Câu không nhắc vật thể nào -> trả [] -> nhánh này tự vắng mặt
+            # khỏi phép gộp. Đó là hành vi ĐÚNG: nhánh vật thể chỉ nên lên
+            # tiếng khi câu hỏi thật sự tả vật thể.
+            tho = kho_vat_the.tra_bang_cau_viet(cau_hoi, top_k=so_ung_vien)
+            hits = [dict_sang_hit(d, NGUON_OBJECT) for d in tho]
+            cac_nguon[NGUON_OBJECT] = [h for h in hits if h is not None]
+
+        if dung_clip_l:
+            # VIỆC 8 — chỉ mục ảnh THỨ HAI, tìm ĐỘC LẬP.
+            #
+            # Khác rerank (Việc 4) ở chỗ căn bản: rerank chỉ xếp lại top-100 do
+            # B/32 trả về, không kéo vào được thứ B/32 đã bỏ sót. Câu dev 11
+            # không nằm trong top-300 của CLIP nên rerank vô dụng với nó.
+            #
+            # Câu vào phải là TIẾNG ANH, giống nhánh clip gốc.
+            from aic2026.index.clip_l_index import tim as _tim_clip_l
+
+            cau_anh = cau_hoi
+            if nguon_clip_l:
+                try:
+                    from aic2026.query_expand import mo_rong
+
+                    cau_anh = mo_rong(
+                        cau_hoi,
+                        nguon=nguon_clip_l,
+                        bat_buoc=True,
+                    ).cum_chinh
+                except Exception:
+                    # Mạch sản phẩm vẫn phải trả kết quả nếu bộ dịch lỗi.
+                    cau_anh = cau_hoi
+
+            hits = [
+                dict_sang_hit(d, NGUON_CLIP_L) for d in _tim_clip_l(cau_anh, so_ung_vien)
+            ]
+            cac_nguon[NGUON_CLIP_L] = [h for h in hits if h is not None]
+
+        if dung_caption and kho_caption is not None:
+            tho = kho_caption.tra_cuu(cau_hoi, top_k=so_ung_vien)
+            hits = [dict_sang_hit(d, NGUON_CAPTION) for d in tho]
+            cac_nguon[NGUON_CAPTION] = [h for h in hits if h is not None]
 
         # Một nguồn vẫn cho qua RRF, để thứ tự sinh ra theo cùng một cách ở mọi
         # chế độ.

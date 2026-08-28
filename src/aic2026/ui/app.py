@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -119,9 +120,10 @@ from aic2026.index.faiss_index import Hit                          # noqa: E402
 from aic2026.rank import config as cfg                             # noqa: E402
 from aic2026.rank.dedupe import loc_trung                          # noqa: E402
 from aic2026.rank.search import tim_ung_vien_clip                  # noqa: E402
+from aic2026.rank.hop_nhat import NGUON_CAPTION, NGUON_CLIP_L
 from aic2026.rank.hop_nhat import (                                # noqa: E402
     NGUON_ASR, NGUON_CLIP, NGUON_OCR, NGUON_OCR_FTS,
-    TRONG_SO_MAC_DINH, tim_ung_vien_gop,
+    tim_ung_vien_gop,
 )
 
 
@@ -145,9 +147,13 @@ def _nap_mem(ten_hien: str, duong_dan: str, ten_doi_tuong: str):
 
 
 _TextSearchIndex = _nap_mem("Kho chữ FTS5", "aic2026.index.fts_index", "TextSearchIndex")
+_CaptionSearchIndex = _nap_mem(
+    "Caption AI",
+    "aic2026.enrich.caption",
+    "CaptionSearchIndex",
+)
 _load_frame_map = _nap_mem("Bảng đối chiếu", "aic2026.frame_map", "load_frame_map")
 _lookup = _nap_mem("Tra ngược frame", "aic2026.frame_map", "lookup")
-_run_query = _nap_mem("Mạch đầu–cuối", "aic2026.rank.search", "run_query")
 
 
 # ============================================================
@@ -218,8 +224,8 @@ def hien_anh(duong_dan) -> None:
 
 
 st.set_page_config(
-    page_title="AIC Video Search",
-    page_icon="🎬",
+    page_title="AIC 2026 | Video Search",
+    page_icon="🔎",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -559,6 +565,59 @@ def lay_kho_chu():
         return None
 
 
+@st.cache_resource(show_spinner="Đang mở kho Caption AI...")
+def lay_kho_caption():
+    """Mở nhánh caption; thiếu dữ liệu thì trả None để UI tự khóa công tắc."""
+
+    if _CaptionSearchIndex is None or not TEP_FTS.exists():
+        return None
+
+    try:
+        kho = _CaptionSearchIndex(
+            db_path=TEP_FTS,
+            nguon_dich="marian",
+            bat_buoc_dich=True,
+        )
+        if kho.thong_ke().get("so_ban_ghi_caption", 0) <= 0:
+            return None
+        return kho
+    except Exception:
+        return None
+
+
+def lay_caption_hien_thi(cac_hit) -> dict[str, str]:
+    """Đọc caption của cả trang kết quả bằng một câu SQL duy nhất."""
+
+    khoa = list(dict.fromkeys(
+        (str(hit.video_id), int(hit.n)) for hit in cac_hit
+    ))
+    if not khoa or not TEP_FTS.exists():
+        return {}
+
+    # Mỗi hit dùng hai tham số; số kết quả của UI nhỏ hơn xa giới hạn SQLite.
+    gia_tri = ", ".join("(?, ?)" for _ in khoa)
+    tham_so = [gia_tri_con for cap in khoa for gia_tri_con in cap]
+
+    try:
+        with sqlite3.connect(TEP_FTS) as conn:
+            dong = conn.execute(
+                "WITH can_doc(video_id, n) AS (VALUES " + gia_tri + ") "
+                "SELECT c.video_id, c.n, c.caption "
+                "FROM caption_fts AS c "
+                "JOIN can_doc AS w "
+                "ON c.video_id = w.video_id AND c.n = w.n",
+                tham_so,
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+
+    return {
+        f"{video_id}#{int(n)}": str(caption).strip()
+        for video_id, n, caption in dong
+        if str(caption or "").strip()
+    }
+
+
 @st.cache_resource(show_spinner="Đang nạp kho OCR (khớp từ khoá)...")
 def lay_ocr_reranker():
     """
@@ -694,9 +753,10 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
     """
     Lướt tìm — KHÔNG ghi tệp. Chỉ ghi khi người dùng bấm xuất.
 
-    cac_nguon: tập con của {clip, ocr, ocr_fts, asr}. Bật/tắt độc lập nên chạy
-    được cả nguồn đơn lẫn mọi tổ hợp, đi qua ĐÚNG MỘT đường ống — giống hệt
-    scripts/benchmark_rrf.py, nên kết quả trên giao diện so được với số nghiệm thu.
+    cac_nguon: tập con của {clip, clip_l, caption, ocr, ocr_fts, asr}.
+    Bật/tắt độc lập nên chạy được cả nguồn đơn lẫn mọi tổ hợp, đi qua ĐÚNG
+    MỘT đường ống — giống phép benchmark nên kết quả trên giao diện so được
+    với số nghiệm thu.
     """
 
     nhat_ky = nhat_ky or NhatKyBuoc()
@@ -720,6 +780,13 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
     if NGUON_OCR in cac_nguon and ocr_engine is None:
         raise RuntimeError("Không nạp được OCRReranker (kiểm tra derived/ocr/).")
 
+    kho_caption = lay_kho_caption() if NGUON_CAPTION in cac_nguon else None
+
+    if NGUON_CAPTION in cac_nguon and kho_caption is None:
+        raise RuntimeError(
+            "Caption AI chưa sẵn sàng. Chạy scripts.run_caption_batch --chi-nap."
+        )
+
     # Chữ OCR để hiện dưới mỗi ảnh. Lấy từ kho FTS vì nó trả sẵn text theo
     # frame; nhánh OCRReranker không dùng cho việc hiển thị.
     if kho_chu is not None and NGUON_OCR_FTS in cac_nguon:
@@ -732,14 +799,41 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         except Exception:
             pass
 
+    # Caption AI là chế độ cứu hộ đã đo riêng trên 46 câu mô tả. Nó không thay
+    # đổi cấu hình mặc định: chỉ khi người dùng bật công tắc mới dùng đúng bộ
+    # CLIP-L 1.0 + CLIP B/32 0.2 + caption 0.6 của lần thử Task 10.
+    trong_so_caption = None
+    if NGUON_CAPTION in cac_nguon:
+        trong_so_caption = {
+            NGUON_CLIP_L: 1.0,
+            NGUON_CLIP: 0.2,
+            NGUON_CAPTION: 0.6,
+        }
+
     nguon = tim_ung_vien_gop(
         ocr_engine=ocr_engine,
         kho_chu=kho_chu,
+        kho_caption=kho_caption,
         dung_clip=NGUON_CLIP in cac_nguon,
+        dung_clip_l=NGUON_CLIP_L in cac_nguon,
+        nguon_clip_l=(
+            "marian"
+            if NGUON_CLIP_L in cac_nguon
+            else None
+        ),
         dung_ocr=NGUON_OCR in cac_nguon,
         dung_ocr_fts=NGUON_OCR_FTS in cac_nguon,
         dung_asr=NGUON_ASR in cac_nguon,
-        trong_so=TRONG_SO_MAC_DINH,
+        dung_caption=NGUON_CAPTION in cac_nguon,
+        mo_rong_truy_van=NGUON_CLIP in cac_nguon,
+        nguon_mo_rong=("marian" if NGUON_CLIP in cac_nguon else None),
+        # VIỆC 6: để None thì đọc config/rrf_weights.yaml. Truyền cứng
+        # TRONG_SO_MAC_DINH như bản cũ là đè lên tệp đó, và mọi con số đo
+        # được ở Việc 6 không tới được giao diện.
+        #
+        # Giao diện chưa có ô chọn dạng câu nên dùng bộ "mac_dinh" (= bộ của
+        # KIS). Thêm ô chọn dạng thì truyền dang_cau vào đây — việc của Thi.
+        trong_so=trong_so_caption,
         k_rrf=cfg.rrf_k(),
     )
 
@@ -782,11 +876,17 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         for h in sach:
             dem_tinh_trang[tinh_trang_anh(h.video_id, h.n)] += 1
 
+    chu_caption: dict[str, str] = {}
+    if NGUON_CAPTION in cac_nguon:
+        with nhat_ky.buoc("Lấy Caption AI để hiển thị"):
+            chu_caption = lay_caption_hien_thi(sach)
+
     return {
         "hits": sach,
         "so_tho": so_tho,
         "so_bo_qua": so_bo_qua,
         "chu_ocr": chu_ocr,
+        "chu_caption": chu_caption,
         "so_bi_nguong": so_bi_nguong,
         "so_sach": len(sach),
         "dem_tinh_trang": dem_tinh_trang,
@@ -817,11 +917,9 @@ for khoa_mac_dinh, gia_tri in (
 
 
 # ============================================================
-# 11. CSS
+# 11. GIAO DIỆN
 # ============================================================
 
-# CSS để ở tệp riêng: 690 dòng nằm chung với logic làm file khó đọc,
-# và Thi sửa giao diện không phải cuộn qua nó để tới chỗ tìm kiếm.
 _TEP_CSS = Path(__file__).resolve().parent / "style.css"
 
 if _TEP_CSS.exists():
@@ -833,217 +931,232 @@ else:
     st.warning(f"Thiếu tệp giao diện: {_TEP_CSS}")
 
 
+def _ten_nguon(che_do: str) -> str:
+    """Đổi mã nguồn nội bộ thành nhãn ngắn, dễ quét trên giao diện."""
+
+    bang_ten = {
+        NGUON_CLIP: "CLIP",
+        NGUON_CLIP_L: "CLIP-L",
+        NGUON_CAPTION: "Caption AI",
+        NGUON_OCR: "OCR từ khoá",
+        NGUON_OCR_FTS: "OCR BM25",
+        NGUON_ASR: "ASR",
+    }
+
+    return " + ".join(
+        bang_ten.get(nguon, nguon.upper())
+        for nguon in che_do.split("+")
+        if nguon
+    )
+
+
+def _xoa_gio_hien_tai() -> None:
+    ma_cau_hien_tai = str(st.session_state.get("ma_cau", "")).strip()
+
+    if not ma_cau_hien_tai:
+        return
+
+    st.session_state["gio_nop"][ma_cau_hien_tai] = []
+    ghi_gio_nop(st.session_state["gio_nop"])
+
+
+if "cau_hoi_input" not in st.session_state:
+    st.session_state["cau_hoi_input"] = st.session_state.get("cau_hoi_dien_san", "")
+
+
 # ============================================================
-# 12. ĐẦU TRANG
+# 12. ĐẦU TRANG VÀ CẢNH BÁO
 # ============================================================
 
+ma_cau = str(st.session_state.get("ma_cau", "")).strip() or "cau_01"
+so_da_chon = len(st.session_state["gio_nop"].get(ma_cau, []))
+
 st.markdown(
-    '<div class="aic-title">AIC Video Search</div>'
-    '<div class="aic-subtitle">Tra cứu keyframe bằng câu mô tả tự nhiên</div>',
+    '<div class="app-nav">'
+    '<div class="nav-brand">'
+    '<span class="nav-mark">A</span>'
+    '<div class="nav-copy"><strong>AIC 2026</strong>'
+    '<small>Video Search Workspace</small></div>'
+    '</div>'
+    '<div class="nav-status"><span class="status-pulse"></span>'
+    'Hệ thống sẵn sàng</div>'
+    '</div>'
+    '<div class="app-hero">'
+    '<div>'
+    '<div class="brand-kicker">SMART VIDEO RETRIEVAL</div>'
+    '<h1>Tìm đúng khoảnh khắc, chốt đúng frame.</h1>'
+    '<p>Một không gian làm việc gọn cho truy vấn, kiểm tra lân cận và xuất đáp án.</p>'
+    '</div>'
+    f'<div class="hero-progress"><strong>{so_da_chon}</strong>'
+    f'<span>frame đã chọn · {html.escape(ma_cau)}</span></div>'
+    '</div>',
     unsafe_allow_html=True,
 )
 
+_canh_bao_he_thong: list[str] = []
+
 if CANH_BAO_GOC_DU_LIEU:
-    st.info(CANH_BAO_GOC_DU_LIEU)
+    _canh_bao_he_thong.append(CANH_BAO_GOC_DU_LIEU)
 
-# canh_bao_cau_hinh() liệt kê chỗ settings.yaml lệch với luật đã chốt.
-# Phải hiện NGAY trên đầu: nếu ai đó sửa cửa sổ thành 5 giây, người ngồi
-# máy cần biết trước khi nộp chứ không phải sau.
 try:
-    for canh_bao in cfg.canh_bao_cau_hinh():
-        st.warning(f"Cấu hình: {canh_bao}")
+    _canh_bao_he_thong.extend(
+        f"Cấu hình: {canh_bao}" for canh_bao in cfg.canh_bao_cau_hinh()
+    )
 except Exception as loi:
-    st.warning(f"Không đọc được canh_bao_cau_hinh(): {loi}")
+    _canh_bao_he_thong.append(f"Không đọc được cảnh báo cấu hình: {loi}")
 
-
-ma_cau = st.session_state["ma_cau"]
-so_da_chon = len(st.session_state["gio_nop"].get(ma_cau, []))
-
-cot_tt = st.columns([2, 2, 2, 3])
-
-cot_tt[0].metric("Câu đang làm", ma_cau)
-cot_tt[1].metric("Giỏ nộp", f"{so_da_chon} / {cfg.so_dong_toi_da()}")
-cot_tt[2].metric("Video có ảnh", len(video_co_thumbnail()))
-
-if "ket_qua" in st.session_state:
-
-    kq = st.session_state["ket_qua"]
-
-    cot_tt[3].metric(
-        "Lần tìm gần nhất",
-        f"{kq['do_tre_ms']:.0f} ms",
-        f"{kq['so_tho']} thô → {kq['so_sach']} sau lọc trùng",
-    )
+if _canh_bao_he_thong:
+    with st.expander(
+        f"Kiểm tra thiết lập ({len(_canh_bao_he_thong)} cảnh báo)",
+        expanded=False,
+    ):
+        for canh_bao in _canh_bao_he_thong:
+            st.warning(canh_bao)
 
 
 # ============================================================
-# 13. THANH BÊN
+# 13. KHUNG TÌM KIẾM
 # ============================================================
 
-with st.sidebar:
+co_kho_chu = _TextSearchIndex is not None and TEP_FTS.exists()
+co_kho_caption = lay_kho_caption() is not None
 
-    st.subheader("Cấu hình phiên")
+if not co_kho_chu:
+    st.session_state["ng_ocr_fts"] = False
+    st.session_state["ng_asr"] = False
+if not co_kho_caption:
+    st.session_state["ng_caption"] = False
 
-    # Mã câu hỏi là NHÃN THỦ CÔNG, không tự đổi theo câu truy vấn — nó quyết
-    # định giỏ nộp đang gom vào đâu (gio_nop[ma_cau]). Trong vòng thi, mã này
-    # do BTC phát, không suy ra được từ nội dung câu hỏi.
-    #
-    # Trước đây chỉ có ô gõ tay nên nó cứ đứng yên ở "cau_01" và dễ tưởng là
-    # hỏng. Thêm hai nút để sang câu kế tiếp bằng một cú bấm.
-
-    st.text_input("Mã câu hỏi", key="ma_cau")
-
-    def _doi_ma_cau(buoc: int) -> None:
-        """Tăng/giảm phần số ở cuối mã, giữ nguyên tiền tố và số chữ số."""
-        hien = str(st.session_state.get("ma_cau", "")).strip()
-        khop = re.search(r"^(.*?)(\d+)$", hien)
-
-        if not khop:
-            # Mã không kết thúc bằng số (ví dụ người dùng gõ "demo") thì không
-            # đoán bừa — giữ nguyên, tránh ghi nhầm giỏ nộp sang mã khác.
-            return
-
-        tien_to, so = khop.group(1), khop.group(2)
-        moi = max(1, int(so) + buoc)
-        st.session_state["ma_cau"] = f"{tien_to}{moi:0{len(so)}d}"
-
-    cot_lui, cot_toi = st.columns(2, **KW_CANH)
-
-    cot_lui.button(
-        "‹ Câu trước",
-        key="ma_cau_lui",
-        on_click=_doi_ma_cau,
-        args=(-1,),
-        use_container_width=True,
+with st.form("form_tim_kiem", clear_on_submit=False):
+    st.markdown(
+        '<div class="form-intro">'
+        '<span class="form-step">01</span>'
+        '<div><strong>Nhập truy vấn</strong>'
+        '<small>Mô tả càng cụ thể về người, hành động, vật thể và bối cảnh càng tốt.</small>'
+        '</div></div>',
+        unsafe_allow_html=True,
     )
 
-    cot_toi.button(
-        "Câu sau ›",
-        key="ma_cau_toi",
-        on_click=_doi_ma_cau,
-        args=(1,),
-        use_container_width=True,
-    )
+    cot_ma, cot_cau_hoi, cot_tim = st.columns([1.35, 5.8, 1.35], gap="medium")
 
-    cua_so_giay = st.slider(
-        "Cửa sổ lọc trùng (giây)",
-        0.0, 30.0,
-        value=float(cfg.cua_so_giay()),
-        step=0.5,
-        help="Mặc định đọc từ settings.yaml. Chỉnh ở đây chỉ ảnh hưởng phiên này.",
-    )
+    with cot_ma:
+        ma_cau_nhap = st.text_input(
+            "Mã câu",
+            key="ma_cau",
+            placeholder="cau_01",
+            help="Mã này dùng để tách riêng danh sách frame đã chọn.",
+        )
 
-    diem_toi_thieu = st.slider("Ngưỡng điểm tối thiểu", 0.0, 0.5, 0.0, 0.01)
-
-    chi_video_co_anh = st.checkbox(
-        "Chỉ hiện video đã có ảnh",
-        value=False,
-        help="Ẩn kết quả thuộc shard máy này chưa tải.",
-    )
-
-    st.caption(f"Trần ảnh mỗi video: {cfg.so_anh_toi_da_moi_video()}")
-    st.caption(
-        f"RRF k: {cfg.rrf_k()} · trọng số "
-        + " / ".join(f"{k} {v}" for k, v in TRONG_SO_MAC_DINH.items())
-    )
-
-    so_chu_so_tn, duoi_tn = dinh_dang_thumbnail()
-    st.caption(f"Tên ảnh: {so_chu_so_tn} chữ số, đuôi {duoi_tn}")
-
-    st.divider()
-    st.subheader("Mô đun")
-
-    for ten_hien, tinh_trang in TRANG_THAI_MO_DUN.items():
-
-        if tinh_trang == "OK":
-            st.caption(f"✓ {ten_hien}")
-        else:
-            st.caption(f"✗ {ten_hien} — {tinh_trang}")
-
-    st.divider()
-    st.subheader("Lịch sử")
-
-    for thu_tu, ban_ghi in enumerate(doc_lich_su()):
-
-        if st.button(
-            ban_ghi.get("cau_hoi", "")[:38],
-            key=f"ls_{thu_tu}",
-            **KW_NUT,
-            help=(
-                f"{ban_ghi.get('che_do')} · {ban_ghi.get('so_sach')} kết quả · "
-                f"{ban_ghi.get('do_tre_ms', 0):.0f} ms · {ban_ghi.get('luc', '')}"
-            ),
-        ):
-            st.session_state["cau_hoi_dien_san"] = ban_ghi.get("cau_hoi", "")
-            st.rerun()
-
-    st.divider()
-    st.caption(f"Lịch sử: {TEP_LICH_SU}")
-    st.caption(f"Giỏ nộp: {TEP_GIO_NOP}")
-
-
-# ============================================================
-# 14. Ô TÌM KIẾM
-# ============================================================
-
-with st.form("form_tim_kiem"):
-
-    st.markdown('<div class="search-label">Câu tìm kiếm</div>', unsafe_allow_html=True)
-
-    cot_o, cot_che_do, cot_nut = st.columns([6, 2, 1.4], gap="medium")
-
-    with cot_o:
-        # ĐỔI SO VỚI BẢN ĐẦU: text_input -> text_area.
-        # Lý do: text_input sinh thẻ <input>, loại thẻ này chỉ có một dòng,
-        # câu dài bị cắt ở mép ô và không có cách nào ép nó xuống hàng bằng
-        # CSS. text_area sinh <textarea> nên chữ tự xuống hàng.
-        # CÁI GIÁ: trong biểu mẫu, Enter giờ là xuống dòng chứ không còn gửi
-        # đi — phải bấm nút Tìm kiếm. Muốn quay lại thì đổi text_area thành
-        # text_input và xoá dòng height.
-        # Mọi thứ khác giữ nguyên: tên biến, khoá, nhãn, chữ gợi ý.
+    with cot_cau_hoi:
         cau_hoi = st.text_area(
-            "cau_hoi",
-            value=st.session_state["cau_hoi_dien_san"],
-            label_visibility="collapsed",
-            placeholder="Một người phụ nữ mặc áo dài đỏ đang phát biểu trên bục",
-            height=68,
+            "Mô tả cần tìm",
+            key="cau_hoi_input",
+            placeholder=(
+                "Ví dụ: Một người phụ nữ mặc áo dài đỏ đang phát biểu "
+                "trên bục, phía sau có nhiều cây xanh"
+            ),
+            height=88,
         )
 
-    with cot_che_do:
-
-        # Bật/tắt từng nguồn thay vì chọn một chế độ cố định. Đo trên bộ dev 32
-        # câu: bốn nguồn BỔ SUNG cho nhau (gộp cả bốn 7.000 điểm, so với CLIP
-        # đơn 3.400), nên khoá cứng một tổ hợp là bỏ phí.
-        co_kho_chu = lay_kho_chu() is not None
-
-        st.caption("Nguồn tìm kiếm")
-
-        bat_clip = st.checkbox("Hình ảnh (CLIP)", value=True, key="ng_clip")
-
-        bat_ocr = st.checkbox(
-            "OCR — từ khoá", value=False, key="ng_ocr",
-            help="Khớp từ khoá trích từ câu hỏi, lọc box dưới conf 0.40.",
+    with cot_tim:
+        st.markdown('<div class="submit-spacer"></div>', unsafe_allow_html=True)
+        da_gui = st.form_submit_button(
+            "Tìm kiếm",
+            type="primary",
+            **KW_NUT,
         )
 
-        bat_ocr_fts = st.checkbox(
-            "OCR — BM25", value=co_kho_chu, key="ng_ocr_fts",
-            disabled=not co_kho_chu,
-            help="Xếp hạng BM25 trên bảng ocr_fts của kho chữ.",
+    with st.expander("Tùy chọn tìm kiếm", expanded=False):
+        st.caption("Nguồn dữ liệu")
+
+        cot_clip, cot_caption = st.columns(2)
+
+        bat_clip = cot_clip.checkbox(
+            "Hình ảnh mạnh (CLIP-L)",
+            value=True,
+            key="ng_clip",
+            help="Tìm theo độ tương đồng ngữ nghĩa hình ảnh - văn bản.",
+        )
+        bat_caption = cot_caption.checkbox(
+            "Caption AI",
+            value=False,
+            key="ng_caption",
+            disabled=not co_kho_caption,
+            help=(
+                "Chế độ thử nghiệm: gộp CLIP-L 1.0, CLIP B/32 0.2 và "
+                "caption 0.6. Mặc định tắt vì mức tăng trên dev còn nhỏ."
+            ),
         )
 
-        bat_asr = st.checkbox(
-            "Lời nói (ASR)", value=co_kho_chu, key="ng_asr",
-            disabled=not co_kho_chu,
-            help="Tra bảng asr_fts rồi nở khoảng thời gian thành khung hình có thật.",
+        st.caption("Nguồn chữ hỗ trợ")
+        cot_ocr, cot_fts, cot_asr = st.columns(3)
+
+        bat_ocr = cot_ocr.checkbox(
+            "OCR từ khoá",
+            value=False,
+            key="ng_ocr",
+            disabled=bat_caption,
+            help="Khớp từ khoá xuất hiện trong khung hình.",
+        )
+        bat_ocr_fts = cot_fts.checkbox(
+            "OCR BM25",
+            value=co_kho_chu,
+            key="ng_ocr_fts",
+            disabled=not co_kho_chu or bat_caption,
+            help="Tìm văn bản trên ảnh bằng chỉ mục BM25.",
+        )
+        bat_asr = cot_asr.checkbox(
+            "Lời nói (ASR)",
+            value=co_kho_chu,
+            key="ng_asr",
+            disabled=not co_kho_chu or bat_caption,
+            help="Tìm nội dung được nói trong video.",
+        )
+
+        if bat_caption:
+            st.markdown(
+                '<div class="ai-mode-note"><strong>Caption AI đang bật</strong>'
+                '<span>Chế độ cứu hộ · CLIP-L 1.0 + CLIP 0.2 + caption 0.6</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        cot_loc, cot_nguong = st.columns(2)
+
+        cua_so_giay = cot_loc.slider(
+            "Khoảng gộp các frame gần nhau",
+            min_value=0.0,
+            max_value=30.0,
+            value=float(cfg.cua_so_giay()),
+            step=0.5,
+            format="%.1f giây",
+            help="Giảm các kết quả gần như trùng nhau trong cùng video.",
+        )
+        diem_toi_thieu = cot_nguong.slider(
+            "Ngưỡng CLIP tối thiểu",
+            min_value=0.0,
+            max_value=0.5,
+            value=0.0,
+            step=0.01,
+            help="Chỉ áp dụng khi tìm bằng riêng nguồn CLIP.",
         )
 
         if not co_kho_chu:
-            st.caption("Chưa mở được kho chữ — hai nguồn cuối bị tắt.")
+            st.caption("Kho chữ chưa sẵn sàng nên OCR BM25 và ASR đang tắt.")
+        if not co_kho_caption:
+            st.caption(
+                "Caption AI chưa sẵn sàng; chạy "
+                "python -u -m scripts.run_caption_batch --chi-nap."
+            )
 
-        cac_nguon = set()
+    cac_nguon = set()
 
+    if bat_caption:
+        # Công tắc là một CHẾ ĐỘ đã đo, không phải nhánh caption đứng riêng.
+        cac_nguon.update({NGUON_CLIP_L, NGUON_CLIP, NGUON_CAPTION})
+    else:
         if bat_clip:
-            cac_nguon.add(NGUON_CLIP)
+            cac_nguon.add(NGUON_CLIP_L)
         if bat_ocr:
             cac_nguon.add(NGUON_OCR)
         if bat_ocr_fts:
@@ -1051,537 +1164,546 @@ with st.form("form_tim_kiem"):
         if bat_asr:
             cac_nguon.add(NGUON_ASR)
 
-    with cot_nut:
-        da_gui = st.form_submit_button("Tìm kiếm", type="primary", **KW_NUT)
-
 
 # ============================================================
-# 15. XỬ LÝ TÌM KIẾM
+# 14. CHẠY TÌM KIẾM
 # ============================================================
 
 if da_gui:
+    if not ma_cau_nhap.strip():
+        st.warning("Hãy nhập mã câu trước khi tìm kiếm.")
 
-    if not cau_hoi.strip():
-        st.warning("Chưa nhập câu tìm kiếm.")
+    elif not cau_hoi.strip():
+        st.warning("Hãy nhập mô tả khoảnh khắc cần tìm.")
 
     elif not cac_nguon:
-        st.warning("Chưa chọn nguồn nào. Bật ít nhất một nguồn tìm kiếm.")
+        st.warning("Hãy bật ít nhất một nguồn tìm kiếm.")
 
     else:
-
-        ket_qua = None
-
-        with st.status("Bắt đầu tìm kiếm...", expanded=True) as trang_thai:
-
-            def _bat_dau_buoc(nhan: str) -> None:
-                trang_thai.update(label=f"{nhan}...")
-
-            def _xong_buoc(nhan: str, ms: float) -> None:
-                st.write(f"{nhan} — {ms:.0f} ms")
-
-            nhat_ky = NhatKyBuoc(khi_bat_dau=_bat_dau_buoc, khi_xong=_xong_buoc)
-
-            try:
-                ket_qua = chay_tim_kiem(
-                    cau_hoi.strip(), cac_nguon, cua_so_giay, diem_toi_thieu,
-                    nhat_ky=nhat_ky,
+        try:
+            with st.spinner("Đang tìm và xếp hạng các keyframe phù hợp..."):
+                ket_qua_moi = chay_tim_kiem(
+                    cau_hoi.strip(),
+                    cac_nguon,
+                    cua_so_giay,
+                    diem_toi_thieu,
+                    nhat_ky=NhatKyBuoc(),
                 )
 
-                trang_thai.update(
-                    label=(
-                        f"Xong — {ket_qua['so_sach']} kết quả "
-                        f"trong {ket_qua['do_tre_ms']:.0f} ms"
-                    ),
-                    state="complete",
-                    expanded=False,
-                )
-
-            except Exception as loi:
-
-                buoc_cuoi = nhat_ky.cac_buoc[-1]["nhan"] if nhat_ky.cac_buoc else "khởi động"
-
-                trang_thai.update(
-                    label=f"Thất bại sau bước: {buoc_cuoi}",
-                    state="error",
-                    expanded=True,
-                )
-
-                st.write(f"{type(loi).__name__}: {loi}")
-
-        if ket_qua is not None:
-
-            st.session_state["ket_qua"] = ket_qua
+            st.session_state["ket_qua"] = ket_qua_moi
             st.session_state["trang"] = 0
             st.session_state.pop("lan_can", None)
+            st.session_state.pop("phong_to", None)
 
             ghi_lich_su(
                 {
                     "luc": datetime.now().isoformat(timespec="seconds"),
-                    "ma_cau": st.session_state["ma_cau"],
-                    "cau_hoi": ket_qua["cau_hoi"],
-                    "che_do": ket_qua["che_do"],
-                    "cua_so_giay": ket_qua["cua_so_giay"],
-                    "so_ung_vien": ket_qua["so_ung_vien"],
-                    "so_tho": ket_qua["so_tho"],
-                    "so_sach": ket_qua["so_sach"],
-                    "dem_tinh_trang": ket_qua["dem_tinh_trang"],
-                    "do_tre_ms": round(ket_qua["do_tre_ms"], 1),
+                    "ma_cau": ma_cau_nhap.strip(),
+                    "cau_hoi": ket_qua_moi["cau_hoi"],
+                    "che_do": ket_qua_moi["che_do"],
+                    "cua_so_giay": ket_qua_moi["cua_so_giay"],
+                    "so_ung_vien": ket_qua_moi["so_ung_vien"],
+                    "so_tho": ket_qua_moi["so_tho"],
+                    "so_sach": ket_qua_moi["so_sach"],
+                    "dem_tinh_trang": ket_qua_moi["dem_tinh_trang"],
+                    "do_tre_ms": round(ket_qua_moi["do_tre_ms"], 1),
                     "cac_buoc": [
-                        {"nhan": b["nhan"], "ms": round(b["ms"], 1)}
-                        for b in ket_qua["cac_buoc"]
+                        {"nhan": buoc["nhan"], "ms": round(buoc["ms"], 1)}
+                        for buoc in ket_qua_moi["cac_buoc"]
                     ],
                 }
             )
 
-            # KHÔNG gọi st.rerun(): rerun sẽ xoá mất khung trạng thái vừa chạy.
-            # Lưới kết quả nằm phía dưới nên vẫn vẽ được trong lần chạy này.
+            st.success(
+                f"Đã tìm thấy {ket_qua_moi['so_sach']} kết quả "
+                f"trong {ket_qua_moi['do_tre_ms'] / 1000:.2f} giây."
+            )
+
+        except Exception as loi:
+            st.error(f"Tìm kiếm thất bại: {type(loi).__name__}: {loi}")
+
+            cac_mo_dun_loi = {
+                ten: tinh_trang
+                for ten, tinh_trang in TRANG_THAI_MO_DUN.items()
+                if tinh_trang != "OK"
+            }
+
+            if cac_mo_dun_loi:
+                with st.expander("Chi tiết để kiểm tra"):
+                    for ten, tinh_trang in cac_mo_dun_loi.items():
+                        st.code(f"{ten}: {tinh_trang}", language=None)
 
 if "canh_bao" in st.session_state:
     st.warning(st.session_state.pop("canh_bao"))
 
 
 # ============================================================
-# 16. XEM LÂN CẬN
+# 15. ĐÁP ÁN ĐÃ CHỌN
 # ============================================================
-#
-# Keyframe cách nhau khoảng 2,6–3,5 giây, trong khi cửa sổ đáp án của
-# TRAKE hẹp hơn nhiều. Khung đúng có thể nằm giữa hai keyframe.
+
+ma_cau = str(st.session_state.get("ma_cau", "")).strip() or "cau_01"
+danh_sach_nop = st.session_state["gio_nop"].get(ma_cau, [])
+
+with st.container(border=True):
+    st.markdown('<div class="selection-panel-marker"></div>', unsafe_allow_html=True)
+
+    cot_tieu_de, cot_xoa, cot_tai = st.columns([5.2, 1.25, 1.35], **KW_CANH)
+
+    cot_tieu_de.markdown(
+        '<div class="section-heading">'
+        '<span class="form-step">02</span>'
+        '<div><strong>Đáp án đã chọn</strong>'
+        f'<small>{html.escape(ma_cau)} · {len(danh_sach_nop)} / '
+        f'{cfg.so_dong_toi_da()} frame</small></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if cot_xoa.button(
+        "Xóa hết",
+        key="xoa_gio_hien_tai",
+        disabled=not danh_sach_nop,
+        on_click=_xoa_gio_hien_tai,
+        **KW_NUT,
+    ):
+        st.rerun()
+
+    cot_tai.download_button(
+        "Tải CSV",
+        data=xuat_csv_gio_nop(ma_cau),
+        file_name=f"{ma_cau}.csv",
+        mime="text/csv",
+        disabled=not danh_sach_nop,
+        help="Xuất đúng các frame đang được chọn, không chạy lại tìm kiếm.",
+        **KW_TAI,
+    )
+
+    if danh_sach_nop:
+        with st.expander(f"Xem {len(danh_sach_nop)} frame đã chọn", expanded=False):
+            bang_gio = [
+                {
+                    "video_id": muc["video_id"],
+                    "frame_idx": muc["frame_idx"],
+                    "thời điểm": f"{muc['pts_time']:.2f}s",
+                    "keyframe": muc["n"],
+                    "nguồn": muc["nguon"],
+                }
+                for muc in sorted(danh_sach_nop, key=lambda x: -x["score"])
+            ]
+            st.dataframe(bang_gio, hide_index=True, **KW_BANG)
+    else:
+        st.caption("Chọn một kết quả bên dưới để thêm frame vào đáp án.")
+
+
+# ============================================================
+# 16. XEM LÂN CẬN VÀ ẢNH GỐC
+# ============================================================
 
 def mo_lan_can(video_id: str, n: int) -> None:
     st.session_state["lan_can"] = {"video_id": video_id, "n": n}
 
 
-if "lan_can" in st.session_state:
+def mo_phong_to(
+    duong_dan: str,
+    video_id: str,
+    n: int,
+    frame_idx: int,
+    pts_time: float,
+    score: float,
+) -> None:
+    st.session_state["phong_to"] = {
+        "duong_dan": duong_dan,
+        "video_id": video_id,
+        "n": n,
+        "frame_idx": frame_idx,
+        "pts_time": pts_time,
+        "score": score,
+    }
 
+
+def ve_phong_to(muc: dict) -> None:
+    hien_anh(muc["duong_dan"])
+
+    cac_cot = st.columns(4)
+    cac_cot[0].metric("Video", muc["video_id"])
+    cac_cot[1].metric("Frame", muc["frame_idx"])
+    cac_cot[2].metric("Thời điểm", f"{muc['pts_time']:.2f}s")
+    cac_cot[3].metric("Keyframe", f"n={muc['n']}")
+
+
+if "phong_to" in st.session_state:
+    muc_phong_to = st.session_state["phong_to"]
+
+    with st.container(border=True):
+        st.markdown('<div class="viewer-panel-marker"></div>', unsafe_allow_html=True)
+
+        cot_tieu_de, cot_dong = st.columns([6, 1], **KW_CANH)
+        cot_tieu_de.markdown(
+            '<div class="panel-title">Ảnh keyframe gốc</div>'
+            f'<div class="panel-subtitle">{html.escape(muc_phong_to["video_id"])}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if cot_dong.button("Đóng", key="dong_phong_to", **KW_NUT):
+            st.session_state.pop("phong_to", None)
+            st.rerun()
+
+        ve_phong_to(muc_phong_to)
+
+
+if "lan_can" in st.session_state:
     thong_tin = st.session_state["lan_can"]
     bang = lay_frame_map()
 
     with st.container(border=True):
+        st.markdown('<div class="neighbor-panel-marker"></div>', unsafe_allow_html=True)
 
-        cot_a, cot_b = st.columns([6, 1], **KW_CANH)
-
-        cot_a.markdown(
-            f'<div class="result-video">Lân cận — {thong_tin["video_id"]} '
-            f'· keyframe {thong_tin["n"]}</div>',
+        cot_tieu_de, cot_dong = st.columns([6, 1], **KW_CANH)
+        cot_tieu_de.markdown(
+            '<div class="panel-title">Các keyframe lân cận</div>'
+            f'<div class="panel-subtitle">{html.escape(thong_tin["video_id"])} '
+            f'· quanh n={thong_tin["n"]}</div>',
             unsafe_allow_html=True,
         )
 
-        if cot_b.button("Đóng", key="dong_lan_can", **KW_NUT):
+        if cot_dong.button("Đóng", key="dong_lan_can", **KW_NUT):
             st.session_state.pop("lan_can", None)
             st.rerun()
 
         if bang is None:
-            st.info("Chưa nạp được bảng đối chiếu nên không tính được lân cận.")
+            st.info("Chưa nạp được bảng đối chiếu nên không thể xem lân cận.")
 
         else:
-
             cua_so = bang[
                 (bang["video_id"] == thong_tin["video_id"])
                 & (bang["n"] >= thong_tin["n"] - SO_LAN_CAN)
                 & (bang["n"] <= thong_tin["n"] + SO_LAN_CAN)
             ].sort_values("n")
 
-            cac_cot = st.columns(max(1, len(cua_so)))
+            if cua_so.empty:
+                st.info("Không tìm thấy keyframe lân cận trong bảng đối chiếu.")
 
-            for cot, (_, dong) in zip(cac_cot, cua_so.iterrows()):
+            for bat_dau in range(0, len(cua_so), 5):
+                nhom = cua_so.iloc[bat_dau:bat_dau + 5]
+                cac_cot = st.columns(5, gap="small")
 
-                with cot:
+                for cot, (_, dong) in zip(cac_cot, nhom.iterrows()):
+                    with cot:
+                        duong_dan = duong_dan_thumbnail(
+                            str(dong["video_id"]),
+                            int(dong["n"]),
+                        )
 
-                    duong_dan = duong_dan_thumbnail(dong["video_id"], int(dong["n"]))
+                        if duong_dan.exists():
+                            hien_anh(duong_dan)
+                        else:
+                            st.markdown(
+                                '<div class="neighbor-placeholder">chưa có ảnh</div>',
+                                unsafe_allow_html=True,
+                            )
 
-                    if duong_dan.exists():
-                        hien_anh(duong_dan)
-                    else:
-                        st.markdown('<div class="o-anh o-chua-tai">chưa có ảnh</div>',
-                                    unsafe_allow_html=True)
+                        o_giua = int(dong["n"]) == thong_tin["n"]
 
-                    o_giua = int(dong["n"]) == thong_tin["n"]
+                        st.markdown(
+                            f'<div class="neighbor-meta{" is-center" if o_giua else ""}">'
+                            f'{"Đang xem · " if o_giua else ""}'
+                            f'n={int(dong["n"])}<br>'
+                            f'frame {int(dong["frame_idx"])} · '
+                            f'{float(dong["pts_time"]):.2f}s</div>',
+                            unsafe_allow_html=True,
+                        )
 
-                    st.markdown(
-                        f'<div class="result-meta">'
-                        f'{"► " if o_giua else ""}n={int(dong["n"])}<br>'
-                        f'f={int(dong["frame_idx"])}<br>'
-                        f'{dong["pts_time"]:.2f}s</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    st.button(
-                        "Chọn",
-                        key=f"chon_lc_{dong['video_id']}_{int(dong['n'])}",
-                        **KW_NUT,
-                        on_click=bat_tat_dap_an,
-                        args=(
-                            st.session_state["ma_cau"],
+                        da_chon = dang_trong_gio(
+                            ma_cau,
                             str(dong["video_id"]),
                             int(dong["frame_idx"]),
-                            float(dong["pts_time"]),
-                            int(dong["n"]),
-                            0.0,
-                            "lân cận",
-                        ),
-                    )
+                        )
+
+                        st.button(
+                            "Bỏ chọn" if da_chon else "Chọn",
+                            key=f"chon_lc_{dong['video_id']}_{int(dong['n'])}",
+                            type="primary" if not da_chon else "secondary",
+                            on_click=bat_tat_dap_an,
+                            args=(
+                                ma_cau,
+                                str(dong["video_id"]),
+                                int(dong["frame_idx"]),
+                                float(dong["pts_time"]),
+                                int(dong["n"]),
+                                0.0,
+                                "lân cận",
+                            ),
+                            **KW_NUT,
+                        )
 
 
 # ============================================================
-# 17. PHÓNG TO
-# ============================================================
-
-def mo_phong_to(duong_dan: str, video_id: str, n: int, frame_idx: int,
-                pts_time: float, score: float) -> None:
-
-    st.session_state["phong_to"] = {
-        "duong_dan": duong_dan, "video_id": video_id, "n": n,
-        "frame_idx": frame_idx, "pts_time": pts_time, "score": score,
-    }
-
-
-def ve_phong_to(muc: dict) -> None:
-
-    hien_anh(muc["duong_dan"])
-
-    cot = st.columns(4)
-    cot[0].metric("Video", muc["video_id"])
-    cot[1].metric("Frame", muc["frame_idx"])
-    cot[2].metric("Thời điểm", f"{muc['pts_time']:.2f} s")
-    cot[3].metric("Keyframe", f"n = {muc['n']}")
-
-
-if "phong_to" in st.session_state:
-
-    muc_phong_to = st.session_state["phong_to"]
-
-    if hasattr(st, "dialog"):
-
-        @st.dialog("Ảnh keyframe gốc", width="large")
-        def _hop_thoai():
-
-            ve_phong_to(muc_phong_to)
-
-            if st.button("Đóng", **KW_NUT):
-                st.session_state.pop("phong_to", None)
-                st.rerun()
-
-        _hop_thoai()
-
-    else:
-
-        # KHÔNG bọc bằng st.markdown('<div class=...>'): Streamlit tự đóng
-        # thẻ ngay trong block đó nên CSS không ăn vào widget phía sau.
-        with st.container(border=True):
-
-            cot_a, cot_b = st.columns([6, 1], **KW_CANH)
-
-            cot_a.markdown('<div class="result-video">Ảnh keyframe gốc</div>',
-                           unsafe_allow_html=True)
-
-            if cot_b.button("Đóng", key="dong_phong_to", **KW_NUT):
-                st.session_state.pop("phong_to", None)
-                st.rerun()
-
-            ve_phong_to(muc_phong_to)
-
-
-# ============================================================
-# 18. LƯỚI KẾT QUẢ
+# 17. LƯỚI KẾT QUẢ
 # ============================================================
 
 if "ket_qua" in st.session_state:
-
     ket_qua = st.session_state["ket_qua"]
-
-    hits = ket_qua["hits"]
-
-    if chi_video_co_anh:
-        hits = [h for h in hits if tinh_trang_anh(h.video_id, h.n) == "co"]
-
-    st.divider()
-
     dem = ket_qua.get("dem_tinh_trang", {})
 
-    st.markdown(
-        f'<div class="result-video">Kết quả cho "{ket_qua["cau_hoi"]}"</div>'
-        f'<div class="result-meta">{ket_qua["che_do"]} · '
-        f'{ket_qua["so_tho"]} thô → {ket_qua["so_sach"]} sau lọc trùng '
-        f'(cửa sổ {ket_qua["cua_so_giay"]:.1f}s) · '
-        f'{ket_qua["do_tre_ms"]:.0f} ms<br>'
-        f'{dem.get("co", 0)} có ảnh · '
-        f'{dem.get("chua_tai", 0)} chưa tải shard · '
-        f'{dem.get("thieu_anh", 0)} thiếu ảnh</div>',
+    cot_tieu_de, cot_bo_loc = st.columns([6, 1.7], **KW_CANH)
+
+    cot_tieu_de.markdown(
+        '<div class="results-heading">'
+        '<span class="form-step">03</span>'
+        '<div><strong>Kết quả tìm kiếm</strong>'
+        f'<small>{_ten_nguon(ket_qua["che_do"])} · '
+        f'{ket_qua["so_sach"]} kết quả · '
+        f'{ket_qua["do_tre_ms"] / 1000:.2f}s</small></div></div>',
         unsafe_allow_html=True,
     )
 
-    so_trang = max(1, (len(hits) + SO_KET_QUA_MOI_TRANG - 1) // SO_KET_QUA_MOI_TRANG)
+    chi_video_co_anh = cot_bo_loc.toggle(
+        "Chỉ ảnh có sẵn",
+        value=False,
+        key="chi_video_co_anh",
+        help="Ẩn các kết quả thuộc shard chưa được tải trên máy này.",
+    )
 
-    # Điều khiển trang nằm DƯỚI lưới ảnh — xem mục "ĐIỀU KHIỂN TRANG" bên dưới.
-    # Để ở trên thì mỗi lần đổi trang phải cuộn ngược lên, rất phiền khi soát
-    # 100 kết quả.
+    hits = list(ket_qua["hits"])
+
+    if chi_video_co_anh:
+        hits = [
+            hit for hit in hits
+            if tinh_trang_anh(hit.video_id, hit.n) == "co"
+        ]
+
+    so_trang = max(
+        1,
+        (len(hits) + SO_KET_QUA_MOI_TRANG - 1) // SO_KET_QUA_MOI_TRANG,
+    )
+    st.session_state["trang"] = min(
+        int(st.session_state.get("trang", 0)),
+        so_trang - 1,
+    )
+
+    st.markdown(
+        '<div class="query-summary">'
+        f'<span>“{html.escape(ket_qua["cau_hoi"]) }”</span>'
+        f'<small>{len(hits)} đang hiển thị · '
+        f'{dem.get("co", 0)} có ảnh · '
+        f'{dem.get("chua_tai", 0)} chưa tải</small>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     if dem.get("thieu_anh", 0):
         st.warning(
-            f"{dem['thieu_anh']} kết quả thuộc video ĐÃ có thư mục thumbnail "
-            f"nhưng thiếu đúng tấm ảnh cần. Đây là bất thường — báo Nghi."
+            f"{dem['thieu_anh']} kết quả thuộc video đã tải nhưng thiếu ảnh tương ứng."
         )
 
-    with st.expander("Chi tiết từng bước"):
+    if not hits:
+        st.info("Không có kết quả phù hợp với bộ lọc hiện tại.")
 
-        for buoc in ket_qua.get("cac_buoc", []):
+    else:
+        dau = st.session_state["trang"] * SO_KET_QUA_MOI_TRANG
+        hits_trang = hits[dau:dau + SO_KET_QUA_MOI_TRANG]
 
-            phan_tram = (
-                buoc["ms"] / ket_qua["do_tre_ms"] * 100
-                if ket_qua["do_tre_ms"] > 0 else 0
-            )
+        for khoi in range(0, len(hits_trang), SO_COT):
+            cac_cot = st.columns(SO_COT, gap="small")
 
-            st.markdown(
-                f'<div class="result-meta">{buoc["nhan"]} — '
-                f'<span class="result-score">{buoc["ms"]:.0f} ms</span> '
-                f'({phan_tram:.0f}%)</div>',
-                unsafe_allow_html=True,
-            )
+            for lech, (cot, hit) in enumerate(
+                zip(cac_cot, hits_trang[khoi:khoi + SO_COT])
+            ):
+                hang = dau + khoi + lech + 1
+                da_chon = dang_trong_gio(
+                    ma_cau,
+                    hit.video_id,
+                    int(hit.frame_idx),
+                )
+                trang_thai_anh = tinh_trang_anh(hit.video_id, hit.n)
 
-        st.caption(ket_qua.get("bao_cao_loc_trung", ""))
-
-        if ket_qua.get("so_bo_qua"):
-            st.caption(f"{ket_qua['so_bo_qua']} bản ghi OCR không chuyển được sang Hit.")
-
-        if ket_qua.get("so_bi_nguong"):
-            st.caption(f"{ket_qua['so_bi_nguong']} kết quả bị cắt vì dưới ngưỡng điểm.")
-
-    dau = st.session_state["trang"] * SO_KET_QUA_MOI_TRANG
-    hits_trang = hits[dau:dau + SO_KET_QUA_MOI_TRANG]
-
-    for khoi in range(0, len(hits_trang), SO_COT):
-
-        cac_cot = st.columns(SO_COT, gap="medium")
-
-        for lech, (cot, hit) in enumerate(zip(cac_cot, hits_trang[khoi:khoi + SO_COT])):
-
-            hang = dau + khoi + lech + 1
-
-            da_chon = dang_trong_gio(st.session_state["ma_cau"], hit.video_id, hit.frame_idx)
-
-            trang_thai_anh = tinh_trang_anh(hit.video_id, hit.n)
-
-            with cot:
-
-                with st.container(border=True):
+                with cot:
+                    # Không bọc thêm st.container(border=True): ở Streamlit 1.36,
+                    # selector :has() sẽ bắt cả hai lớp wrapper và tạo khung kép.
+                    # Cột kết quả là chính thẻ; CSS nhận diện cột qua marker này.
+                    lop_chon = " is-selected" if da_chon else ""
+                    st.markdown(
+                        f'<div class="result-card-marker{lop_chon}"></div>',
+                        unsafe_allow_html=True,
+                    )
 
                     if trang_thai_anh == "co":
                         hien_anh(duong_dan_thumbnail(hit.video_id, hit.n))
-
                     elif trang_thai_anh == "chua_tai":
                         st.markdown(
-                            '<div class="o-anh o-chua-tai">'
-                            'chưa tải shard này</div>',
+                            '<div class="image-placeholder">'
+                            '<span>Shard chưa tải</span></div>',
                             unsafe_allow_html=True,
                         )
-
                     else:
                         st.markdown(
-                            '<div class="o-anh o-thieu-anh">'
-                            'thiếu ảnh<br>(có shard)</div>',
+                            '<div class="image-placeholder is-missing">'
+                            '<span>Thiếu ảnh trong shard</span></div>',
                             unsafe_allow_html=True,
                         )
 
                     st.markdown(
-                        f'<div class="result-rank{" result-rank-chon" if da_chon else ""}">'
-                        f'#{hang}{" ✓" if da_chon else ""}</div>'
-                        f'<span class="nhan-nguon">{hit.source}</span>'
-                        f'<div class="result-video">{hit.video_id}</div>'
-                        f'<div class="result-meta">'
-                        f'frame {hit.frame_idx} · n={hit.n}<br>'
-                        f'{hit.pts_time:.2f}s · '
-                        f'<span class="result-score">{hit.score:.4f}</span></div>',
+                        '<div class="card-topline">'
+                        f'<span class="rank-badge">#{hang}</span>'
+                        f'<span class="source-badge">{html.escape(str(hit.source))}</span>'
+                        '</div>'
+                        f'<div class="video-id">{html.escape(hit.video_id)}</div>'
+                        '<div class="frame-meta">'
+                        '<div class="frame-meta-primary">'
+                        f'<strong>frame {int(hit.frame_idx)}</strong>'
+                        f'<span class="score-value">{float(hit.score):.4f}</span>'
+                        '</div>'
+                        '<div class="frame-meta-secondary">'
+                        f'<span>n={int(hit.n)} · {float(hit.pts_time):.2f}s</span>'
+                        '</div>'
+                        '</div>',
                         unsafe_allow_html=True,
                     )
 
-                    # Chữ OCR đọc được — lý do tấm ảnh này được chọn.
-                    # Quan trọng nhất khi kết quả thuộc shard chưa tải:
-                    # lúc đó đây là căn cứ duy nhất để phán đoán.
-                    chu = ket_qua.get("chu_ocr", {}).get(f"{hit.video_id}#{hit.n}")
+                    chu = ket_qua.get("chu_ocr", {}).get(
+                        f"{hit.video_id}#{hit.n}"
+                    )
+
+                    chu_ai = ket_qua.get("chu_caption", {}).get(
+                        f"{hit.video_id}#{hit.n}"
+                    )
+
+                    if NGUON_CAPTION in ket_qua.get("che_do", "").split("+"):
+                        if chu_ai:
+                            chu_ai_gon = (
+                                chu_ai if len(chu_ai) <= 150 else chu_ai[:150] + "…"
+                            )
+                            st.markdown(
+                                '<div class="ai-caption-snippet" title="'
+                                f'{html.escape(chu_ai, quote=True)}">'
+                                '<span>MÔ TẢ AI · EN</span>'
+                                f'<p>{html.escape(chu_ai_gon)}</p></div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                '<div class="ai-caption-snippet is-empty" '
+                                'aria-hidden="true">&nbsp;</div>',
+                                unsafe_allow_html=True,
+                            )
 
                     if chu:
-
-                        # OCR trả về chữ tuỳ ý, phải thoát HTML.
-                        chu_gon = chu if len(chu) <= 110 else chu[:110] + "..."
-
+                        chu_gon = chu if len(chu) <= 120 else chu[:120] + "…"
                         st.markdown(
-                            f'<div class="chu-ocr">{html.escape(chu_gon)}</div>',
+                            f'<div class="ocr-snippet">{html.escape(chu_gon)}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        # Giữ một vùng OCR rỗng để các nút ở bốn thẻ cùng hàng
+                        # luôn thẳng nhau, không cần đặt position hay chiều cao âm.
+                        st.markdown(
+                            '<div class="ocr-snippet is-empty" aria-hidden="true">'
+                            '&nbsp;</div>',
                             unsafe_allow_html=True,
                         )
 
                     st.button(
-                        "Bỏ chọn" if da_chon else "Chọn",
+                        "✓ Đã chọn" if da_chon else "Chọn frame này",
                         key=f"chon_{hang}_{hit.video_id}_{hit.n}",
-                        **KW_NUT,
+                        type="secondary" if da_chon else "primary",
                         on_click=bat_tat_dap_an,
                         args=(
-                            st.session_state["ma_cau"], hit.video_id, int(hit.frame_idx),
-                            float(hit.pts_time), int(hit.n), float(hit.score), hit.source,
+                            ma_cau,
+                            hit.video_id,
+                            int(hit.frame_idx),
+                            float(hit.pts_time),
+                            int(hit.n),
+                            float(hit.score),
+                            hit.source,
                         ),
+                        **KW_NUT,
                     )
 
-                    cot_lc, cot_pt = st.columns(2)
+                    cot_lan_can, cot_anh_goc = st.columns(2, gap="small")
 
-                    cot_lc.button(
+                    cot_lan_can.button(
                         "Lân cận",
                         key=f"lc_{hang}_{hit.video_id}_{hit.n}",
-                        **KW_NUT,
                         on_click=mo_lan_can,
                         args=(hit.video_id, int(hit.n)),
+                        **KW_NUT,
                     )
 
                     duong_dan_goc = duong_dan_keyframe(hit.video_id, hit.n)
 
                     if duong_dan_goc is not None:
-
-                        cot_pt.button(
+                        cot_anh_goc.button(
                             "Ảnh gốc",
                             key=f"pt_{hang}_{hit.video_id}_{hit.n}",
-                            **KW_NUT,
                             on_click=mo_phong_to,
                             args=(
-                                str(duong_dan_goc), hit.video_id, int(hit.n),
-                                int(hit.frame_idx), float(hit.pts_time), float(hit.score),
+                                str(duong_dan_goc),
+                                hit.video_id,
+                                int(hit.n),
+                                int(hit.frame_idx),
+                                float(hit.pts_time),
+                                float(hit.score),
                             ),
+                            **KW_NUT,
                         )
-
                     else:
-                        cot_pt.button(
+                        cot_anh_goc.button(
                             "Ảnh gốc",
                             key=f"pt_x_{hang}_{hit.video_id}_{hit.n}",
-                            **KW_NUT,
                             disabled=True,
+                            **KW_NUT,
                         )
 
+        if so_trang > 1:
+            def _lui_trang() -> None:
+                st.session_state["trang"] = max(
+                    0,
+                    st.session_state["trang"] - 1,
+                )
 
-    # ============================================================
-    # ĐIỀU KHIỂN TRANG — đặt DƯỚI lưới ảnh
-    # ============================================================
-    #
-    # Đọc xong một trang thì nút bấm ngay dưới tầm mắt, không phải cuộn ngược
-    # lên đầu. Với 100 kết quả chia nhiều trang thì khác biệt này rất rõ.
+            def _toi_trang() -> None:
+                st.session_state["trang"] = min(
+                    so_trang - 1,
+                    st.session_state["trang"] + 1,
+                )
 
-    if so_trang > 1:
-
-        st.divider()
-
-        cot_truoc, cot_giua, cot_sau = st.columns([1, 2, 1], **KW_CANH)
-
-        trang_hien = st.session_state["trang"]
-
-        # on_click đổi session_state TRƯỚC khi Streamlit vẽ lại, nên không cần
-        # gọi rerun thủ công và cũng không lệch một nhịp như khi gán sau nút.
-        def _lui_trang():
-            st.session_state["trang"] = max(0, st.session_state["trang"] - 1)
-
-        def _toi_trang():
-            st.session_state["trang"] = st.session_state["trang"] + 1
-
-        cot_truoc.button(
-            "‹ Trang trước",
-            key="trang_lui",
-            disabled=(trang_hien <= 0),
-            on_click=_lui_trang,
-            use_container_width=True,
-        )
-
-        with cot_giua:
-            chon = st.number_input(
-                "Trang",
-                min_value=1,
-                max_value=so_trang,
-                value=min(trang_hien + 1, so_trang),
-                step=1,
-                key="chon_trang",
-                label_visibility="collapsed",
+            cot_truoc, cot_so_trang, cot_sau = st.columns(
+                [1.25, 2.4, 1.25],
+                **KW_CANH,
             )
-            st.caption(f"Trang {min(trang_hien + 1, so_trang)}/{so_trang}")
 
-        cot_sau.button(
-            "Trang sau ›",
-            key="trang_toi",
-            disabled=(trang_hien >= so_trang - 1),
-            on_click=_toi_trang,
-            use_container_width=True,
-        )
+            cot_truoc.button(
+                "← Trang trước",
+                key="trang_lui",
+                disabled=st.session_state["trang"] <= 0,
+                on_click=_lui_trang,
+                **KW_NUT,
+            )
+            cot_so_trang.markdown(
+                f'<div class="page-indicator">Trang '
+                f'{st.session_state["trang"] + 1} / {so_trang}</div>',
+                unsafe_allow_html=True,
+            )
+            cot_sau.button(
+                "Trang sau →",
+                key="trang_toi",
+                disabled=st.session_state["trang"] >= so_trang - 1,
+                on_click=_toi_trang,
+                **KW_NUT,
+            )
 
-        # Người dùng gõ thẳng số trang thì ưu tiên số đó. Đặt SAU hai nút để
-        # thao tác gõ tay không bị nút ghi đè trong cùng một lần vẽ.
-        if int(chon) - 1 != trang_hien:
-            st.session_state["trang"] = int(chon) - 1
-            st.rerun()
-
-
-# ============================================================
-# 19. GIỎ NỘP
-# ============================================================
-
-st.divider()
-
-ma_cau = st.session_state["ma_cau"]
-danh_sach_nop = st.session_state["gio_nop"].get(ma_cau, [])
-
-with st.container(border=True):
-
-    cot_a, cot_b, cot_c, cot_d = st.columns([3, 1.3, 1.3, 1.6], **KW_CANH)
-
-    cot_a.markdown(
-        f'<div class="result-video">Giỏ nộp — {ma_cau}</div>'
-        f'<div class="result-meta">{len(danh_sach_nop)} / {cfg.so_dong_toi_da()} dòng</div>',
+else:
+    st.markdown(
+        '<div class="empty-state">'
+        '<div class="empty-icon">⌕</div>'
+        '<strong>Sẵn sàng tìm kiếm</strong>'
+        '<p>Nhập mã câu và mô tả khoảnh khắc. Kết quả sẽ xuất hiện ở đây để '
+        'bạn xem lân cận, mở ảnh gốc và chọn frame nộp.</p>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
-    if cot_b.button("Xoá giỏ", **KW_NUT):
-        st.session_state["gio_nop"][ma_cau] = []
-        ghi_gio_nop(st.session_state["gio_nop"])
-        st.rerun()
 
-    cot_c.download_button(
-        "Tải CSV",
-        data=xuat_csv_gio_nop(ma_cau),
-        file_name=f"{ma_cau}.csv",
-        mime="text/csv",
-        disabled=not danh_sach_nop,
-        **KW_TAI,
-    )
-
-    # Đường chính thức: run_query() chạy trọn năm bước và ghi tệp qua
-    # submit/formatter.py. Chỉ bấm khi đã chốt, vì nó GHI ĐĨA.
-    if cot_d.button(
-        "Xuất chính thức",
-        **KW_NUT,
-        disabled=_run_query is None or "ket_qua" not in st.session_state,
-        help="Chạy run_query() và ghi tệp nộp qua formatter.py",
-    ):
-
-        try:
-            with st.spinner("Đang chạy mạch đầu–cuối và ghi tệp nộp..."):
-
-                bao_cao = _run_query(
-                    st.session_state["ket_qua"]["cau_hoi"],
-                    query_id=ma_cau,
-                    ghi_tep=True,
-                )
-
-            st.success(bao_cao.tom_tat())
-
-            if getattr(bao_cao, "duong_dan_nop", None):
-                st.caption(f"Đã ghi: {bao_cao.duong_dan_nop}")
-
-            for c in getattr(bao_cao, "canh_bao", None) or []:
-                st.warning(c)
-
-        except Exception as loi:
-            st.error(f"run_query thất bại: {type(loi).__name__}: {loi}")
-
-    if danh_sach_nop:
-        st.dataframe(
-            sorted(danh_sach_nop, key=lambda x: -x["score"]),
-            hide_index=True,
-            **KW_BANG,
-        )
-    else:
-        st.caption("Chưa chọn đáp án nào cho câu này.")
-
-
-st.caption("AIC Video Search")
+st.markdown(
+    '<div class="app-footer">AIC 2026 · Video Search Workspace</div>',
+    unsafe_allow_html=True,
+)

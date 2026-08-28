@@ -33,6 +33,7 @@ python-dotenv==1.0.1       # doc .env (paths.py co ban tu viet, giu day cho tien
 
 # ---------- Kiem thu ----------
 pytest==8.2.2
+nbformat==5.10.4          # doc va kiem tra tep .ipynb trong test
 
 # =====================================================================
 #  GIAI DOAN 1 - DA MO

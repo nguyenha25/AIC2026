@@ -18,6 +18,7 @@ MÃ THOÁT
 from __future__ import annotations
 
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -54,6 +55,17 @@ def doc_tep_nop(duong_dan: Path) -> list[list[str]]:
         return [d for d in csv.reader(f) if d]
 
 
+def loai_truy_van_tu_ten(duong_dan: Path) -> str | None:
+    """Nhận KIS/QA/TRAKE từ tên chuẩn query-...-<loại>.csv."""
+    khop = re.search(r"-(kis|qa|trake)$", duong_dan.stem.lower())
+    return khop.group(1) if khop else None
+
+
+def cot_frame_cua_dong(dong: list[str], loai: str) -> list[str]:
+    """QA chỉ có cột 2 là frame; cột 3 có thể là đáp án dạng số."""
+    return dong[1:] if loai == "trake" else dong[1:2]
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("Thiếu đường dẫn tệp nộp.")
@@ -68,12 +80,16 @@ def main() -> int:
 
     dong = doc_tep_nop(duong_dan)
     cua_so = cua_so_giay()
+    loai = loai_truy_van_tu_ten(duong_dan)
 
     print("=" * 72)
     print(f"SOÁT TỆP NỘP: {duong_dan.name}")
     print("=" * 72)
 
     loi: list[str] = []
+
+    if loai is None:
+        loi.append("không nhận ra dạng kis/qa/trake từ tên tệp")
 
     # --- định dạng ----------------------------------------------------------
     print(f"Số dòng            : {len(dong)}")
@@ -88,6 +104,15 @@ def main() -> int:
 
     if len(so_cot) > 1:
         loi.append(f"số cột không đều: {so_cot}")
+
+    so_cot_mong_doi = {"kis": 2, "qa": 3}
+    if loai in so_cot_mong_doi and so_cot != [so_cot_mong_doi[loai]]:
+        loi.append(
+            f"{loai.upper()} phải có {so_cot_mong_doi[loai]} cột, "
+            f"đang có {so_cot}"
+        )
+    if loai == "trake" and (not so_cot or min(so_cot) < 3):
+        loi.append("TRAKE phải có video_id và ít nhất 2 mốc frame")
 
     raw = duong_dan.read_bytes()
 
@@ -113,10 +138,12 @@ def main() -> int:
     for i, d in enumerate(dong, start=1):
         video_id = d[0]
 
-        # KIS/QA: một mốc. TRAKE: nhiều mốc, soát từng mốc một.
-        cot_so = [c for c in d[1:] if c.strip().lstrip("-").isdigit()]
-
-        for c in cot_so:
+        # KIS/QA: chỉ cột thứ hai là frame. Đáp án QA có thể là số (ví dụ
+        # "5") nhưng tuyệt đối không được đem số đó đi tra như frame_idx.
+        for c in cot_frame_cua_dong(d, loai or ""):
+            if not c.strip().lstrip("-").isdigit():
+                loi.append(f"dòng {i}: frame_idx không phải số: {c!r}")
+                continue
             frame_idx = int(c)
             pts_time = tra.get((video_id, frame_idx))
 
@@ -137,10 +164,18 @@ def main() -> int:
             print(f"    {x}")
 
     # --- cổng thoát số 5 ----------------------------------------------------
-    vi_pham = tim_cap_qua_gan(moc, cua_so_giay=cua_so)
+    # TRAKE là chuỗi sự kiện trong cùng video; các mốc đúng có thể chỉ cách
+    # nhau vài phần mười giây. Pipeline production cũng đã chốt không áp cửa
+    # sổ 10 giây cho TRAKE.
+    vi_pham = [] if loai == "trake" else tim_cap_qua_gan(
+        moc, cua_so_giay=cua_so
+    )
 
     print()
-    print(f"CỔNG THOÁT SỐ 5 (cửa sổ {cua_so:.1f} giây)")
+    if loai == "trake":
+        print("CỔNG THOÁT SỐ 5: KHÔNG ÁP DỤNG CHO TRAKE")
+    else:
+        print(f"CỔNG THOÁT SỐ 5 (cửa sổ {cua_so:.1f} giây)")
 
     if vi_pham:
         print(f"  TRƯỢT — {len(vi_pham)} cặp cùng video cách nhau dưới {cua_so:.1f} giây")
@@ -154,8 +189,10 @@ def main() -> int:
         if len(vi_pham) > 10:
             print(f"    … còn {len(vi_pham) - 10} cặp nữa")
         loi.append(f"trượt cổng 5: {len(vi_pham)} cặp quá gần")
-    else:
+    elif loai != "trake":
         print("  ĐẠT")
+    else:
+        print("  ĐẠT — các mốc TRAKE được phép gần nhau")
 
     # --- kết luận -----------------------------------------------------------
     print()

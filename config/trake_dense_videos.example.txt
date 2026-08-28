@@ -1,0 +1,4 @@
+# Mỗi dòng một video nghi là đáp án TRAKE.
+# Chép tệp này thành trake_dense_videos.txt rồi thay bằng danh sách thật.
+L23_V025
+L23_V026
