@@ -1,0 +1,51 @@
+schema_version: "1.1"
+run_id: n00_baseline_20260829
+deadline: "2026-09-03T23:59:00+07:00"
+source_snapshot: af83e1bb94e1e5585a321b7650a33eed9708217e
+
+# N-00 chỉ đóng băng thứ đã có. Không đưa Qwen, PP-OCRv5, reranker hoặc
+# fine-tune vào baseline; những phần đó phải thắng ablation mới được giữ.
+scope:
+  must_have:
+    - qa_baseline_clean
+    - split_by_video
+    - config_snapshot
+    - run_manifest
+    - trake_clean_evidence_inventory
+  optional_excluded:
+    - qwen3_vl
+    - pp_ocr_v5
+    - qwen_reranker
+    - fine_tune
+
+offline:
+  bat_buoc: true
+  nguon_mo_rong_cho_phep:
+    - tu_dien
+    - marian
+  nguon_cam:
+    - llm
+
+split:
+  group_key: video_id
+  seed: aic2026-n00-v1
+  holdout_ratio: 0.30
+
+qa_baseline:
+  # Khớp Phase 2 hiện tại: CLIP-L truy hồi, Marian local cho câu CLIP-L,
+  # reader hiện có đọc tối đa 5 ứng viên. Không gọi API.
+  nguon_mo_rong: nguyen_ban
+  nguon_clip_l: marian
+  so_ung_vien: 500
+  so_doc: 5
+  rrf_weights:
+    clip: 0.0
+    ocr_fts: 0.0
+    asr: 0.0
+    object: 0.0
+    clip_l: 1.0
+
+evidence_policy:
+  mo_ta: keyframe_image_inside_gt_window
+  hoi_dap: keyframe_image_inside_gt_window
+  chuoi_su_kien: dense_frame_inside_every_event_window
