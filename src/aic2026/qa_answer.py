@@ -400,7 +400,8 @@ class BoDocAnh:
         if self._model is not None:
             return
         import torch
-        from transformers import BlipForQuestionAnswering, BlipProcessor
+        from transformers.models.blip.modeling_blip import BlipForQuestionAnswering
+        from transformers.models.blip.processing_blip import BlipProcessor
 
         self._thiet_bi = self._thiet_bi_yeu_cau or (
             "cuda" if torch.cuda.is_available() else "cpu"
