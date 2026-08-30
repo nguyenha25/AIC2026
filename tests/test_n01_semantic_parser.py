@@ -2,7 +2,6 @@ import unittest
 
 from aic2026.semantic.parser import RuleBasedParser
 
-
 class TestN01SemanticParser(unittest.TestCase):
     def setUp(self):
         self.parser = RuleBasedParser()
@@ -80,6 +79,68 @@ class TestN01SemanticParser(unittest.TestCase):
             ["start", "after:E1", "after:E2"],
         )
 
+    def test_calculate_uncertainty_entropy(self):
+        plan = self.parser.parse_qa("1", "Câu hỏi chung chung?")
+        self.assertGreater(plan.uncertainty, 0.0)
+        self.assertLess(plan.uncertainty, 1.0)
+        
+        zero_uncertainty = self.parser._calculate_uncertainty({"clip_l": 1.0, "ocr": 0.0, "asr": 0.0, "caption": 0.0})
+        self.assertEqual(zero_uncertainty, 0.0)
+
+    def test_routing_intent_accuracy_for_gate_1(self):
+        test_cases = [
+            ("Biển báo ghi gì?", "read_text"),
+            ("Người đàn ông nói gì?", "read_speech"),
+            ("Có bao nhiêu người?", "count_objects"),
+            ("Chiếc áo màu gì?", "identify_attribute"),
+            ("Người đó đang cầm gì?", "identify_object_action"),
+            ("Tên của con đèo là gì?", "read_text")
+        ]
+        correct = 0
+        for query, expected_intent in test_cases:
+            plan = self.parser.parse_qa("x", query)
+            if plan.intent == expected_intent:
+                correct += 1
+        
+        accuracy = correct / len(test_cases)
+        self.assertGreaterEqual(accuracy, 0.90)
+
+    def test_temporal_tiep_theo(self):
+        plan = self.parser.parse_qa("1", "Sự kiện tiếp theo là gì?")
+        self.assertEqual(plan.intent, "temporal_reasoning")
+        self.assertEqual(plan.temporal_relation, "after")
+
+    def test_modality_routing_dominance(self):
+        plan = self.parser.parse_qa("1", "Biển báo ghi gì?")
+        self.assertEqual(plan.intent, "read_text")
+        self.assertEqual(max(plan.preferred_modalities, key=plan.preferred_modalities.get), "ocr")
+
+        plan = self.parser.parse_qa("2", "Có bao nhiêu người?")
+        self.assertEqual(plan.intent, "count_objects")
+        self.assertEqual(max(plan.preferred_modalities, key=plan.preferred_modalities.get), "clip_l")
+
+        plan = self.parser.parse_qa("3", "Người đàn ông nói gì?")
+        self.assertEqual(plan.intent, "read_speech")
+        self.assertEqual(max(plan.preferred_modalities, key=plan.preferred_modalities.get), "asr")
+        
+        plan = self.parser.parse_qa("4", "Chiếc áo màu gì?")
+        self.assertEqual(plan.intent, "identify_attribute")
+        self.assertEqual(max(plan.preferred_modalities, key=plan.preferred_modalities.get), "clip_l")
+
+    def test_query_expansion_generates_meaningful_variants(self):
+        plan_04 = self.parser.parse_qa(
+            "04",
+            "Trong món Lẩu ếch lá lốt, ướp thịt ếch với những nguyên liệu gì?",
+        )
+        self.assertIn("marinate frog", plan_04.queries["clip_l"])
+        self.assertTrue(any(q == "Trong món Lẩu ếch lá lốt, ướp thịt ếch với những nguyên liệu gì" for q in plan_04.queries["asr"]))
+        
+        plan_05 = self.parser.parse_qa(
+            "05",
+            "Gói bột mang tên gì đang được đâu bếp đổ vào tô để tẩm ướp cá cơm?"
+        )
+        self.assertIn("tên gói bột", plan_05.queries["ocr"])
 
 if __name__ == "__main__":
     unittest.main()
+    
