@@ -35,6 +35,9 @@ class QueryPlanQA(BaseModel):
         default_factory=lambda: {"clip_l": [], "ocr": [], "asr": []}
     )
     uncertainty: float = 0.0
+    # Gợi ý ngân sách ứng viên chỉ dựa trên semantic prior. Retrieval có thể
+    # điều chỉnh tiếp sau khi có score margin để tạo final adaptive K.
+    semantic_k_hint: Literal[100, 300, 500] = 300
     status: Literal["ok", "fallback", "error"] = "ok"
     error: Optional[str] = None
 

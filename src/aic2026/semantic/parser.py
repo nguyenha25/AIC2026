@@ -4,6 +4,11 @@ from typing import List, Dict
 from aic2026.semantic.schema import QueryPlanQA, QueryPlanTRAKE, TrakeEvent
 
 class RuleBasedParser:
+    # Các ngưỡng này bao phủ đủ ba mức entropy mà bộ routing hiện tại sinh ra:
+    # read_speech/attribute -> 100, phần lớn QA -> 300, temporal -> 500.
+    SEMANTIC_K_LOW_THRESHOLD = 0.50
+    SEMANTIC_K_HIGH_THRESHOLD = 0.70
+
     def __init__(self):
         self.qa_rules = [
             # OCR / Text Reading
@@ -34,19 +39,20 @@ class RuleBasedParser:
                 "answer_type": "short_text",
                 "modalities": {"clip_l": 0.7, "ocr": 0.0, "asr": 0.0, "caption": 0.3}
             },
+            # Temporal (ưu tiên trước Object / Action vì câu thời gian thường
+            # cũng chứa cụm chung như "làm gì").
+            {
+                "pattern": r"(trước khi|sau khi|tiếp theo)",
+                "intent": "temporal_reasoning",
+                "answer_type": "short_text",
+                "modalities": {"clip_l": 0.6, "ocr": 0.1, "asr": 0.1, "caption": 0.2}
+            },
             # Object / Action
             {
                 "pattern": r"(vật gì|hành động|làm gì|cầm gì|cắt thế nào|nguyên liệu gì|là món gì|ủng hộ ai)",
                 "intent": "identify_object_action",
                 "answer_type": "short_text",
                 "modalities": {"clip_l": 0.7, "ocr": 0.0, "asr": 0.1, "caption": 0.2}
-            },
-            # Temporal
-            {
-                "pattern": r"(trước khi|sau khi|tiếp theo)",
-                "intent": "temporal_reasoning",
-                "answer_type": "short_text",
-                "modalities": {"clip_l": 0.6, "ocr": 0.1, "asr": 0.1, "caption": 0.2}
             }
         ]
 
@@ -171,6 +177,23 @@ class RuleBasedParser:
         
         return round(normalized_uncertainty, 4)
 
+    @classmethod
+    def _choose_semantic_k(cls, uncertainty: float) -> int:
+        """Ánh xạ semantic uncertainty sang gợi ý ngân sách ứng viên.
+
+        Đây chưa phải final K vì parser không có retrieval score margin. Tầng
+        Retrieval được phép giữ nguyên hoặc tăng/giảm gợi ý này sau khi kết hợp
+        thêm margin uncertainty.
+        """
+        if not math.isfinite(uncertainty) or not 0.0 <= uncertainty <= 1.0:
+            raise ValueError("uncertainty phải là số hữu hạn trong đoạn [0, 1]")
+
+        if uncertainty < cls.SEMANTIC_K_LOW_THRESHOLD:
+            return 100
+        if uncertainty < cls.SEMANTIC_K_HIGH_THRESHOLD:
+            return 300
+        return 500
+
     def parse_qa(self, query_id: str, query_text: str) -> QueryPlanQA:
         query_lower = query_text.lower()
         matched_intent, matched_answer_type = "general_qa", "short_text"
@@ -194,6 +217,7 @@ class RuleBasedParser:
         
         expanded_queries = self._generate_expanded_queries(query_text, entities, actions)
         uncertainty_score = self._calculate_uncertainty(matched_modalities)
+        semantic_k_hint = self._choose_semantic_k(uncertainty_score)
 
         return QueryPlanQA(
             query_id=query_id, 
@@ -207,7 +231,8 @@ class RuleBasedParser:
             temporal_relation=temporal_rel, 
             preferred_modalities=matched_modalities,
             queries=expanded_queries,
-            uncertainty=uncertainty_score
+            uncertainty=uncertainty_score,
+            semantic_k_hint=semantic_k_hint
         )
 
     def parse_trake(self, query_id: str, events: List[str]) -> QueryPlanTRAKE:

@@ -141,6 +141,51 @@ class TestN01SemanticParser(unittest.TestCase):
         )
         self.assertIn("tên gói bột", plan_05.queries["ocr"])
 
+    def test_semantic_k_hint_uses_three_budget_levels(self):
+        cases = [
+            (0.20, 100),
+            (0.50, 300),
+            (0.80, 500),
+        ]
+
+        for uncertainty, expected_k in cases:
+            with self.subTest(uncertainty=uncertainty):
+                self.assertEqual(
+                    self.parser._choose_semantic_k(uncertainty), expected_k
+                )
+
+    def test_semantic_k_hint_rejects_invalid_uncertainty(self):
+        for invalid_value in (-0.01, 1.01, float("nan"), float("inf")):
+            with self.subTest(invalid_value=invalid_value):
+                with self.assertRaises(ValueError):
+                    self.parser._choose_semantic_k(invalid_value)
+
+    def test_semantic_k_hint_is_exported_and_matches_intent(self):
+        cases = [
+            (
+                "Theo lời người đàn ông, lý do ông rời đi là gì?",
+                "read_speech",
+                100,
+            ),
+            (
+                "Gói bột mang tên gì đang được đầu bếp đổ vào tô?",
+                "read_text",
+                300,
+            ),
+            (
+                "Sau khi đặt chảo lên bếp thì tiếp theo làm gì?",
+                "temporal_reasoning",
+                500,
+            ),
+        ]
+
+        for query, expected_intent, expected_k in cases:
+            with self.subTest(query=query):
+                plan = self.parser.parse_qa("x", query)
+                self.assertEqual(plan.intent, expected_intent)
+                self.assertEqual(plan.semantic_k_hint, expected_k)
+                self.assertEqual(plan.model_dump()["semantic_k_hint"], expected_k)
+
 if __name__ == "__main__":
     unittest.main()
     
