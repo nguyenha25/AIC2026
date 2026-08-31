@@ -30,3 +30,4 @@ __pycache__/
 Thumbs.db
 *.egg-info/
 __editable__*
+.venv-qwen/
