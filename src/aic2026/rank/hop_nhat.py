@@ -353,12 +353,16 @@ def tim_ung_vien_gop(
     if trong_so is None:
         try:
             from aic2026.rank.config import trong_so_theo_dang
-
-            trong_so = trong_so_theo_dang(dang_cau)
+            trong_so = trong_so_theo_dang(dang_cau) if dang_cau else None
         except Exception:
-            trong_so = TRONG_SO_MAC_DINH
+            trong_so = None
 
-    trong_so = trong_so or TRONG_SO_MAC_DINH
+    if trong_so is None:
+        trong_so = dict(TRONG_SO_MAC_DINH) if TRONG_SO_MAC_DINH else {}
+
+    # Chốt chặn theo đúng logic: nếu bật CLIP mà chưa có trọng số thì cấp cho nó 1.0
+    if dung_clip and "clip" not in trong_so:
+        trong_so["clip"] = 1.0
 
     def _tim(cau_hoi: str, so_ung_vien: int):
         cac_nguon: dict[str, list[Hit]] = {}
