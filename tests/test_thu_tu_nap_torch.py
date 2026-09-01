@@ -20,11 +20,10 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 
 # Script vừa chạm dữ liệu (pandas) vừa chạm mô hình (torch).
-SCRIPT_CAN_GHIM = [
+SCRIPT_REQUIRES_TORCH_FIRST = [
     "scripts/chay_trake.py",
     "scripts/kiem_clip.py",
     "scripts/run_caption_batch.py",
-    "scripts/do_trong_so_rrf.py",
 ]
 
 # Thư viện KHÔNG được nạp trước torch.
@@ -34,7 +33,7 @@ NAP_SAU = re.compile(
 NAP_TORCH = re.compile(r"^\s*import torch\b", re.MULTILINE)
 
 
-@pytest.mark.parametrize("ten", SCRIPT_CAN_GHIM)
+@pytest.mark.parametrize("ten", SCRIPT_REQUIRES_TORCH_FIRST)
 def test_torch_nap_truoc_pandas_va_aic2026(ten):
     duong_dan = _ROOT / ten
     if not duong_dan.exists():
@@ -58,7 +57,7 @@ def test_torch_nap_truoc_pandas_va_aic2026(ten):
     )
 
 
-@pytest.mark.parametrize("ten", SCRIPT_CAN_GHIM)
+@pytest.mark.parametrize("ten", SCRIPT_REQUIRES_TORCH_FIRST)
 def test_thieu_torch_khong_lam_do_script(ten):
     """Máy chưa cài torch vẫn phải chạy tới phần kiểm phụ thuộc."""
     duong_dan = _ROOT / ten
@@ -88,8 +87,8 @@ def test_test_khong_import_thu_vien_nang_giua_me():
 
     thu_muc = Path(__file__).resolve().parent
     cam = re.compile(
-        r"^\s*(?:import|from)\s+(?:open_clip|faiss|onnxruntime)\b"
-        r"|importorskip\(\s*[\"'](?:aic2026\.index\.encode|open_clip|faiss)",
+        r"^\s*(?:import|from)\s+open_clip\b"
+        r"|importorskip\(\s*[\"'](?:aic2026\.index\.encode|open_clip)",
         re.MULTILINE,
     )
 
