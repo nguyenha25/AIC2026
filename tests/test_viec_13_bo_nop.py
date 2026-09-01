@@ -232,20 +232,32 @@ def test_qa_production_giu_dap_an_cua_tung_khung(monkeypatch):
     assert "theo từng khung" in ghi_chu
 
 
-def test_trake_moc_luon_tang_dan():
+def test_trake_moc_luon_tang_dan(monkeypatch):
     """Vòng p1 nộp 36/100 dòng có mốc KHÔNG tăng dần.
 
     Sự kiện là chuỗi thời gian nên những dòng đó chắc chắn sai — chỗ trống
     lãng phí.
+
+    Test này chỉ kiểm logic sinh các dòng fallback, không chạy CLIP thật.
     """
+    import aic2026.trake_align as ta
+
+    def ghep_that_bai(*args, **kwargs):
+        raise RuntimeError("mock: không chạy CLIP trong unit test")
+
+    monkeypatch.setattr(ta, "ghep", ghep_that_bai)
+
     de = {"dang": "trake", "cau_hoi": "nền\nE1 a\nE2 b\nE3 c"}
-    ra, _ = tra_mot_de(de, lambda c, k: [_Hit("L21_V001", i * 100) for i in range(SO_DONG)])
+    ra, _ = tra_mot_de(
+        de,
+        lambda c, k: [_Hit("L21_V001", i * 100) for i in range(SO_DONG)],
+    )
 
     assert len(ra) == SO_DONG
     for a in ra:
         assert len(a.frame_ids) == 3
         assert a.frame_ids == sorted(a.frame_ids)
-        assert len(set(a.frame_ids)) == 3        # tăng NGHIÊM NGẶT
+        assert len(set(a.frame_ids)) == 3
 
 
 def test_trake_production_dat_ket_qua_ghep_len_hang_dau(monkeypatch):
