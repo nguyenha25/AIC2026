@@ -8,6 +8,8 @@ import platform
 import subprocess
 import hashlib
 from collections import defaultdict, Counter
+import torch
+import open_clip
 from aic2026.semantic.parser import RuleBasedParser
 from aic2026.rank.hop_nhat import dict_sang_hit, gop_nguon, no_khoang_asr, tim_ung_vien_gop, NGUON_OCR_FTS
 from aic2026.index.fts_index import TextSearchIndex
