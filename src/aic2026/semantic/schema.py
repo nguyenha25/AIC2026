@@ -8,6 +8,8 @@ class TrakeEvent(BaseModel):
     event_id: str
     text: str
     relation: str
+    entities: List[str] = Field(default_factory=list)
+    actions: List[str] = Field(default_factory=list)
 
 class TrakeOutputConfig(BaseModel):
     one_frame_per_event: bool = True
