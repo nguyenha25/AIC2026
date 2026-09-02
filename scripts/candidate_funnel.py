@@ -98,6 +98,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from dataclasses import asdict, dataclass, field
@@ -158,6 +159,7 @@ W_L = 0.2
 
 TRAKE_FRAMES_PER_VIDEO = 3
 TRAKE_MIN_GAP_SECONDS = 1.0
+CANDIDATE_WINDOW_SECONDS = 3.0
 
 FRAME_TOLERANCE = 5
 
@@ -243,6 +245,10 @@ class FrameCandidate:
     rank_video: int
     rank_final: int
 
+    semantic_coverage: float = 0.0
+    window: dict[str, float] = field(default_factory=dict)
+    routing_weights_applied: dict[str, float] = field(default_factory=dict)
+
     status: str = "ok"
     error: str | None = None
 
@@ -307,6 +313,88 @@ def summarize_latency(values: list[float]) -> dict[str, float]:
         "p50": percentile(values, 50),
         "p95": percentile(values, 95),
         "mean": float(np.mean(values)),
+    }
+
+
+def build_qa_query_plans(
+    gt_data: list[GroundTruth],
+) -> dict[str, dict]:
+    """Chạy contract QA-S1 cho các query Q&A trước retrieval.
+
+    KIS/TRAKE vẫn giữ baseline QA-R1 của riêng chúng. INT-01 chỉ nghiệm thu
+    nhánh Q&A nên không ép QueryPlanQA lên loại task khác.
+    """
+    from aic2026.semantic.parser import RuleBasedParser
+
+    parser = RuleBasedParser()
+    plans: dict[str, dict] = {}
+
+    for gt in gt_data:
+        if gt.query_type != "hoi_dap":
+            continue
+        question = str(gt.raw_item.get("cau_hoi", "")).strip()
+        if not question:
+            raise ValueError(f"Query QA {gt.query_id} thiếu cau_hoi")
+        plan = parser.parse_qa(gt.query_id, question).model_dump()
+        if plan.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(
+                f"QueryPlan {gt.query_id}: schema_version="
+                f"{plan.get('schema_version')!r}, mong đợi {SCHEMA_VERSION!r}"
+            )
+        plans[gt.query_id] = plan
+
+    return plans
+
+
+def derive_query_routing(
+    query_plan: dict | None,
+) -> dict[str, object]:
+    """Ánh xạ QueryPlan sang tham số mà QA-R1 hiện thực sự hỗ trợ.
+
+    CLIP-B là visual fallback cố định. Prior ``clip_l`` điều khiển trực tiếp
+    trọng số CLIP-L; semantic_k_hint điều khiển video pool dùng cho coverage.
+    Modality chưa có index trong QA-R1 được ghi rõ, không giả là đã áp dụng.
+    """
+    if query_plan is None:
+        return {
+            "query_plan_schema_version": None,
+            "semantic_k_hint_applied": K_FUSED,
+            "routing_weights_applied": {
+                "clip_b": float(W_B),
+                "clip_l": float(W_L),
+            },
+            "unavailable_modalities": [],
+        }
+
+    modalities = query_plan.get("preferred_modalities")
+    if not isinstance(modalities, dict):
+        raise ValueError("QueryPlan.preferred_modalities phải là object")
+
+    clip_l_prior = float(modalities.get("clip_l", W_L))
+    if not math.isfinite(clip_l_prior) or clip_l_prior < 0.0:
+        raise ValueError("QueryPlan clip_l prior phải hữu hạn và không âm")
+
+    semantic_k = int(query_plan.get("semantic_k_hint", K_FUSED))
+    # QA-R1 giữ sàn top-300 đã khóa để QueryPlan không làm giảm recall gate;
+    # uncertainty cao vẫn được phép mở pool lên tối đa K_source.
+    semantic_k = max(K_FUSED, min(K_SOURCE, semantic_k))
+
+    unavailable = sorted(
+        name
+        for name, weight in modalities.items()
+        if name not in {"clip_l"} and float(weight) > 0.0
+    )
+
+    return {
+        "query_plan_schema_version": str(query_plan.get("schema_version")),
+        "semantic_k_hint_applied": semantic_k,
+        "routing_weights_applied": {
+            "clip_b": float(W_B),
+            # Không hạ CLIP-L thấp hơn baseline đã nghiệm thu; QueryPlan chỉ
+            # được giữ nguyên hoặc tăng vai trò visual semantic.
+            "clip_l": max(float(W_L), min(1.0, clip_l_prior)),
+        },
+        "unavailable_modalities": unavailable,
     }
 
 
@@ -608,7 +696,14 @@ def fuse_video_rrf(
     l_indices: np.ndarray,
     l_scores: np.ndarray,
     l_ids: list[tuple[str, int]],
+    weight_b: float | None = None,
+    weight_l: float | None = None,
 ) -> list[VideoCandidate]:
+
+    if weight_b is None:
+        weight_b = W_B
+    if weight_l is None:
+        weight_l = W_L
 
     # Internal temporary state.
     scores: dict[str, float] = {}
@@ -686,7 +781,7 @@ def fuse_video_rrf(
         b_scores,
         b_ids,
         "clip_b",
-        W_B,
+        weight_b,
     )
 
     add_source(
@@ -694,7 +789,7 @@ def fuse_video_rrf(
         l_scores,
         l_ids,
         "clip_l",
-        W_L,
+        weight_l,
     )
 
     video_ids = sorted(
@@ -775,17 +870,17 @@ def merge_frame_provenance(
 
 def calculate_frame_evidence(
     sources: dict[str, SourceEvidence],
+    source_weights: dict[str, float] | None = None,
 ) -> float:
 
     total = 0.0
 
     for source, evidence in sources.items():
 
-        weight = (
-            W_B
-            if source == "clip_b"
-            else W_L
-        )
+        if source_weights is None:
+            weight = W_B if source == "clip_b" else W_L
+        else:
+            weight = float(source_weights.get(source, 0.0))
 
         total += (
             weight
@@ -793,6 +888,33 @@ def calculate_frame_evidence(
         )
 
     return total
+
+
+def calculate_semantic_coverage(
+    source_hits: set[str],
+    preferred_modalities: dict[str, float] | None,
+) -> float:
+    """Tỷ lệ semantic prior được candidate hiện tại hỗ trợ.
+
+    CLIP-B và CLIP-L cùng thỏa modality thị giác ``clip_l`` của QueryPlan.
+    OCR/ASR/caption chỉ được tính khi provenance thật sự có source tương ứng.
+    """
+    if not preferred_modalities:
+        return 0.0
+
+    hit_modalities = set(source_hits)
+    if {"clip_b", "clip_l"}.intersection(source_hits):
+        hit_modalities.add("clip_l")
+
+    total = sum(max(0.0, float(value)) for value in preferred_modalities.values())
+    if total <= 0.0:
+        return 0.0
+    covered = sum(
+        max(0.0, float(weight))
+        for name, weight in preferred_modalities.items()
+        if name in hit_modalities
+    )
+    return round(min(1.0, covered / total), 6)
 
 
 def build_frame_candidate(
@@ -803,6 +925,8 @@ def build_frame_candidate(
         tuple[str, int],
         tuple[int, float],
     ],
+    preferred_modalities: dict[str, float] | None = None,
+    source_weights: dict[str, float] | None = None,
 ) -> FrameCandidate | None:
 
     key = (
@@ -819,7 +943,8 @@ def build_frame_candidate(
 
     evidence_score = (
         calculate_frame_evidence(
-            frame.sources
+            frame.sources,
+            source_weights=source_weights,
         )
     )
 
@@ -840,6 +965,16 @@ def build_frame_candidate(
         in frame.sources.items()
     }
 
+    source_hits = set(frame.sources.keys())
+    semantic_coverage = calculate_semantic_coverage(
+        source_hits,
+        preferred_modalities,
+    )
+    window = {
+        "start": round(max(0.0, pts_time - CANDIDATE_WINDOW_SECONDS), 6),
+        "end": round(pts_time + CANDIDATE_WINDOW_SECONDS, 6),
+    }
+
     return FrameCandidate(
         query_id=query_id,
         video_id=video.video_id,
@@ -848,7 +983,7 @@ def build_frame_candidate(
         pts_time=pts_time,
         stage="coverage",
         source_hits=tuple(
-            sorted(frame.sources.keys())
+            sorted(source_hits)
         ),
         source_ranks=source_ranks,
         source_scores=source_scores,
@@ -857,6 +992,9 @@ def build_frame_candidate(
         score_fused=video.rrf_score,
         rank_video=0,
         rank_final=0,
+        semantic_coverage=semantic_coverage,
+        window=window,
+        routing_weights_applied=dict(source_weights or {}),
     )
 
 
@@ -976,6 +1114,8 @@ def extract_top50_coverage(
         tuple[str, int],
         tuple[int, float],
     ],
+    preferred_modalities: dict[str, float] | None = None,
+    source_weights: dict[str, float] | None = None,
 ) -> list[FrameCandidate]:
 
     all_candidates: list[FrameCandidate] = []
@@ -998,6 +1138,8 @@ def extract_top50_coverage(
                 video=video,
                 frame=merged_frame,
                 frame_lookup=frame_lookup,
+                preferred_modalities=preferred_modalities,
+                source_weights=source_weights,
             )
 
             if candidate is None:
@@ -1232,6 +1374,9 @@ def frame_to_json(
         "score_fused": candidate.score_fused,
         "rank_video": candidate.rank_video,
         "rank_final": candidate.rank_final,
+        "semantic_coverage": candidate.semantic_coverage,
+        "window": candidate.window,
+        "routing_weights_applied": candidate.routing_weights_applied,
         "status": candidate.status,
         "error": candidate.error,
     }
@@ -1255,6 +1400,7 @@ def run_single_query_benchmark(
     query_l: np.ndarray,
     b_row_map: dict[str, int],
     l_row_map: dict[str, int],
+    query_plans: dict[str, dict] | None = None,
 ) -> tuple[
     dict[str, list[FrameCandidate]],
     dict[str, list[FrameCandidate]],
@@ -1327,6 +1473,21 @@ def run_single_query_benchmark(
 
         total_start = time.perf_counter()
 
+        query_plan = (
+            query_plans.get(gt.query_id)
+            if query_plans is not None
+            else None
+        )
+        routing = derive_query_routing(query_plan)
+        routing_weights = dict(
+            routing["routing_weights_applied"]
+        )
+        preferred_modalities = (
+            dict(query_plan.get("preferred_modalities", {}))
+            if query_plan is not None
+            else None
+        )
+
         b_idx = b_row_map[
             gt.query_id
         ]
@@ -1371,7 +1532,9 @@ def run_single_query_benchmark(
 
         start = time.perf_counter()
 
-        ranked_videos = fuse_video_rrf(
+        # Bảng xếp hạng baseline chỉ phục vụ Recall@300 regression gate.
+        # Không để routing mới làm thay đổi mốc tham chiếu đã khóa.
+        baseline_ranked_videos = fuse_video_rrf(
             b_indices=b_indices[0],
             b_scores=b_scores[0],
             b_ids=b_ids,
@@ -1379,6 +1542,25 @@ def run_single_query_benchmark(
             l_scores=l_scores[0],
             l_ids=l_ids,
         )
+
+        # QueryPlan chỉ điều khiển routed pool đi xuống top-50/top-12.
+        # Khi trọng số bằng baseline thì tái sử dụng ranking để tránh tính lại.
+        if (
+            math.isclose(float(routing_weights["clip_b"]), float(W_B))
+            and math.isclose(float(routing_weights["clip_l"]), float(W_L))
+        ):
+            routed_ranked_videos = baseline_ranked_videos
+        else:
+            routed_ranked_videos = fuse_video_rrf(
+                b_indices=b_indices[0],
+                b_scores=b_scores[0],
+                b_ids=b_ids,
+                l_indices=l_indices[0],
+                l_scores=l_scores[0],
+                l_ids=l_ids,
+                weight_b=float(routing_weights["clip_b"]),
+                weight_l=float(routing_weights["clip_l"]),
+            )
 
         fusion_elapsed = (
             time.perf_counter() - start
@@ -1390,8 +1572,12 @@ def run_single_query_benchmark(
 
         start = time.perf_counter()
 
-        top300 = ranked_videos[
+        top300 = baseline_ranked_videos[
             :K_FUSED
+        ]
+
+        routed_video_pool = routed_ranked_videos[
+            :int(routing["semantic_k_hint_applied"])
         ]
 
         top300_elapsed = (
@@ -1407,8 +1593,10 @@ def run_single_query_benchmark(
         top50 = extract_top50_coverage(
             query_id=gt.query_id,
             query_type=gt.query_type,
-            top300=top300,
+            top300=routed_video_pool,
             frame_lookup=frame_lookup,
+            preferred_modalities=preferred_modalities,
+            source_weights=routing_weights,
         )
 
         top50_elapsed = (
@@ -1481,13 +1669,22 @@ def run_single_query_benchmark(
         gt_video_rank = None
 
         for rank, video in enumerate(
-            ranked_videos,
+            baseline_ranked_videos,
             start=1,
         ):
 
             if video.video_id == gt.video_id:
 
                 gt_video_rank = rank
+                break
+
+        gt_video_rank_routed = None
+        for rank, video in enumerate(
+            routed_ranked_videos,
+            start=1,
+        ):
+            if video.video_id == gt.video_id:
+                gt_video_rank_routed = rank
                 break
 
         hit_300 = video_pool_hit(
@@ -1516,8 +1713,19 @@ def run_single_query_benchmark(
             {
                 "query_id": gt.query_id,
                 "query_type": gt.query_type,
+                "query_plan_schema_version": routing[
+                    "query_plan_schema_version"
+                ],
+                "semantic_k_hint_applied": routing[
+                    "semantic_k_hint_applied"
+                ],
+                "routing_weights_applied": routing_weights,
+                "unavailable_modalities": routing[
+                    "unavailable_modalities"
+                ],
                 "gt_video_id": gt.video_id,
                 "gt_video_rank": gt_video_rank,
+                "gt_video_rank_routed": gt_video_rank_routed,
                 "hit_video_300": hit_300,
                 "hit_frame_50": hit_50,
                 "hit_frame_12": hit_12,
@@ -1528,10 +1736,16 @@ def run_single_query_benchmark(
                     len(l_indices[0])
                 ),
                 "num_videos_fused": len(
-                    ranked_videos
+                    baseline_ranked_videos
+                ),
+                "num_videos_routed_fused": len(
+                    routed_ranked_videos
                 ),
                 "num_videos_top300": len(
                     top300
+                ),
+                "num_videos_routed": len(
+                    routed_video_pool
                 ),
                 "num_candidates_50": len(
                     top50
@@ -1563,8 +1777,10 @@ def run_single_query_benchmark(
         del b_indices
         del l_scores
         del l_indices
-        del ranked_videos
+        del baseline_ranked_videos
+        del routed_ranked_videos
         del top300
+        del routed_video_pool
         del top50
         del top12
 
@@ -1864,6 +2080,16 @@ def run_profiling() -> None:
         flush=True,
     )
 
+    print(
+        "[QA-R1] Tạo QueryPlan QA-S1 và khóa routing theo query...",
+        flush=True,
+    )
+    query_plans = build_qa_query_plans(gt_data)
+    print(
+        f"[QA-R1] QueryPlan Q&A = {len(query_plans)}",
+        flush=True,
+    )
+
     # --------------------------------------------------------
     # Query embeddings — B
     # --------------------------------------------------------
@@ -1933,6 +2159,7 @@ def run_profiling() -> None:
         query_l=query_l,
         b_row_map=b_row_map,
         l_row_map=l_row_map,
+        query_plans=query_plans,
     )
 
     # --------------------------------------------------------
@@ -2293,6 +2520,13 @@ def run_profiling() -> None:
             "weight_clip_b": W_B,
             "weight_clip_l": W_L,
             "level": "video",
+            "query_plan_routing": {
+                "enabled": True,
+                "qa_query_plans": len(query_plans),
+                "clip_l_weight": "max(baseline, preferred_modalities.clip_l), capped at 1.0",
+                "clip_b_weight": W_B,
+                "candidate_pool": "semantic_k_hint clamped to [K_fused, K_source]",
+            },
         },
 
         "metrics": {
