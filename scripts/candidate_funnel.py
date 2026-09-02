@@ -1186,11 +1186,33 @@ def select_top12_reader(
         candidates_50[:K_READER],
         start=1,
     ):
+        # Tạo object riêng cho Reader để không mutate
+        # candidate đang nằm trong coverage Top-50.
+        reader_candidate = FrameCandidate(
+            query_id=candidate.query_id,
+            video_id=candidate.video_id,
+            n=candidate.n,
+            frame_idx=candidate.frame_idx,
+            pts_time=candidate.pts_time,
+            stage="reader",
+            source_hits=candidate.source_hits,
+            source_ranks=dict(candidate.source_ranks),
+            source_scores=dict(candidate.source_scores),
+            evidence_score=candidate.evidence_score,
+            best_source_rank=candidate.best_source_rank,
+            score_fused=candidate.score_fused,
+            rank_video=candidate.rank_video,
+            rank_final=rank,
+            semantic_coverage=candidate.semantic_coverage,
+            window=dict(candidate.window),
+            routing_weights_applied=dict(
+                candidate.routing_weights_applied
+            ),
+            status=candidate.status,
+            error=candidate.error,
+        )
 
-        candidate.stage = "reader"
-        candidate.rank_final = rank
-
-        selected.append(candidate)
+        selected.append(reader_candidate)
 
     return selected
 
@@ -1359,8 +1381,14 @@ def frame_to_json(
         "schema_version": SCHEMA_VERSION,
         "query_id": candidate.query_id,
         "event_id": None,
+
+        # R4 / Reader candidate contract.
         "video_id": candidate.video_id,
         "n": candidate.n,
+        "frame_id": candidate.n,
+        "score": candidate.score_fused,
+
+        # Existing metadata / provenance.
         "frame_idx": candidate.frame_idx,
         "pts_time": candidate.pts_time,
         "stage": candidate.stage,
@@ -1376,7 +1404,8 @@ def frame_to_json(
         "rank_final": candidate.rank_final,
         "semantic_coverage": candidate.semantic_coverage,
         "window": candidate.window,
-        "routing_weights_applied": candidate.routing_weights_applied,
+        "routing_weights_applied":
+            candidate.routing_weights_applied,
         "status": candidate.status,
         "error": candidate.error,
     }
@@ -1753,6 +1782,14 @@ def run_single_query_benchmark(
                 "num_candidates_12": len(
                     top12
                 ),
+
+                "coverage_candidates": [
+                    frame_to_json(
+                        candidate
+                    )
+                    for candidate in top50
+                ],
+
                 "reader_candidates": [
                     frame_to_json(
                         candidate

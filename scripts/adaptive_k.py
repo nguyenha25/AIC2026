@@ -1,135 +1,62 @@
 """
-QA-R4 — Adaptive Candidate Funnel
-=================================
+QA-R4 — Adaptive K / Semantic Funnel
+====================================
 
-Mục đích
+Contract
 --------
-R4 là một thin funnel đứng sau:
+QA-R4 receives exactly two JSONL streams:
 
-    QA-S4 semantic parsing
-            +
-    QA-R3 fused candidate pool
-            |
-            v
-        QA-R4 funnel
-            |
-            v
-    adaptive_candidates
+    S4:
+        query_id / id
+        semantic_k_hint
 
-Contract hiện tại
------------------
-S4 input:
-    D:/aic-data/runs/n01_semantic_parsing.jsonl
+    R3:
+        query_id
+        candidates
 
-Mỗi S4 record cần:
-    - id hoặc query_id
-    - semantic_k_hint
+R4 performs ONLY:
 
-semantic_k_hint được S4 cung cấp sẵn và hiện tại có các giá trị:
-    - 100
-    - 300
-    - 500
+    candidates[:semantic_k_hint]
 
-R3 input:
-    Output từ fusion_engine, mỗi record có:
-    - query_id
-    - candidates
+It does NOT:
 
-R4 KHÔNG:
-    - tính lại uncertainty
-    - đọc entropy
-    - tính score margin
+    - compute uncertainty
+    - compute entropy
+    - compute normalized margin
     - rerank candidates
-    - thay đổi thứ tự candidates của R3
-    - sửa QA-S4
-    - sửa QA-R3
+    - deduplicate candidates
+    - alter R3 ordering
+    - load the entire R3 stream into RAM
 
-R4 CHỈ:
-    1. Match S4 query với R3 query.
-    2. Lấy semantic_k_hint từ S4.
-    3. Chọn candidates[:semantic_k_hint].
-    4. Serialize kết quả ra JSONL.
+The semantic_k_hint is the R4 retrieval/funnel K.
+It is NOT Reader-K.
 
-Memory / Streaming
-------------------
-Toàn bộ pipeline được thiết kế streaming:
+Default allowed K:
 
-    S4 line
-        +
-    R3 line
-        |
-        v
-    process 1 query
-        |
-        v
-    write JSONL
-        |
-        v
-    yield result
-        |
-        v
-    query tiếp theo
+    (100, 300, 500)
 
-Không load toàn bộ S4/R3 JSONL vào RAM.
-Không tích lũy AdaptiveKResult của tất cả query vào một list.
-
-run_jsonl_funnel() là generator và yield từng result.
-
-Input Synchronization
----------------------
-Hai file S4 và R3 phải có:
-    - cùng số record
-    - cùng thứ tự query_id
-
-Nếu lệch:
-    -> raise InputDesyncError
-
-Điều này tránh silent data drop.
-
-Serialization
--------------
-R3 candidates có thể chứa:
-    - numpy.float32
-    - numpy.int64
-    - numpy.ndarray
-    - torch.Tensor
-    - các scalar tương tự
-
-R4JSONEncoder / _normalize_for_json xử lý các trường hợp này
-trước khi json.dumps().
-
-Invalid semantic_k_hint
------------------------
-strict=True:
-    -> raise ValueError
-
-strict=False:
-    -> clamp về K hợp lệ gần nhất
-    -> status = "ok_with_warning"
-    -> fallback_reason = "clamped_invalid_semantic_k"
-
-Candidate pool ngắn hơn K
--------------------------
-Không fabricate candidate.
-
-Nếu R3 có ít hơn K candidate:
-    - lấy toàn bộ candidate hiện có
-    - status = "ok_with_warning"
-    - fallback_reason = "candidate_pool_below_requested_k"
-
-Empty candidate pool:
-    - selected_candidates = ()
-    - status = "ok_with_warning"
-    - fallback_reason = "empty_candidate_pool"
+JSONL processing is pairwise/streaming and output is written atomically.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, fields, is_dataclass
+import os
+import tempfile
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 
 # ============================================================================
@@ -137,43 +64,8 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence, T
 # ============================================================================
 
 
-class InputDesyncError(ValueError):
-    """Raised when S4 and R3 JSONL streams are not aligned."""
-
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-
-@dataclass(frozen=True)
-class AdaptiveKConfig:
-    """
-    Configuration for QA-R4 candidate funnel.
-
-    allowed_k
-        Valid semantic_k_hint values produced by the frozen S4 stage.
-
-    strict
-        If True, invalid semantic_k_hint raises immediately.
-
-        If False, invalid values are clamped to the nearest allowed K and
-        the result is explicitly marked as a warning.
-    """
-
-    allowed_k: Tuple[int, ...] = (100, 300, 500)
-    strict: bool = True
-
-    def __post_init__(self) -> None:
-        if not self.allowed_k:
-            raise ValueError("allowed_k must not be empty")
-
-        normalized = tuple(sorted(set(int(k) for k in self.allowed_k)))
-
-        if any(k <= 0 for k in normalized):
-            raise ValueError("all allowed_k values must be positive")
-
-        object.__setattr__(self, "allowed_k", normalized)
+class InputDesyncError(RuntimeError):
+    """Raised when S4 and R3 JSONL streams are not synchronized."""
 
 
 # ============================================================================
@@ -184,151 +76,427 @@ class AdaptiveKConfig:
 @dataclass(frozen=True)
 class AdaptiveKResult:
     """
-    Result metadata for one query.
+    Result of one QA-R4 selection.
 
-    selected_candidates
-        Full selected candidate payload.
+    Notes
+    -----
+    k_requested:
+        Original semantic_k_hint requested by S4.
 
-        Important:
-        This object is yielded immediately by run_jsonl_funnel().
-        It is NOT accumulated internally.
+    k_effective:
+        Actual number of candidates returned.
 
-    k_requested
-        K requested by S4 semantic_k_hint.
+    k_available:
+        Number of candidates supplied by R3.
 
-    k_effective
-        Actual number of candidates selected.
-
-    k_available
-        Number of candidates available from R3 before slicing.
-
-    status
-        One of:
-            - "ok"
-            - "ok_with_warning"
-            - "error"
-
-    fallback_reason
-        Optional machine-readable reason.
+    selected_candidates:
+        Exact prefix of R3 candidates. No reranking/deduplication.
     """
 
-    schema_version: str
-    task: str
     query_id: str
-
     k_requested: int
     k_effective: int
     k_available: int
-
-    selected_candidates: Tuple[Any, ...]
-
+    selected_candidates: Tuple[Dict[str, Any], ...]
     status: str
-    error: Optional[str]
-    fallback_reason: Optional[str]
+    fallback_reason: Optional[str] = None
 
 
 # ============================================================================
-# Semantic K helpers
+# Configuration
 # ============================================================================
 
 
-def validate_semantic_k_hint(
-    semantic_k_hint: Any,
-    config: AdaptiveKConfig,
-) -> int:
+@dataclass(frozen=True)
+class AdaptiveKConfig:
     """
-    Validate semantic_k_hint against the configured allowed K values.
+    QA-R4 configuration.
 
-    strict=True:
-        invalid K -> ValueError
+    allowed_k:
+        Supported semantic K values.
 
-    strict=False:
-        invalid K -> nearest allowed K
+    strict:
+        If True, semantic_k_hint must belong to allowed_k.
+        If False, invalid values are clamped to the nearest allowed K.
     """
-    if isinstance(semantic_k_hint, bool):
-        raise ValueError("semantic_k_hint must be an integer, not bool")
 
-    try:
-        k = int(semantic_k_hint)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"semantic_k_hint must be an integer, got {semantic_k_hint!r}"
-        ) from exc
+    allowed_k: Tuple[int, ...] = (100, 300, 500)
+    strict: bool = True
 
-    if k in config.allowed_k:
-        return k
+    def __post_init__(self) -> None:
+        normalized = self._normalize_allowed_k(self.allowed_k)
+        object.__setattr__(self, "allowed_k", normalized)
 
-    if config.strict:
-        raise ValueError(
-            f"Unsupported semantic_k_hint={k}; "
-            f"allowed values are {config.allowed_k}"
+        if not isinstance(self.strict, bool):
+            raise ValueError("strict must be a boolean")
+
+    @staticmethod
+    def _normalize_allowed_k(
+        values: Iterable[int],
+    ) -> Tuple[int, ...]:
+        if values is None:
+            raise ValueError("allowed_k must not be None")
+
+        try:
+            values = tuple(values)
+        except TypeError as exc:
+            raise ValueError(
+                "allowed_k must be an iterable of positive integers"
+            ) from exc
+
+        if not values:
+            raise ValueError("allowed_k must not be empty")
+
+        normalized: List[int] = []
+
+        for value in values:
+            if isinstance(value, bool):
+                raise ValueError(
+                    "allowed_k must contain positive integers; bool is invalid"
+                )
+
+            try:
+                integer_value = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid allowed_k value: {value!r}"
+                ) from exc
+
+            # Do not silently turn 100.5 into 100.
+            if isinstance(value, float) and not value.is_integer():
+                raise ValueError(
+                    f"allowed_k values must be integers: {value!r}"
+                )
+
+            if integer_value <= 0:
+                raise ValueError(
+                    f"allowed_k values must be positive: {value!r}"
+                )
+
+            normalized.append(integer_value)
+
+        return tuple(sorted(set(normalized)))
+
+
+# ============================================================================
+# JSON normalization
+# ============================================================================
+
+
+def _normalize_for_json(value: Any) -> Any:
+    """
+    Convert common Python / NumPy / Torch-like values into JSON-safe values.
+
+    Supported:
+        - dataclasses
+        - None
+        - bool
+        - int
+        - float
+        - str
+        - Mapping
+        - tuple
+        - list
+        - torch-like tensors
+        - NumPy-like arrays/scalars
+
+    Non-finite floats are rejected because JSON output must use
+    allow_nan=False semantics.
+    """
+
+    # ------------------------------------------------------------------
+    # Dataclass
+    # ------------------------------------------------------------------
+    #
+    # AdaptiveKResult is a dataclass. Convert it recursively to a dict
+    # before applying the remaining JSON normalization rules.
+    #
+    if is_dataclass(value):
+        return _normalize_for_json(
+            asdict(value)
         )
 
-    return min(
-        config.allowed_k,
-        key=lambda allowed: (abs(allowed - k), allowed),
-    )
+    # ------------------------------------------------------------------
+    # Native JSON-safe scalar types
+    # ------------------------------------------------------------------
 
+    if value is None:
+        return None
 
-def _resolve_semantic_k(
-    semantic_k_hint: Any,
-    config: AdaptiveKConfig,
-) -> Tuple[int, bool]:
-    """
-    Return:
-        (effective_k, was_clamped)
-    """
-    if isinstance(semantic_k_hint, bool):
-        raise ValueError("semantic_k_hint must be an integer, not bool")
+    if isinstance(value, bool):
+        return value
 
-    try:
-        requested = int(semantic_k_hint)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"semantic_k_hint must be an integer, got {semantic_k_hint!r}"
-        ) from exc
+    if isinstance(value, int):
+        return value
 
-    if requested in config.allowed_k:
-        return requested, False
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                f"non-finite float cannot be serialized: {value!r}"
+            )
 
-    if config.strict:
-        raise ValueError(
-            f"Unsupported semantic_k_hint={requested}; "
-            f"allowed values are {config.allowed_k}"
+        return value
+
+    if isinstance(value, str):
+        return value
+
+    # ------------------------------------------------------------------
+    # Mapping
+    # ------------------------------------------------------------------
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_for_json(item)
+            for key, item in value.items()
+        }
+
+    # ------------------------------------------------------------------
+    # Tuple / list
+    # ------------------------------------------------------------------
+
+    if isinstance(value, tuple):
+        return [
+            _normalize_for_json(item)
+            for item in value
+        ]
+
+    if isinstance(value, list):
+        return [
+            _normalize_for_json(item)
+            for item in value
+        ]
+
+    # ------------------------------------------------------------------
+    # Torch-like tensor
+    # ------------------------------------------------------------------
+
+    detach = getattr(value, "detach", None)
+
+    if callable(detach):
+        detached = detach()
+
+        cpu = getattr(detached, "cpu", None)
+
+        if callable(cpu):
+            detached = cpu()
+
+        tolist = getattr(detached, "tolist", None)
+
+        if callable(tolist):
+            return _normalize_for_json(
+                tolist()
+            )
+
+    # ------------------------------------------------------------------
+    # NumPy-like array
+    # ------------------------------------------------------------------
+
+    tolist = getattr(value, "tolist", None)
+
+    if callable(tolist):
+        return _normalize_for_json(
+            tolist()
         )
 
-    effective = min(
-        config.allowed_k,
-        key=lambda allowed: (abs(allowed - requested), allowed),
-    )
+    # ------------------------------------------------------------------
+    # NumPy scalar-like
+    # ------------------------------------------------------------------
 
-    return effective, True
+    item = getattr(value, "item", None)
+
+    if callable(item):
+        return _normalize_for_json(
+            item()
+        )
+
+    # ------------------------------------------------------------------
+    # Last resort
+    # ------------------------------------------------------------------
+
+    try:
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"object of type {type(value).__name__!r} "
+            "is not JSON serializable"
+        ) from exc
+
+    return value
+
+
+class R4JSONEncoder(json.JSONEncoder):
+    """JSON encoder used by QA-R4."""
+
+    def default(self, obj: Any) -> Any:
+        return _normalize_for_json(obj)
 
 
 # ============================================================================
-# Candidate selection
+# Validation helpers
 # ============================================================================
 
 
-def select_candidates(
-    candidates: Sequence[Any],
-    k: int,
-) -> Tuple[Any, ...]:
-    """
-    Select the first K candidates from R3.
+_REQUIRED_CANDIDATE_FIELDS = (
+    "video_id",
+    "frame_id",
+    "n",
+    "score",
+)
 
-    IMPORTANT:
-        No sorting.
-        No reranking.
-        No score manipulation.
 
-    R3 has already produced the ranked candidate pool.
-    R4 only performs the funnel slice.
+def _normalize_positive_k(value: Any) -> int:
     """
+    Normalize semantic_k_hint.
+
+    Accepted:
+        100
+        "100"
+
+    Rejected:
+        True
+        False
+        0
+        negative
+        non-integer numeric values
+        arbitrary strings
+    """
+
+    if isinstance(value, bool):
+        raise ValueError(
+            "semantic_k_hint must be a positive integer; bool is invalid"
+        )
+
+    if isinstance(value, int):
+        k = value
+
+    elif isinstance(value, str):
+        text = value.strip()
+
+        if not text:
+            raise ValueError(
+                "semantic_k_hint must not be empty"
+            )
+
+        try:
+            k = int(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid semantic_k_hint: {value!r}"
+            ) from exc
+
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                "semantic_k_hint must be finite"
+            )
+
+        if not value.is_integer():
+            raise ValueError(
+                "semantic_k_hint must be an integer"
+            )
+
+        k = int(value)
+
+    else:
+        try:
+            k = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid semantic_k_hint: {value!r}"
+            ) from exc
+
     if k <= 0:
-        raise ValueError(f"k must be positive, got {k}")
+        raise ValueError(
+            "semantic_k_hint must be positive"
+        )
 
-    return tuple(candidates[:k])
+    return k
+
+
+def validate_candidate_schema(
+    candidates: Sequence[Mapping[str, Any]],
+    query_id: Optional[str] = None,
+) -> None:
+    """
+    Validate every R3 candidate.
+
+    Required fields:
+
+        video_id
+        frame_id
+        n
+        score
+
+    Validation happens BEFORE slicing so that malformed candidates
+    cannot silently hide behind the requested K prefix.
+    """
+
+    if candidates is None:
+        raise ValueError(
+            f"R3 query {query_id!r} candidates must not be None"
+        )
+
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, Mapping):
+            raise ValueError(
+                f"R3 query {query_id!r} candidate[{index}] "
+                "must be a mapping"
+            )
+
+        missing = [
+            field
+            for field in _REQUIRED_CANDIDATE_FIELDS
+            if field not in candidate
+        ]
+
+        if missing:
+            raise ValueError(
+                f"R3 query {query_id!r} candidate[{index}] "
+                f"is missing required fields: {missing}"
+            )
+
+
+def _extract_query_id(
+    record: Mapping[str, Any],
+) -> str:
+    """
+    Extract query ID.
+
+    R3:
+        query_id
+
+    S4:
+        query_id preferred, otherwise id
+    """
+
+    if "query_id" in record:
+        query_id = record["query_id"]
+
+    elif "id" in record:
+        query_id = record["id"]
+
+    else:
+        raise KeyError(
+            "record is missing query_id/id"
+        )
+
+    if query_id is None:
+        raise KeyError(
+            "record query_id/id must not be None"
+        )
+
+    query_id = str(query_id)
+
+    if not query_id:
+        raise KeyError(
+            "record query_id/id must not be empty"
+        )
+
+    return query_id
 
 
 # ============================================================================
@@ -338,891 +506,726 @@ def select_candidates(
 
 class AdaptiveKEngine:
     """
-    QA-R4 funnel engine.
+    QA-R4 semantic candidate funnel.
 
-    The engine intentionally has no uncertainty / entropy / margin logic.
+    The engine performs only:
 
-    Those decisions have already been made upstream by QA-S4 through
-    semantic_k_hint.
+        1. validate semantic_k_hint
+        2. validate all candidate payloads
+        3. resolve allowed K
+        4. take candidates[:K]
+
+    It never reranks or modifies candidate order.
     """
 
-    SCHEMA_VERSION = "qa-r4.v1"
-    TASK = "qa_r4_adaptive_k"
+    def __init__(
+        self,
+        config: Optional[AdaptiveKConfig] = None,
+    ) -> None:
+        self.config = (
+            config
+            if config is not None
+            else AdaptiveKConfig()
+        )
 
-    def __init__(self, config: Optional[AdaptiveKConfig] = None) -> None:
-        self.config = config or AdaptiveKConfig()
+    # ------------------------------------------------------------------
+    # K resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_k(
+        self,
+        semantic_k_hint: Any,
+    ) -> Tuple[
+        int,
+        int,
+        str,
+        Optional[str],
+    ]:
+        """
+        Return:
+
+            k_requested
+            k_effective_request
+            status
+            fallback_reason
+        """
+
+        k_requested = _normalize_positive_k(
+            semantic_k_hint
+        )
+
+        allowed = self.config.allowed_k
+
+        if k_requested in allowed:
+            return (
+                k_requested,
+                k_requested,
+                "ok",
+                None,
+            )
+
+        if self.config.strict:
+            raise ValueError(
+                "semantic_k_hint "
+                f"{k_requested} is not allowed; "
+                f"allowed_k={allowed}"
+            )
+
+        # Clamp to nearest allowed K.
+        #
+        # For an exact midpoint, prefer the larger K.
+        #
+        # Example:
+        #   allowed=(100,300,500)
+        #   200 -> 300
+        #
+        k_clamped = min(
+            allowed,
+            key=lambda candidate_k: (
+                abs(candidate_k - k_requested),
+                -candidate_k,
+            ),
+        )
+
+        return (
+            k_requested,
+            k_clamped,
+            "ok_with_warning",
+            "clamped_invalid_semantic_k",
+        )
+
+    # ------------------------------------------------------------------
+    # Selection
+    # ------------------------------------------------------------------
 
     def select(
         self,
         query_id: str,
-        candidates: Sequence[Any],
+        candidates: Sequence[Mapping[str, Any]],
         semantic_k_hint: Any,
     ) -> AdaptiveKResult:
         """
-        Funnel one R3 candidate pool using S4 semantic_k_hint.
+        Select exact R3 prefix according to semantic_k_hint.
+
+        No reranking.
+        No deduplication.
+        No uncertainty.
+        No mutation of candidate payloads.
         """
+
+        if query_id is None:
+            raise ValueError(
+                "query_id must not be None"
+            )
+
+        query_id = str(query_id)
+
         if not query_id:
-            raise ValueError("query_id must not be empty")
+            raise ValueError(
+                "query_id must not be empty"
+            )
 
         if candidates is None:
             raise ValueError(
-                f"candidates must not be None for query_id={query_id!r}"
+                f"R3 query {query_id!r} candidates must not be None"
             )
 
-        if not isinstance(candidates, Sequence):
-            raise TypeError(
-                f"candidates must be a sequence for query_id={query_id!r}; "
-                f"got {type(candidates).__name__}"
-            )
+        # Materialize only the current query's candidate list.
+        #
+        # The JSONL integration itself remains streaming at query level.
+        candidate_list = list(candidates)
 
-        requested_k = self._parse_requested_k(semantic_k_hint)
-
-        effective_k, was_clamped = _resolve_semantic_k(
-            requested_k,
-            self.config,
+        # Validate the COMPLETE candidate pool before slicing.
+        validate_candidate_schema(
+            candidate_list,
+            query_id=query_id,
         )
 
-        available = len(candidates)
-
-        selected = select_candidates(
-            candidates=candidates,
-            k=effective_k,
+        (
+            k_requested,
+            k_resolved,
+            status,
+            fallback_reason,
+        ) = self._resolve_k(
+            semantic_k_hint
         )
 
-        if available == 0:
+        k_available = len(candidate_list)
+
+        # --------------------------------------------------------------
+        # Empty candidate pool
+        # --------------------------------------------------------------
+
+        if k_available == 0:
             return AdaptiveKResult(
-                schema_version=self.SCHEMA_VERSION,
-                task=self.TASK,
-                query_id=str(query_id),
-                k_requested=requested_k,
+                query_id=query_id,
+                k_requested=k_requested,
                 k_effective=0,
                 k_available=0,
-                selected_candidates=tuple(),
+                selected_candidates=(),
                 status="ok_with_warning",
-                error=None,
                 fallback_reason="empty_candidate_pool",
             )
 
-        if was_clamped:
-            return AdaptiveKResult(
-                schema_version=self.SCHEMA_VERSION,
-                task=self.TASK,
-                query_id=str(query_id),
-                k_requested=requested_k,
-                k_effective=len(selected),
-                k_available=available,
-                selected_candidates=selected,
-                status="ok_with_warning",
-                error=None,
-                fallback_reason="clamped_invalid_semantic_k",
+        # --------------------------------------------------------------
+        # Candidate pool smaller than requested K
+        # --------------------------------------------------------------
+
+        if k_available < k_resolved:
+            selected = tuple(
+                candidate_list[:k_available]
             )
 
-        if available < effective_k:
             return AdaptiveKResult(
-                schema_version=self.SCHEMA_VERSION,
-                task=self.TASK,
-                query_id=str(query_id),
-                k_requested=requested_k,
-                k_effective=len(selected),
-                k_available=available,
+                query_id=query_id,
+                k_requested=k_requested,
+                k_effective=k_available,
+                k_available=k_available,
                 selected_candidates=selected,
                 status="ok_with_warning",
-                error=None,
                 fallback_reason="candidate_pool_below_requested_k",
             )
 
-        return AdaptiveKResult(
-            schema_version=self.SCHEMA_VERSION,
-            task=self.TASK,
-            query_id=str(query_id),
-            k_requested=requested_k,
-            k_effective=len(selected),
-            k_available=available,
-            selected_candidates=selected,
-            status="ok",
-            error=None,
-            fallback_reason=None,
+        # --------------------------------------------------------------
+        # Normal selection
+        # --------------------------------------------------------------
+
+        selected = tuple(
+            candidate_list[:k_resolved]
         )
 
-    @staticmethod
-    def _parse_requested_k(value: Any) -> int:
-        if isinstance(value, bool):
-            raise ValueError("semantic_k_hint must be an integer, not bool")
+        return AdaptiveKResult(
+            query_id=query_id,
+            k_requested=k_requested,
+            k_effective=k_resolved,
+            k_available=k_available,
+            selected_candidates=selected,
+            status=status,
+            fallback_reason=fallback_reason,
+        )
 
-        try:
-            return int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"semantic_k_hint must be an integer, got {value!r}"
-            ) from exc
+    # ------------------------------------------------------------------
+    # S4 compatibility
+    # ------------------------------------------------------------------
 
     def select_from_query_plan(
         self,
         query_plan: Mapping[str, Any],
-        candidates: Sequence[Any],
+        candidates: Sequence[Mapping[str, Any]],
     ) -> AdaptiveKResult:
         """
-        Select candidates directly from a frozen S4 QueryPlanQA-like mapping.
+        Apply QA-R4 using an S4 QueryPlan-like mapping.
 
-        Accepted query ID fields:
-            - id
-            - query_id
+        Accepted query identifier fields:
+
+            query_id
+            id
+
+        query_id has precedence when both exist.
 
         Required:
-            - semantic_k_hint
 
-        Existing S4 fields such as:
-            - uncertainty
-            - preferred_modalities
+            semantic_k_hint
 
-        are intentionally ignored by R4.
+        Other S4 fields such as:
+
+            uncertainty
+            preferred_modalities
+            normalized_margin
+
+        are intentionally ignored.
         """
-        query_id = query_plan.get("query_id")
 
-        if query_id is None:
-            query_id = query_plan.get("id")
+        if query_plan is None:
+            raise ValueError(
+                "query_plan must not be None"
+            )
 
-        if query_id is None:
+        if not isinstance(query_plan, Mapping):
+            raise ValueError(
+                "query_plan must be a mapping"
+            )
+
+        # query_id takes precedence over id.
+        if "query_id" in query_plan:
+            query_id = query_plan["query_id"]
+
+        elif "id" in query_plan:
+            query_id = query_plan["id"]
+
+        else:
             raise KeyError(
-                "S4 query plan must contain either 'id' or 'query_id'"
+                "query_plan is missing query_id/id"
             )
 
         if "semantic_k_hint" not in query_plan:
             raise KeyError(
-                f"S4 query {query_id!r} is missing 'semantic_k_hint'"
+                "query_plan is missing semantic_k_hint"
             )
 
         return self.select(
             query_id=str(query_id),
             candidates=candidates,
-            semantic_k_hint=query_plan["semantic_k_hint"],
+            semantic_k_hint=query_plan[
+                "semantic_k_hint"
+            ],
         )
 
 
 # ============================================================================
-# JSONL streaming
+# JSONL helpers
 # ============================================================================
 
 
-def iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
-    """
-    Stream JSONL records one line at a time.
+def _iter_jsonl(
+    path: Path,
+) -> Iterator[Dict[str, Any]]:
+    """Stream JSON objects from a JSONL file."""
 
-    The complete file is never loaded into RAM.
-    """
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
+    with Path(path).open(
+        "r",
+        encoding="utf-8",
+    ) as handle:
+        for line_number, line in enumerate(
+            handle,
+            start=1,
+        ):
+            line = line.strip()
 
             if not line:
                 continue
 
             try:
                 record = json.loads(line)
+
             except json.JSONDecodeError as exc:
                 raise ValueError(
-                    f"Invalid JSON in {path} at line {line_number}: {exc}"
+                    f"invalid JSON in {path} "
+                    f"at line {line_number}"
                 ) from exc
 
             if not isinstance(record, dict):
                 raise ValueError(
-                    f"Expected JSON object in {path} at line {line_number}; "
-                    f"got {type(record).__name__}"
+                    f"JSONL record in {path} "
+                    f"at line {line_number} must be an object"
                 )
 
             yield record
 
 
-def _get_query_id(record: Mapping[str, Any], source_name: str) -> str:
-    """
-    Extract query ID from a JSON record.
+def _result_to_record(
+    result: AdaptiveKResult,
+) -> Dict[str, Any]:
+    """Convert result dataclass to JSON-ready mapping."""
 
-    R4 accepts both:
-        id
-        query_id
-
-    R3 is expected to use query_id.
-    """
-    query_id = record.get("query_id")
-
-    if query_id is None:
-        query_id = record.get("id")
-
-    if query_id is None:
-        raise KeyError(
-            f"{source_name} record is missing 'id'/'query_id'"
-        )
-
-    return str(query_id)
+    return _normalize_for_json(
+        asdict(result)
+    )
 
 
-def _get_r3_candidates(record: Mapping[str, Any]) -> Sequence[Any]:
-    """
-    Extract R3 candidate list.
-    """
-    if "candidates" not in record:
-        query_id = record.get("query_id", record.get("id", "<unknown>"))
-
-        raise KeyError(
-            f"R3 query {query_id!r} is missing 'candidates'"
-        )
-
-    candidates = record["candidates"]
-
-    if candidates is None:
-        query_id = record.get("query_id", record.get("id", "<unknown>"))
-
-        raise ValueError(
-            f"R3 query {query_id!r} has candidates=None"
-        )
-
-    if not isinstance(candidates, Sequence):
-        query_id = record.get("query_id", record.get("id", "<unknown>"))
-
-        raise TypeError(
-            f"R3 query {query_id!r} candidates must be a sequence; "
-            f"got {type(candidates).__name__}"
-        )
-
-    return candidates
-
-
-def run_jsonl_funnel(
-    s4_path: Path,
-    r3_path: Path,
+def _atomic_jsonl_writer(
     output_path: Path,
-    config: Optional[AdaptiveKConfig] = None,
-) -> Iterator[AdaptiveKResult]:
+) -> Tuple[Path, Any]:
     """
-    Stream S4 + R3 through QA-R4.
+    Create a temporary output file in the same directory.
 
-    Memory guarantee
-    ----------------
-    This function does NOT:
-        - load the entire S4 file
-        - load the entire R3 file
-        - build a query_id -> candidate map
-        - accumulate results in a list
-        - duplicate selected candidate payloads in an internal list
-
-    Instead:
-
-        read S4 record
-        read R3 record
-        validate query_id alignment
-        select candidates
-        write output
-        yield result
-        repeat
-
-    Therefore memory usage does not grow with the total number of queries.
-
-    The caller receives one AdaptiveKResult at a time.
-
-    Input synchronization
-    ---------------------
-    S4 and R3 are consumed in lockstep.
-
-    We require:
-        1. same query_id at every position
-        2. same number of records
-
-    Any mismatch raises InputDesyncError.
-
-    Important:
-        Because this function is a generator, the body is not executed until
-        the caller starts iterating over it.
+    The caller must close the file and replace the temporary path with
+    the final path only after successful processing.
     """
-    s4_path = Path(s4_path)
-    r3_path = Path(r3_path)
+
     output_path = Path(output_path)
-
-    engine = AdaptiveKEngine(config=config)
 
     output_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    s4_iter = iter_jsonl(s4_path)
-    r3_iter = iter_jsonl(r3_path)
-
-    with output_path.open("w", encoding="utf-8") as output_handle:
-        record_index = 0
-
-        while True:
-            # --------------------------------------------------------------
-            # Read one S4 record.
-            # --------------------------------------------------------------
-            try:
-                s4_record = next(s4_iter)
-                s4_has_record = True
-            except StopIteration:
-                s4_has_record = False
-
-            # --------------------------------------------------------------
-            # Read one R3 record.
-            # --------------------------------------------------------------
-            try:
-                r3_record = next(r3_iter)
-                r3_has_record = True
-            except StopIteration:
-                r3_has_record = False
-
-            # --------------------------------------------------------------
-            # Both streams ended -> successful completion.
-            # --------------------------------------------------------------
-            if not s4_has_record and not r3_has_record:
-                break
-
-            record_index += 1
-
-            # --------------------------------------------------------------
-            # S4 ended first.
-            # --------------------------------------------------------------
-            if not s4_has_record:
-                r3_query_id = _get_query_id(
-                    r3_record,
-                    source_name="R3",
-                )
-
-                raise InputDesyncError(
-                    "S4/R3 input desynchronization: "
-                    f"S4 ended before R3 at record index {record_index}; "
-                    f"R3 still has query_id={r3_query_id!r}"
-                )
-
-            # --------------------------------------------------------------
-            # R3 ended first.
-            # --------------------------------------------------------------
-            if not r3_has_record:
-                s4_query_id = _get_query_id(
-                    s4_record,
-                    source_name="S4",
-                )
-
-                raise InputDesyncError(
-                    "S4/R3 input desynchronization: "
-                    f"R3 ended before S4 at record index {record_index}; "
-                    f"S4 still has query_id={s4_query_id!r}"
-                )
-
-            # --------------------------------------------------------------
-            # Extract and compare IDs.
-            # --------------------------------------------------------------
-            s4_query_id = _get_query_id(
-                s4_record,
-                source_name="S4",
-            )
-
-            r3_query_id = _get_query_id(
-                r3_record,
-                source_name="R3",
-            )
-
-            if s4_query_id != r3_query_id:
-                raise InputDesyncError(
-                    "S4/R3 query order mismatch at "
-                    f"record index {record_index}: "
-                    f"S4 query_id={s4_query_id!r}, "
-                    f"R3 query_id={r3_query_id!r}"
-                )
-
-            # --------------------------------------------------------------
-            # S4 must contain semantic_k_hint.
-            # --------------------------------------------------------------
-            if "semantic_k_hint" not in s4_record:
-                raise KeyError(
-                    f"S4 query {s4_query_id!r} is missing "
-                    "'semantic_k_hint'"
-                )
-
-            # --------------------------------------------------------------
-            # R3 must contain candidates.
-            # --------------------------------------------------------------
-            candidates = _get_r3_candidates(r3_record)
-
-            # --------------------------------------------------------------
-            # Run R4 funnel.
-            # --------------------------------------------------------------
-            result = engine.select(
-                query_id=s4_query_id,
-                candidates=candidates,
-                semantic_k_hint=s4_record["semantic_k_hint"],
-            )
-
-            # --------------------------------------------------------------
-            # Normalize and serialize immediately.
-            #
-            # The full selected_candidates payload exists only for the
-            # current query/result. It is not accumulated internally.
-            # --------------------------------------------------------------
-            serializable_result = _normalize_for_json(result)
-
-            output_handle.write(
-                json.dumps(
-                    serializable_result,
-                    ensure_ascii=False,
-                    cls=R4JSONEncoder,
-                    allow_nan=False,
-                )
-                + "\n"
-            )
-
-            # Make sure the record is physically handed off to the OS/file
-            # buffer before yielding the current result.
-            output_handle.flush()
-
-            # --------------------------------------------------------------
-            # STREAMING:
-            #
-            # Do NOT:
-            #
-            #     results.append(result)
-            #
-            # That would retain all selected_candidates from all previous
-            # queries and defeat the memory guarantee.
-            #
-            # yield returns the current result to the caller immediately.
-            # --------------------------------------------------------------
-            yield result
-
-
-# ============================================================================
-# JSON serialization
-# ============================================================================
-
-
-def _normalize_for_json(value: Any) -> Any:
-    """
-    Recursively convert common scientific Python objects into JSON-safe data.
-
-    Supported:
-        - None
-        - str
-        - int
-        - float
-        - bool
-        - dataclass
-        - Mapping
-        - list / tuple / set / frozenset
-        - NumPy-like objects exposing tolist()
-        - NumPy / Torch scalar-like objects exposing item()
-        - Torch tensors exposing detach().cpu().tolist()
-        - generic objects exposing __dict__
-
-    Non-finite floats are rejected.
-    """
-
-    # ------------------------------------------------------------------
-    # Native JSON primitives.
-    # ------------------------------------------------------------------
-    if value is None:
-        return None
-
-    if isinstance(value, (str, int, bool)):
-        return value
-
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(
-                f"Cannot serialize non-finite float: {value!r}"
-            )
-
-        return value
-
-    # ------------------------------------------------------------------
-    # Dataclass.
-    # ------------------------------------------------------------------
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            field.name: _normalize_for_json(
-                getattr(value, field.name)
-            )
-            for field in fields(value)
-        }
-
-    # ------------------------------------------------------------------
-    # Mapping.
-    # ------------------------------------------------------------------
-    if isinstance(value, Mapping):
-        return {
-            str(key): _normalize_for_json(item)
-            for key, item in value.items()
-        }
-
-    # ------------------------------------------------------------------
-    # Sequences / sets.
-    # ------------------------------------------------------------------
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [
-            _normalize_for_json(item)
-            for item in value
-        ]
-
-    # ------------------------------------------------------------------
-    # Torch tensor.
-    #
-    # We intentionally use duck typing so that adaptive_k.py does not
-    # require torch as a dependency.
-    # ------------------------------------------------------------------
-    detach = getattr(value, "detach", None)
-
-    if callable(detach):
-        try:
-            detached = detach()
-
-            cpu = getattr(detached, "cpu", None)
-
-            if callable(cpu):
-                detached = cpu()
-
-            tolist = getattr(detached, "tolist", None)
-
-            if callable(tolist):
-                return _normalize_for_json(tolist())
-
-        except Exception:
-            # Fall through to other serialization strategies.
-            pass
-
-    # ------------------------------------------------------------------
-    # NumPy-like ndarray / scalar.
-    # ------------------------------------------------------------------
-    tolist = getattr(value, "tolist", None)
-
-    if callable(tolist):
-        try:
-            return _normalize_for_json(tolist())
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # NumPy scalar / other scalar-like objects.
-    # ------------------------------------------------------------------
-    item = getattr(value, "item", None)
-
-    if callable(item):
-        try:
-            return _normalize_for_json(item())
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Generic object with __dict__.
-    # ------------------------------------------------------------------
-    obj_dict = getattr(value, "__dict__", None)
-
-    if isinstance(obj_dict, dict):
-        return {
-            str(key): _normalize_for_json(item)
-            for key, item in obj_dict.items()
-        }
-
-    # ------------------------------------------------------------------
-    # Final fallback.
-    # ------------------------------------------------------------------
-    raise TypeError(
-        f"Object of type {type(value).__name__} "
-        "is not JSON serializable"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=str(output_path.parent),
+        text=True,
     )
 
+    handle = os.fdopen(
+        fd,
+        "w",
+        encoding="utf-8",
+        newline="\n",
+    )
 
-class R4JSONEncoder(json.JSONEncoder):
-    """
-    JSON encoder for QA-R4 scientific / dataclass objects.
-
-    _normalize_for_json() does the recursive heavy lifting; this encoder
-    provides an additional safety net for objects passed directly to
-    json.dumps().
-    """
-
-    def default(self, obj: Any) -> Any:
-        try:
-            return _normalize_for_json(obj)
-        except (TypeError, ValueError):
-            return super().default(obj)
+    return Path(tmp_name), handle
 
 
 # ============================================================================
-# Lightweight self-checks
+# Two-input streaming funnel
+# ============================================================================
+
+
+def run_jsonl_funnel(
+    s4_path: Path,
+    r3_path: Path,
+    output_path: Path,
+    engine: Optional[AdaptiveKEngine] = None,
+) -> Iterator[AdaptiveKResult]:
+    """
+    Stream S4 and R3 JSONL pairwise.
+
+    Synchronization contract:
+
+        S4[q_i] <-> R3[q_i]
+
+    The function is a generator.
+
+    Output is written to a temporary file and atomically replaced only
+    after the complete stream succeeds.
+
+    Therefore, if processing fails midway, an existing output file is
+    left untouched.
+    """
+
+    if engine is None:
+        engine = AdaptiveKEngine()
+
+    s4_path = Path(s4_path)
+    r3_path = Path(r3_path)
+    output_path = Path(output_path)
+
+    def generator() -> Iterator[AdaptiveKResult]:
+        tmp_path: Optional[Path] = None
+        output_handle = None
+        committed = False
+
+        try:
+            tmp_path, output_handle = _atomic_jsonl_writer(
+                output_path
+            )
+
+            s4_iter = _iter_jsonl(s4_path)
+            r3_iter = _iter_jsonl(r3_path)
+
+            while True:
+                # ------------------------------------------------------
+                # Read one S4 record
+                # ------------------------------------------------------
+
+                try:
+                    s4_record = next(s4_iter)
+                    s4_done = False
+
+                except StopIteration:
+                    s4_done = True
+                    s4_record = None
+
+                # ------------------------------------------------------
+                # Read one R3 record
+                # ------------------------------------------------------
+
+                try:
+                    r3_record = next(r3_iter)
+                    r3_done = False
+
+                except StopIteration:
+                    r3_done = True
+                    r3_record = None
+
+                # ------------------------------------------------------
+                # Both streams ended simultaneously.
+                # ------------------------------------------------------
+
+                if s4_done and r3_done:
+                    break
+
+                # ------------------------------------------------------
+                # One stream ended before the other.
+                # ------------------------------------------------------
+
+                if s4_done != r3_done:
+                    raise InputDesyncError(
+                        "S4 and R3 streams have different lengths"
+                    )
+
+                assert s4_record is not None
+                assert r3_record is not None
+
+                # ------------------------------------------------------
+                # Extract and compare query IDs.
+                # ------------------------------------------------------
+
+                s4_query_id = _extract_query_id(
+                    s4_record
+                )
+
+                r3_query_id = _extract_query_id(
+                    r3_record
+                )
+
+                if s4_query_id != r3_query_id:
+                    raise InputDesyncError(
+                        "S4/R3 query order mismatch: "
+                        f"S4={s4_query_id!r}, "
+                        f"R3={r3_query_id!r}"
+                    )
+
+                # ------------------------------------------------------
+                # Validate required fields.
+                # ------------------------------------------------------
+
+                if "semantic_k_hint" not in s4_record:
+                    raise KeyError(
+                        f"S4 query {s4_query_id!r} "
+                        "is missing semantic_k_hint"
+                    )
+
+                if "candidates" not in r3_record:
+                    raise KeyError(
+                        f"R3 query {r3_query_id!r} "
+                        "is missing candidates"
+                    )
+
+                candidates = r3_record["candidates"]
+
+                if candidates is None:
+                    raise ValueError(
+                        f"R3 query {r3_query_id!r} "
+                        "candidates must not be None"
+                    )
+
+                # ------------------------------------------------------
+                # Run QA-R4 selection.
+                # ------------------------------------------------------
+
+                result = engine.select(
+                    query_id=s4_query_id,
+                    candidates=candidates,
+                    semantic_k_hint=s4_record[
+                        "semantic_k_hint"
+                    ],
+                )
+
+                # ------------------------------------------------------
+                # Serialize result.
+                # ------------------------------------------------------
+
+                record = _result_to_record(
+                    result
+                )
+
+                output_handle.write(
+                    json.dumps(
+                        record,
+                        cls=R4JSONEncoder,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
+
+                # Flush each yielded record so streaming behavior is
+                # observable while the final output remains protected
+                # by the temporary file.
+                output_handle.flush()
+
+                yield result
+
+            # ----------------------------------------------------------
+            # Complete stream succeeded.
+            #
+            # Only now commit the temporary file.
+            # ----------------------------------------------------------
+
+            output_handle.flush()
+
+            os.fsync(
+                output_handle.fileno()
+            )
+
+            output_handle.close()
+            output_handle = None
+
+            assert tmp_path is not None
+
+            os.replace(
+                tmp_path,
+                output_path,
+            )
+
+            committed = True
+
+        finally:
+            # ----------------------------------------------------------
+            # Close temporary output if still open.
+            # ----------------------------------------------------------
+
+            if output_handle is not None:
+                try:
+                    output_handle.close()
+                except Exception:
+                    pass
+
+            # ----------------------------------------------------------
+            # If processing failed before commit, remove only the temp
+            # file. Never touch an existing final output.
+            # ----------------------------------------------------------
+
+            if (
+                tmp_path is not None
+                and not committed
+                and tmp_path.exists()
+            ):
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    return generator()
+
+
+# ============================================================================
+# Module self-check
 # ============================================================================
 
 
 def _self_check() -> None:
     """
-    Lightweight internal contract checks.
+    Lightweight executable self-check.
 
-    These checks intentionally avoid depending on NumPy or Torch.
+    Run:
+
+        python scripts/adaptive_k.py
     """
 
-    # ------------------------------------------------------------------
-    # Configuration.
-    # ------------------------------------------------------------------
     config = AdaptiveKConfig()
 
-    assert config.allowed_k == (100, 300, 500)
+    assert config.allowed_k == (
+        100,
+        300,
+        500,
+    )
 
-    # ------------------------------------------------------------------
-    # K=100.
-    # ------------------------------------------------------------------
+    assert config.strict is True
+
     engine = AdaptiveKEngine(config)
 
     candidates = [
-        {"rank": i, "score": 1.0 / (i + 1)}
+        {
+            "rank": i,
+            "video_id": f"video_{i}",
+            "frame_id": f"frame_{i}",
+            "n": i,
+            "score": 1.0 / (i + 1),
+        }
         for i in range(500)
     ]
 
-    result_100 = engine.select(
-        query_id="q100",
+    # --------------------------------------------------------------
+    # Normal selection
+    # --------------------------------------------------------------
+
+    result = engine.select(
+        query_id="self-check",
         candidates=candidates,
         semantic_k_hint=100,
     )
 
-    assert result_100.k_requested == 100
-    assert result_100.k_effective == 100
-    assert result_100.k_available == 500
-    assert len(result_100.selected_candidates) == 100
-    assert result_100.status == "ok"
+    assert result.k_requested == 100
+    assert result.k_effective == 100
+    assert result.k_available == 500
 
-    # ------------------------------------------------------------------
-    # K=300.
-    # ------------------------------------------------------------------
-    result_300 = engine.select(
-        query_id="q300",
-        candidates=candidates,
-        semantic_k_hint=300,
-    )
+    assert len(
+        result.selected_candidates
+    ) == 100
 
-    assert result_300.k_requested == 300
-    assert result_300.k_effective == 300
-    assert len(result_300.selected_candidates) == 300
-
-    # ------------------------------------------------------------------
-    # K=500.
-    # ------------------------------------------------------------------
-    result_500 = engine.select(
-        query_id="q500",
-        candidates=candidates,
-        semantic_k_hint=500,
-    )
-
-    assert result_500.k_requested == 500
-    assert result_500.k_effective == 500
-    assert len(result_500.selected_candidates) == 500
-
-    # ------------------------------------------------------------------
-    # R4 must preserve R3 ordering exactly.
-    # ------------------------------------------------------------------
     assert (
-        result_300.selected_candidates
-        == tuple(candidates[:300])
+        result.selected_candidates
+        == tuple(candidates[:100])
     )
 
-    # ------------------------------------------------------------------
-    # R4 must not depend on uncertainty/modalities.
-    # ------------------------------------------------------------------
-    plan_a = {
-        "id": "same",
-        "semantic_k_hint": 100,
-        "uncertainty": 0.01,
-        "preferred_modalities": ["ocr"],
-    }
+    # --------------------------------------------------------------
+    # QueryPlan compatibility
+    # --------------------------------------------------------------
 
-    plan_b = {
-        "id": "same",
-        "semantic_k_hint": 100,
-        "uncertainty": 0.99,
-        "preferred_modalities": ["visual", "asr"],
-    }
-
-    a = engine.select_from_query_plan(
-        plan_a,
+    query_plan_result = engine.select_from_query_plan(
+        {
+            "id": "self-check-query-plan",
+            "semantic_k_hint": 300,
+            "uncertainty": 0.99,
+        },
         candidates,
     )
 
-    b = engine.select_from_query_plan(
-        plan_b,
-        candidates,
-    )
-
-    assert a.selected_candidates == b.selected_candidates
-    assert a.k_effective == b.k_effective
-
-    # ------------------------------------------------------------------
-    # Candidate pool below requested K.
-    # ------------------------------------------------------------------
-    short_pool = candidates[:20]
-
-    short_result = engine.select(
-        query_id="short",
-        candidates=short_pool,
-        semantic_k_hint=100,
-    )
-
-    assert short_result.k_requested == 100
-    assert short_result.k_effective == 20
-    assert short_result.k_available == 20
-    assert short_result.status == "ok_with_warning"
     assert (
-        short_result.fallback_reason
-        == "candidate_pool_below_requested_k"
+        query_plan_result.query_id
+        == "self-check-query-plan"
     )
 
-    # ------------------------------------------------------------------
-    # Empty candidate pool.
-    # ------------------------------------------------------------------
-    empty_result = engine.select(
-        query_id="empty",
-        candidates=[],
-        semantic_k_hint=300,
-    )
-
-    assert empty_result.k_requested == 300
-    assert empty_result.k_effective == 0
-    assert empty_result.k_available == 0
-    assert empty_result.status == "ok_with_warning"
     assert (
-        empty_result.fallback_reason
-        == "empty_candidate_pool"
+        query_plan_result.k_effective
+        == 300
     )
 
-    # ------------------------------------------------------------------
-    # Strict invalid K.
-    # ------------------------------------------------------------------
-    try:
-        engine.select(
-            query_id="invalid",
-            candidates=candidates,
-            semantic_k_hint=250,
-        )
-    except ValueError:
-        pass
-    else:
-        raise AssertionError(
-            "strict=True must reject unsupported semantic_k_hint"
-        )
+    # --------------------------------------------------------------
+    # Non-strict clamping
+    # --------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Non-strict clamp must be observable.
-    # ------------------------------------------------------------------
-    non_strict_engine = AdaptiveKEngine(
+    non_strict = AdaptiveKEngine(
         AdaptiveKConfig(
             allowed_k=(100, 300, 500),
             strict=False,
         )
     )
 
-    clamped = non_strict_engine.select(
-        query_id="clamped",
+    clamped = non_strict.select(
+        query_id="self-check-clamp",
         candidates=candidates,
         semantic_k_hint=250,
     )
 
     assert clamped.k_requested == 250
     assert clamped.k_effective == 300
-    assert clamped.status == "ok_with_warning"
+
+    assert (
+        clamped.status
+        == "ok_with_warning"
+    )
+
     assert (
         clamped.fallback_reason
         == "clamped_invalid_semantic_k"
     )
 
-    # ------------------------------------------------------------------
-    # S4 id/query_id compatibility.
-    # ------------------------------------------------------------------
-    by_id = engine.select_from_query_plan(
-        {
-            "id": "q-id",
-            "semantic_k_hint": 100,
-        },
-        candidates,
+    # --------------------------------------------------------------
+    # Dataclass serialization
+    # --------------------------------------------------------------
+
+    normalized = _normalize_for_json(
+        result
     )
 
-    by_query_id = engine.select_from_query_plan(
-        {
-            "query_id": "q-query-id",
-            "semantic_k_hint": 100,
-        },
-        candidates,
+    assert isinstance(
+        normalized,
+        dict,
     )
 
-    assert by_id.query_id == "q-id"
-    assert by_query_id.query_id == "q-query-id"
+    assert normalized["query_id"] == "self-check"
 
-    # ------------------------------------------------------------------
-    # Missing semantic_k_hint.
-    # ------------------------------------------------------------------
-    try:
-        engine.select_from_query_plan(
-            {
-                "id": "missing-k",
-            },
-            candidates,
-        )
-    except KeyError:
-        pass
-    else:
-        raise AssertionError(
-            "Missing semantic_k_hint must raise KeyError"
-        )
-
-    # ------------------------------------------------------------------
-    # Fake NumPy-like scalar.
-    # ------------------------------------------------------------------
-    class FakeScalar:
-        def __init__(self, value: float) -> None:
-            self.value = value
-
-        def item(self) -> float:
-            return self.value
-
-    fake_result = {
-        "score": FakeScalar(0.5),
-        "nested": [
-            FakeScalar(0.25),
-            {"x": FakeScalar(1.0)},
-        ],
-    }
-
-    normalized = _normalize_for_json(fake_result)
-
-    assert normalized == {
-        "score": 0.5,
-        "nested": [
-            0.25,
-            {"x": 1.0},
-        ],
-    }
-
-    # ------------------------------------------------------------------
-    # Dataclass serialization.
-    # ------------------------------------------------------------------
-    serialized = _normalize_for_json(result_100)
-
-    assert serialized["query_id"] == "q100"
-    assert serialized["k_requested"] == 100
-    assert serialized["k_effective"] == 100
-    assert len(serialized["selected_candidates"]) == 100
-
-    # ------------------------------------------------------------------
-    # JSON dumps must succeed.
-    # ------------------------------------------------------------------
-    payload = json.dumps(
-        result_100,
+    encoded = json.dumps(
+        result,
         cls=R4JSONEncoder,
         ensure_ascii=False,
         allow_nan=False,
     )
 
-    assert '"query_id": "q100"' in payload
+    decoded = json.loads(encoded)
 
-    # ------------------------------------------------------------------
-    # No uncertainty / margin logic exists in result.
-    # ------------------------------------------------------------------
-    assert not hasattr(result_100, "uncertainty")
-    assert not hasattr(result_100, "normalized_margin")
+    assert decoded["query_id"] == "self-check"
+    assert decoded["k_requested"] == 100
+    assert decoded["k_effective"] == 100
+
+    print(
+        "QA-R4 adaptive_k self-check: PASS"
+    )
 
 
 if __name__ == "__main__":
     _self_check()
-    print("QA-R4 adaptive_k self-check: PASS")

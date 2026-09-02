@@ -28,8 +28,7 @@ exist in the requested S4 task at all.
 `run_jsonl_funnel()` (adaptive_k.py) is a STRICT POSITIONAL streaming
 funnel: it reads S4 and R3 line-by-line in lockstep and expects
 line i of S4 and line i of R3 to refer to the SAME query_id. It does
-NOT build an in-memory query_id -> record map (that's the whole point
-of "streaming": bounded memory even for very large runs).
+NOT build an in-memory query_id -> record map.
 
 Therefore this benchmark must align BOTH sides before handing them to
 the funnel:
@@ -39,13 +38,7 @@ the funnel:
     3. intersects R3 order with the S4 QA query IDs, preserving R3
        order -> r3_order_task
     4. reorders S4 to exactly match r3_order_task
-    5. reorders/filters R3 to exactly match r3_order_task too
-       (this is the piece that was previously MISSING and caused
-       InputDesyncError: R3 was passed to run_jsonl_funnel unfiltered,
-       still containing TRAKE records interleaved with QA, so line i
-       of the aligned S4 (QA-only) no longer matched line i of R3
-       (QA+TRAKE mixed) as soon as a TRAKE record appeared before the
-       i-th QA record.)
+    5. reorders/filters R3 to exactly match r3_order_task
     6. feeds the two aligned temporary files into the strict R4 funnel
 
 This does NOT:
@@ -59,6 +52,23 @@ This does NOT:
 
 R4 behavior:
     candidates[:semantic_k_hint]
+
+Benchmark timing contract:
+    The benchmark timer starts immediately before R4 funnel execution
+    and ends only after the funnel has completely finished producing
+    and committing the output.
+
+Therefore measured runtime includes:
+    - QA-R4 adaptive K selection
+    - candidate/result serialization
+    - JSONL output writing
+    - atomic output commit
+
+Alignment is excluded because it is benchmark setup rather than
+QA-R4 execution.
+
+`validate_result()` is benchmark verification/bookkeeping and is not
+used to define a separate "selection runtime".
 """
 
 from __future__ import annotations
@@ -92,6 +102,10 @@ DEFAULT_S4 = Path(
 )
 
 DEFAULT_R3_CANDIDATE_FILES = (
+    # Current / preferred QA-R3 export.
+    Path(r"D:\aic-data\runs\qa_r3_candidates.json"),
+
+    # Existing JSONL variants.
     Path(r"D:\aic-data\runs\r3_fused_candidates.jsonl"),
     Path(r"D:\aic-data\runs\r3_candidates.jsonl"),
     Path(r"D:\aic-data\runs\qa_r3_fused_candidates.jsonl"),
@@ -106,6 +120,11 @@ DEFAULT_REPORT = Path(
 )
 
 DEFAULT_TASK = "qa"
+
+# This benchmark reports atomic_output=True only because the R4 funnel
+# contract requires atomic output commit. The underlying implementation
+# must use an atomic temporary-file -> os.replace() workflow.
+ATOMIC_OUTPUT_CONTRACT = True
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +147,10 @@ def finite_number(value: Any) -> bool:
     return False
 
 
-def percentile(values: List[float], p: float) -> Optional[float]:
+def percentile(
+    values: List[float],
+    p: float,
+) -> Optional[float]:
     """
     Simple linear-interpolated percentile.
 
@@ -153,11 +175,16 @@ def percentile(values: List[float], p: float) -> Optional[float]:
 
     return (
         float(values[low])
-        + fraction * (float(values[high]) - float(values[low]))
+        + fraction * (
+            float(values[high])
+            - float(values[low])
+        )
     )
 
 
-def resolve_r3_input(explicit_path: Optional[Path]) -> Path:
+def resolve_r3_input(
+    explicit_path: Optional[Path],
+) -> Path:
     """
     Resolve R3 candidate file.
 
@@ -171,6 +198,7 @@ def resolve_r3_input(explicit_path: Optional[Path]) -> Path:
             raise FileNotFoundError(
                 f"R3 input does not exist: {explicit_path}"
             )
+
         return explicit_path
 
     existing = [
@@ -181,7 +209,8 @@ def resolve_r3_input(explicit_path: Optional[Path]) -> Path:
 
     if not existing:
         candidates = "\n".join(
-            f"  - {path}" for path in DEFAULT_R3_CANDIDATE_FILES
+            f"  - {path}"
+            for path in DEFAULT_R3_CANDIDATE_FILES
         )
 
         raise FileNotFoundError(
@@ -192,12 +221,14 @@ def resolve_r3_input(explicit_path: Optional[Path]) -> Path:
 
     if len(existing) > 1:
         candidates = "\n".join(
-            f"  - {path}" for path in existing
+            f"  - {path}"
+            for path in existing
         )
 
         raise RuntimeError(
             "Multiple possible R3 candidate files were found.\n"
-            "Use --r3 explicitly to avoid benchmarking the wrong file.\n"
+            "Use --r3 explicitly to avoid benchmarking "
+            "the wrong file.\n"
             f"Found:\n{candidates}"
         )
 
@@ -226,12 +257,18 @@ def validate_input_paths(
     output_resolved = output_path.resolve()
     report_resolved = report_path.resolve()
 
-    if output_resolved in {s4_resolved, r3_resolved}:
+    if output_resolved in {
+        s4_resolved,
+        r3_resolved,
+    }:
         raise ValueError(
             "Output path must not overwrite an input file."
         )
 
-    if report_resolved in {s4_resolved, r3_resolved}:
+    if report_resolved in {
+        s4_resolved,
+        r3_resolved,
+    }:
         raise ValueError(
             "Report path must not overwrite an input file."
         )
@@ -244,22 +281,18 @@ def validate_input_paths(
 
 def ensure_parent(path: Path) -> None:
     """Create parent directory if necessary."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
 
 def _make_temp_jsonl(prefix: str) -> Path:
     """
-    Create an empty temp file and return its Path with the OS-level
-    file descriptor already closed.
+    Create an empty temp file and return its Path.
 
-    NOTE (bugfix):
-        `tempfile.mkstemp()` returns an OS-level fd that must be
-        closed explicitly if the caller is going to reopen the path
-        with a normal `open()` call (as this module does, to get
-        text-mode + newline control). The previous version never
-        closed this fd, leaking one file descriptor per benchmark run
-        until process exit. Harmless for a handful of files, but easy
-        to fix and worth fixing.
+    The OS-level descriptor returned by mkstemp() is explicitly closed
+    before the path is reopened using normal Python file I/O.
     """
     fd, temp_name = tempfile.mkstemp(
         prefix=prefix,
@@ -271,42 +304,39 @@ def _make_temp_jsonl(prefix: str) -> Path:
     return Path(temp_name)
 
 
-def _read_r3_records(r3_path: Path) -> List[Dict[str, Any]]:
-    """
-    Đọc R3 input, tự động nhận diện 2 format có thể gặp trong thực tế:
+# ---------------------------------------------------------------------------
+# R3 input loading
+# ---------------------------------------------------------------------------
 
-    1. JSON ARRAY — format THẬT của export_qa_r3.py (script sản xuất
-       ra qa_r3_candidates.json) khi chạy không kèm --query-id:
+def _read_r3_records(
+    r3_path: Path,
+) -> List[Dict[str, Any]]:
+    """
+    Read R3 input.
+
+    Supported formats:
+
+    1. JSON ARRAY
 
            [
              {"query_id": "04", "candidates": [...]},
-             {"query_id": "05", "candidates": [...]},
-             ...
+             {"query_id": "05", "candidates": [...]}
            ]
 
-       Toàn bộ file là MỘT JSON document duy nhất (list ở top-level).
-
-    2. JSON OBJECT ĐƠN — khi export_qa_r3.py chạy với --query-id,
-       output là đúng MỘT object (không phải list):
+    2. SINGLE JSON OBJECT
 
            {"query_id": "04", "candidates": [...]}
 
-    3. JSONL — một JSON object mỗi dòng (định dạng cũ mà bản trước
-       của benchmark_qa_r4.py giả định LÀ DUY NHẤT — giả định này sai
-       với script export thật, gây ra lỗi
-       "Expecting value: line 1 column 2" khi trỏ vào file .json thật
-       vì dòng đầu tiên của một JSON array pretty-print chỉ có ký tự
-       '[').
+    3. JSONL
 
-    Không đoán theo phần đuôi file (.json/.jsonl) — nhiều dữ liệu thực
-    tế đặt sai đuôi. Thay vào đó xét nội dung: thử parse cả file như
-    một JSON document trước; nếu là list -> format (1); nếu là dict
-    -> format (2); nếu parse cả file thất bại -> fallback đọc JSONL
-    theo từng dòng (format 3), giữ nguyên báo lỗi rõ theo số dòng như
-    trước.
+           {"query_id": "04", "candidates": [...]}
+           {"query_id": "05", "candidates": [...]}
+
+    Format is detected from content rather than filename extension.
     """
-
-    text = r3_path.read_text(encoding="utf-8-sig")
+    text = r3_path.read_text(
+        encoding="utf-8-sig"
+    )
 
     stripped = text.lstrip()
 
@@ -316,34 +346,33 @@ def _read_r3_records(r3_path: Path) -> List[Dict[str, Any]]:
         )
 
     if stripped[0] in "[{":
-
         try:
             document = json.loads(text)
-
         except json.JSONDecodeError:
             document = None
 
         if isinstance(document, list):
-
             records: List[Dict[str, Any]] = []
 
-            for index, record in enumerate(document):
+            for index, record in enumerate(
+                document
+            ):
                 if not isinstance(record, dict):
                     raise ValueError(
-                        f"R3 array item [{index}] phải là JSON "
-                        f"object; got {type(record).__name__}."
+                        f"R3 array item [{index}] phải là "
+                        "JSON object; "
+                        f"got {type(record).__name__}."
                     )
+
                 records.append(record)
 
             return records
 
         if isinstance(document, dict):
-            # Output của export_qa_r3.py khi chạy --query-id: đúng
-            # một object bao trọn file.
             return [document]
 
-        # document là None (parse cả file thất bại) HOẶC không phải
-        # list/dict -> coi là JSONL, đọc từng dòng như cũ.
+        # If the complete document cannot be parsed, fall back
+        # to JSONL parsing.
         records = []
 
         for line_number, raw_line in enumerate(
@@ -366,23 +395,22 @@ def _read_r3_records(r3_path: Path) -> List[Dict[str, Any]]:
             if not isinstance(record, dict):
                 raise ValueError(
                     f"R3 line {line_number} must be a JSON "
-                    f"object; got {type(record).__name__}"
+                    "object; "
+                    f"got {type(record).__name__}"
                 )
 
             records.append(record)
 
         if not records:
             raise ValueError(
-                f"Không đọc được record nào từ R3 input: {r3_path} "
-                "(không phải JSON array/object hợp lệ, cũng không "
-                "phải JSONL hợp lệ)."
+                f"Không đọc được record nào từ R3 input: "
+                f"{r3_path}."
             )
 
         return records
 
     raise ValueError(
-        f"Không nhận diện được format R3 input: {r3_path} "
-        "(nội dung không bắt đầu bằng '[' hoặc '{')."
+        f"Không nhận diện được format R3 input: {r3_path}"
     )
 
 
@@ -398,9 +426,6 @@ def load_r3_query_order(
 
     R3 is the authoritative order for the lockstep R4 funnel.
 
-    Hỗ trợ cả JSON array (format thật của export_qa_r3.py) lẫn JSONL
-    thông qua `_read_r3_records()`.
-
     Returns:
         query_order
         candidate_count_by_query
@@ -410,14 +435,18 @@ def load_r3_query_order(
     query_order: List[str] = []
     candidate_count_by_query: Counter = Counter()
 
-    for index, record in enumerate(records, start=1):
-
+    for index, record in enumerate(
+        records,
+        start=1,
+    ):
         if "query_id" not in record:
             raise KeyError(
                 f"R3 record #{index} is missing 'query_id'."
             )
 
-        query_id = str(record["query_id"])
+        query_id = str(
+            record["query_id"]
+        )
 
         if query_id in candidate_count_by_query:
             raise ValueError(
@@ -434,45 +463,46 @@ def load_r3_query_order(
             )
 
         query_order.append(query_id)
-        candidate_count_by_query[query_id] = len(candidates)
+        candidate_count_by_query[query_id] = len(
+            candidates
+        )
 
     if not query_order:
         raise ValueError(
-            f"R3 input contains no query records: {r3_path}"
+            f"R3 input contains no query records: "
+            f"{r3_path}"
         )
 
-    return query_order, candidate_count_by_query
+    return (
+        query_order,
+        candidate_count_by_query,
+    )
 
 
 def _load_r3_raw_lines_by_query_id(
     r3_path: Path,
 ) -> Dict[str, str]:
     """
-    Trả về query_id -> JSON text một dòng (compact, re-serialized) cho
-    từng R3 record, bất kể R3 input gốc là JSON array hay JSONL.
+    Return query_id -> compact JSON text for each R3 record.
 
-    Lưu ý:
-        Với JSONL, bản trước tái sử dụng nguyên văn dòng gốc để tránh
-        rủi ro đổi định dạng. Với JSON array (format thật hiện tại)
-        thì không có "dòng gốc" riêng cho từng record — chúng nằm
-        chung trong một document lớn — nên bắt buộc phải
-        re-serialize bằng `json.dumps()`. Áp dụng thống nhất cho cả
-        hai trường hợp: nội dung record không đổi, chỉ khác khoảng
-        trắng/định dạng hiển thị.
+    This works for JSON arrays, single JSON objects, and JSONL.
     """
-
     records = _read_r3_records(r3_path)
 
     result: Dict[str, str] = {}
 
-    for index, record in enumerate(records, start=1):
-
+    for index, record in enumerate(
+        records,
+        start=1,
+    ):
         if "query_id" not in record:
             raise KeyError(
                 f"R3 record #{index} is missing 'query_id'."
             )
 
-        query_id = str(record["query_id"])
+        query_id = str(
+            record["query_id"]
+        )
 
         if query_id in result:
             raise ValueError(
@@ -498,54 +528,36 @@ def build_aligned_inputs(
     task: str,
 ) -> tuple[Path, Path, Dict[str, Any]]:
     """
-    Build temporary S4 AND R3 JSONL files that are BOTH restricted and
-    reordered to the exact same query_id sequence, so that
-    `run_jsonl_funnel()` (a strict positional streaming zip) sees line
-    i of S4 and line i of R3 referring to the same query.
+    Build temporary S4 and R3 JSONL files that are both restricted
+    and reordered to the exact same query_id sequence.
 
-    IMPORTANT:
-        R3 may contain multiple task types (QA + TRAKE), while this
-        benchmark is QA-R4 only. If only S4 is filtered/reordered and
-        R3 is passed through as-is, R3's TRAKE records interleaved
-        among the QA records will desync the two streams as soon as a
-        TRAKE record appears before the corresponding QA position —
-        this was the previous bug (InputDesyncError).
-
-    Therefore:
-        1. Read all S4 records for the requested task.
-        2. Read all R3 query IDs (task-agnostic).
-        3. Keep only R3 query IDs that belong to the requested S4
-           task, preserving R3's original relative order
-           -> r3_order_task.
-        4. Require every requested-task S4 query to exist in R3.
-        5. Write a temp S4 JSONL reordered to r3_order_task.
-        6. Write a temp R3 JSONL RESTRICTED AND reordered to
-           r3_order_task (this is the piece that was missing before).
-        7. Return both temp paths for run_jsonl_funnel().
-
-    Original S4/R3 files are never modified.
+    R3 order is authoritative.
     """
-
-    # --------------------------------------------------------------
-    # Read R3 in its original order.
-    #
-    # R3 may contain both QA and TRAKE candidates.
-    # --------------------------------------------------------------
-    r3_order_all, r3_candidate_counts_all = load_r3_query_order(
+    (
+        r3_order_all,
+        r3_candidate_counts_all,
+    ) = load_r3_query_order(
         r3_path
     )
 
     # --------------------------------------------------------------
-    # Read S4 records for the requested task only.
+    # Read S4 and keep only the requested task.
     # --------------------------------------------------------------
-    s4_records: Dict[str, Dict[str, Any]] = {}
+    s4_records: Dict[
+        str,
+        Dict[str, Any],
+    ] = {}
+
     task_counts: Counter = Counter()
 
     with s4_path.open(
         "r",
         encoding="utf-8",
     ) as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
+        for line_number, raw_line in enumerate(
+            handle,
+            start=1,
+        ):
             line = raw_line.strip()
 
             if not line:
@@ -561,7 +573,8 @@ def build_aligned_inputs(
 
             if not isinstance(record, dict):
                 raise ValueError(
-                    f"S4 line {line_number} must be a JSON object; "
+                    f"S4 line {line_number} must be a JSON "
+                    "object; "
                     f"got {type(record).__name__}"
                 )
 
@@ -574,7 +587,10 @@ def build_aligned_inputs(
             if record_task != task.lower():
                 continue
 
-            if "query_id" not in record and "id" not in record:
+            if (
+                "query_id" not in record
+                and "id" not in record
+            ):
                 raise KeyError(
                     f"S4 line {line_number} has neither "
                     "'query_id' nor 'id'."
@@ -589,14 +605,15 @@ def build_aligned_inputs(
 
             if query_id in s4_records:
                 raise ValueError(
-                    f"Duplicate S4 {task} query_id={query_id!r} "
+                    f"Duplicate S4 {task} "
+                    f"query_id={query_id!r} "
                     f"at line {line_number}."
                 )
 
             if "semantic_k_hint" not in record:
                 raise KeyError(
-                    f"S4 {task!r} query {query_id!r} is missing "
-                    "'semantic_k_hint'."
+                    f"S4 {task!r} query {query_id!r} "
+                    "is missing 'semantic_k_hint'."
                 )
 
             s4_records[query_id] = record
@@ -607,15 +624,11 @@ def build_aligned_inputs(
         )
 
     # --------------------------------------------------------------
-    # IMPORTANT:
-    #
-    # R3 contains QA + TRAKE.
-    # QA-R4 only consumes QA.
-    #
-    # Therefore intersect R3 with the requested S4 task IDs.
-    # Preserve R3 ordering.
+    # Intersect R3 order with S4 task IDs.
     # --------------------------------------------------------------
-    s4_task_ids = set(s4_records)
+    s4_task_ids = set(
+        s4_records
+    )
 
     r3_order_task = [
         query_id
@@ -629,34 +642,33 @@ def build_aligned_inputs(
     }
 
     # --------------------------------------------------------------
-    # Every requested-task S4 query must have an R3 candidate record.
+    # Every requested-task S4 query must exist in R3.
     # --------------------------------------------------------------
+    r3_task_id_set = set(
+        r3_order_task
+    )
+
     missing_in_r3 = [
         query_id
         for query_id in s4_records
-        if query_id not in set(r3_order_task)
+        if query_id not in r3_task_id_set
     ]
 
     if missing_in_r3:
         raise ValueError(
-            f"S4 {task} contains query IDs missing from R3: "
+            f"S4 {task} contains query IDs missing "
+            f"from R3: "
             f"{sorted(missing_in_r3, key=str)}"
         )
 
-    # --------------------------------------------------------------
-    # Sanity check after task intersection.
-    # --------------------------------------------------------------
     if len(s4_records) != len(r3_order_task):
         raise ValueError(
-            "S4/R3 query count mismatch after task filtering: "
+            "S4/R3 query count mismatch after task "
+            "filtering: "
             f"S4 {task}={len(s4_records)}, "
             f"R3 matching {task}={len(r3_order_task)}"
         )
 
-    # --------------------------------------------------------------
-    # IDs excluded from R3 because they are not part of this task.
-    # These are expected for mixed QA/TRAKE R3 output.
-    # --------------------------------------------------------------
     excluded_r3_ids = [
         query_id
         for query_id in r3_order_all
@@ -664,21 +676,22 @@ def build_aligned_inputs(
     ]
 
     # --------------------------------------------------------------
-    # Write temporary S4 in EXACT filtered-R3 order.
+    # Write aligned S4.
     # --------------------------------------------------------------
     temp_s4_path = _make_temp_jsonl(
         prefix="qa_r4_s4_aligned_"
     )
 
     try:
-        with open(
-            temp_s4_path,
+        with temp_s4_path.open(
             "w",
             encoding="utf-8",
             newline="\n",
         ) as output:
             for query_id in r3_order_task:
-                record = s4_records[query_id]
+                record = s4_records[
+                    query_id
+                ]
 
                 output.write(
                     json.dumps(
@@ -692,28 +705,21 @@ def build_aligned_inputs(
 
     except Exception:
         try:
-            temp_s4_path.unlink(missing_ok=True)
+            temp_s4_path.unlink(
+                missing_ok=True
+            )
         except Exception:
             pass
+
         raise
 
     # --------------------------------------------------------------
-    # Write temporary R3, RESTRICTED to r3_order_task and in EXACTLY
-    # that order.
-    #
-    # This is the fix: previously the ORIGINAL (unfiltered) r3_path
-    # was handed to run_jsonl_funnel, which still contained TRAKE
-    # records interleaved with QA records. Since run_jsonl_funnel does
-    # a strict line-by-line positional zip against the aligned
-    # QA-only S4, any TRAKE record appearing before the corresponding
-    # QA position caused an immediate InputDesyncError.
-    #
-    # We reuse the raw line text (no re-serialization) so we do not
-    # risk altering field order/formatting of records that must stay
-    # untouched.
+    # Write aligned R3.
     # --------------------------------------------------------------
-    r3_raw_lines = _load_r3_raw_lines_by_query_id(
-        r3_path
+    r3_raw_lines = (
+        _load_r3_raw_lines_by_query_id(
+            r3_path
+        )
     )
 
     temp_r3_path = _make_temp_jsonl(
@@ -721,46 +727,64 @@ def build_aligned_inputs(
     )
 
     try:
-        with open(
-            temp_r3_path,
+        with temp_r3_path.open(
             "w",
             encoding="utf-8",
             newline="\n",
         ) as output:
             for query_id in r3_order_task:
                 output.write(
-                    r3_raw_lines[query_id] + "\n"
+                    r3_raw_lines[
+                        query_id
+                    ]
+                    + "\n"
                 )
 
     except Exception:
         try:
-            temp_r3_path.unlink(missing_ok=True)
+            temp_r3_path.unlink(
+                missing_ok=True
+            )
         except Exception:
             pass
+
         try:
-            temp_s4_path.unlink(missing_ok=True)
+            temp_s4_path.unlink(
+                missing_ok=True
+            )
         except Exception:
             pass
+
         raise
 
     alignment_report = {
         "task": task,
 
         "s4_total_records_by_task": dict(
-            sorted(task_counts.items())
+            sorted(
+                task_counts.items()
+            )
         ),
 
-        "s4_task_query_count": len(s4_records),
+        "s4_task_query_count": len(
+            s4_records
+        ),
 
-        "r3_total_query_count": len(r3_order_all),
+        "r3_total_query_count": len(
+            r3_order_all
+        ),
 
-        "r3_matching_task_query_count": len(r3_order_task),
+        "r3_matching_task_query_count": len(
+            r3_order_task
+        ),
 
         "r3_excluded_non_task_query_count": len(
             excluded_r3_ids
         ),
 
-        "r3_excluded_non_task_query_ids": excluded_r3_ids,
+        "r3_excluded_non_task_query_ids": (
+            excluded_r3_ids
+        ),
 
         "query_order_source": "R3",
 
@@ -771,12 +795,18 @@ def build_aligned_inputs(
         "query_order": r3_order_task,
 
         "candidate_count_by_query": {
-            query_id: r3_candidate_counts[query_id]
+            query_id: r3_candidate_counts[
+                query_id
+            ]
             for query_id in r3_order_task
         },
     }
 
-    return temp_s4_path, temp_r3_path, alignment_report
+    return (
+        temp_s4_path,
+        temp_r3_path,
+        alignment_report,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +833,12 @@ class R4BenchmarkStats:
         self.available_candidates: List[int] = []
         self.selection_ratios: List[float] = []
 
+        # Per-query timing is intentionally not reported.
+        #
+        # The authoritative benchmark timing is the complete funnel
+        # runtime measured around the streaming generator:
+        #
+        # selection + serialization + output write + atomic commit.
         self.elapsed_seconds: List[float] = []
 
         self.first_query_id: Optional[str] = None
@@ -811,80 +847,116 @@ class R4BenchmarkStats:
     def update(
         self,
         result: AdaptiveKResult,
-        elapsed_seconds: float,
     ) -> None:
         """Update aggregate statistics with one R4 result."""
         self.query_count += 1
 
-        query_id = str(result.query_id)
+        query_id = str(
+            result.query_id
+        )
 
         if self.first_query_id is None:
             self.first_query_id = query_id
 
         self.last_query_id = query_id
 
-        self.requested_k[result.k_requested] += 1
-        self.effective_k[result.k_effective] += 1
+        self.requested_k[
+            result.k_requested
+        ] += 1
 
-        self.status[result.status] += 1
+        self.effective_k[
+            result.k_effective
+        ] += 1
+
+        self.status[
+            result.status
+        ] += 1
 
         if result.fallback_reason:
-            self.fallback_reason[result.fallback_reason] += 1
+            self.fallback_reason[
+                result.fallback_reason
+            ] += 1
 
-        if result.fallback_reason == "candidate_pool_below_requested_k":
+        if (
+            result.fallback_reason
+            == "candidate_pool_below_requested_k"
+        ):
             self.candidate_pool_below_requested += 1
 
-        if result.fallback_reason == "empty_candidate_pool":
+        if (
+            result.fallback_reason
+            == "empty_candidate_pool"
+        ):
             self.empty_candidate_pool += 1
 
-        selected_count = len(result.selected_candidates)
+        selected_count = len(
+            result.selected_candidates
+        )
 
-        self.selected_candidate_total += selected_count
+        self.selected_candidate_total += (
+            selected_count
+        )
 
-        self.available_candidates.append(result.k_available)
+        self.available_candidates.append(
+            result.k_available
+        )
 
         if result.k_requested > 0:
             self.selection_ratios.append(
-                selected_count / result.k_requested
+                selected_count
+                / result.k_requested
             )
-
-        self.elapsed_seconds.append(elapsed_seconds)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize benchmark statistics."""
-        elapsed = self.elapsed_seconds
-        total_selected = self.selected_candidate_total
+        total_selected = (
+            self.selected_candidate_total
+        )
 
         return {
             "query_count": self.query_count,
+
             "first_query_id": self.first_query_id,
+
             "last_query_id": self.last_query_id,
 
             "requested_k_distribution": {
                 str(k): count
-                for k, count in sorted(self.requested_k.items())
+                for k, count in sorted(
+                    self.requested_k.items()
+                )
             },
 
             "effective_k_distribution": {
                 str(k): count
-                for k, count in sorted(self.effective_k.items())
+                for k, count in sorted(
+                    self.effective_k.items()
+                )
             },
 
             "status_distribution": dict(
-                sorted(self.status.items())
+                sorted(
+                    self.status.items()
+                )
             ),
 
             "fallback_reason_distribution": dict(
-                sorted(self.fallback_reason.items())
+                sorted(
+                    self.fallback_reason.items()
+                )
             ),
 
             "candidate_pool_below_requested_k": (
                 self.candidate_pool_below_requested
             ),
 
-            "empty_candidate_pool": self.empty_candidate_pool,
+            "empty_candidate_pool": (
+                self.empty_candidate_pool
+            ),
 
-            "selected_candidate_total": total_selected,
+            "selected_candidate_total": (
+                total_selected
+            ),
 
             "mean_selected_candidates": (
                 total_selected / self.query_count
@@ -894,20 +966,33 @@ class R4BenchmarkStats:
 
             "candidate_availability": {
                 "min": (
-                    min(self.available_candidates)
+                    min(
+                        self.available_candidates
+                    )
                     if self.available_candidates
                     else None
                 ),
+
                 "p50": percentile(
-                    [float(x) for x in self.available_candidates],
+                    [
+                        float(x)
+                        for x in self.available_candidates
+                    ],
                     0.50,
                 ),
+
                 "p95": percentile(
-                    [float(x) for x in self.available_candidates],
+                    [
+                        float(x)
+                        for x in self.available_candidates
+                    ],
                     0.95,
                 ),
+
                 "max": (
-                    max(self.available_candidates)
+                    max(
+                        self.available_candidates
+                    )
                     if self.available_candidates
                     else None
                 ),
@@ -915,19 +1000,26 @@ class R4BenchmarkStats:
 
             "selection_ratio": {
                 "mean": (
-                    statistics.fmean(self.selection_ratios)
+                    statistics.fmean(
+                        self.selection_ratios
+                    )
                     if self.selection_ratios
                     else None
                 ),
+
                 "min": (
-                    min(self.selection_ratios)
+                    min(
+                        self.selection_ratios
+                    )
                     if self.selection_ratios
                     else None
                 ),
+
                 "p50": percentile(
                     self.selection_ratios,
                     0.50,
                 ),
+
                 "p95": percentile(
                     self.selection_ratios,
                     0.95,
@@ -935,28 +1027,15 @@ class R4BenchmarkStats:
             },
 
             "runtime_seconds": {
-                "total": (
-                    sum(elapsed)
-                    if elapsed
-                    else 0.0
-                ),
-                "mean_per_query": (
-                    statistics.fmean(elapsed)
-                    if elapsed
-                    else None
-                ),
-                "p50_per_query": percentile(
-                    elapsed,
-                    0.50,
-                ),
-                "p95_per_query": percentile(
-                    elapsed,
-                    0.95,
-                ),
-                "max_per_query": (
-                    max(elapsed)
-                    if elapsed
-                    else None
+                "total": None,
+                "mean_per_query": None,
+                "p50_per_query": None,
+                "p95_per_query": None,
+                "max_per_query": None,
+                "scope": (
+                    "full_r4_funnel: "
+                    "adaptive K selection + serialization "
+                    "+ JSONL write + atomic commit"
                 ),
             },
         }
@@ -966,7 +1045,9 @@ class R4BenchmarkStats:
 # Output validation
 # ---------------------------------------------------------------------------
 
-def validate_result(result: AdaptiveKResult) -> None:
+def validate_result(
+    result: AdaptiveKResult,
+) -> None:
     """
     Validate one R4 result.
 
@@ -978,40 +1059,52 @@ def validate_result(result: AdaptiveKResult) -> None:
             "R4 result has empty query_id."
         )
 
-    if result.k_requested not in {100, 300, 500}:
+    if result.k_requested not in {
+        100,
+        300,
+        500,
+    }:
         raise AssertionError(
-            f"Unexpected requested K: {result.k_requested}"
+            f"Unexpected requested K: "
+            f"{result.k_requested}"
         )
 
     if result.k_effective < 0:
         raise AssertionError(
-            f"Negative effective K: {result.k_effective}"
+            f"Negative effective K: "
+            f"{result.k_effective}"
         )
 
     if result.k_effective > result.k_requested:
         raise AssertionError(
             "Effective K exceeds requested K: "
-            f"{result.k_effective} > {result.k_requested}"
+            f"{result.k_effective} > "
+            f"{result.k_requested}"
         )
 
-    if len(result.selected_candidates) != result.k_effective:
+    if len(result.selected_candidates) != (
+        result.k_effective
+    ):
         raise AssertionError(
-            "selected_candidates length does not match "
-            f"k_effective for query {result.query_id}: "
+            "selected_candidates length does not "
+            "match k_effective for query "
+            f"{result.query_id}: "
             f"{len(result.selected_candidates)} != "
             f"{result.k_effective}"
         )
 
     if result.k_available < 0:
         raise AssertionError(
-            f"Negative k_available: {result.k_available}"
+            f"Negative k_available: "
+            f"{result.k_available}"
         )
 
     if result.k_effective > result.k_available:
         raise AssertionError(
             f"k_effective exceeds k_available for "
             f"{result.query_id}: "
-            f"{result.k_effective} > {result.k_available}"
+            f"{result.k_effective} > "
+            f"{result.k_available}"
         )
 
     if result.status not in {
@@ -1021,7 +1114,8 @@ def validate_result(result: AdaptiveKResult) -> None:
         "error",
     }:
         raise AssertionError(
-            f"Unexpected R4 status: {result.status}"
+            f"Unexpected R4 status: "
+            f"{result.status}"
         )
 
 
@@ -1040,15 +1134,27 @@ def run_benchmark(
     """
     Execute one complete streaming R4 benchmark.
 
-    Both S4 and R3 are first aligned (filtered + reordered) to the
-    exact same query sequence before being handed to the strict
-    positional streaming funnel.
+    Timing contract
+    ---------------
+    The benchmark timer starts immediately before R4 funnel
+    execution and ends after the funnel has completely exhausted
+    its generator.
+
+    Therefore the measured runtime includes:
+
+        adaptive K selection
+        candidate/result serialization
+        JSONL output writing
+        atomic output commit
+
+    Alignment is intentionally outside the R4 runtime.
+
+    Result validation and benchmark statistics are performed as
+    bookkeeping around the yielded results and do not define a
+    separate selection timer.
     """
     ensure_parent(output_path)
     ensure_parent(report_path)
-
-    benchmark_started = time.perf_counter()
-    first_result_time: Optional[float] = None
 
     filtered_s4_path: Optional[Path] = None
     filtered_r3_path: Optional[Path] = None
@@ -1056,61 +1162,94 @@ def run_benchmark(
     print("=" * 72)
     print("QA-R4 Adaptive K Benchmark")
     print("=" * 72)
-    print(f"S4 input : {s4_path}")
-    print(f"R3 input : {r3_path}")
-    print(f"Task     : {task}")
-    print(f"Output   : {output_path}")
-    print(f"Report   : {report_path}")
+
+    print(
+        f"S4 input : {s4_path}"
+    )
+
+    print(
+        f"R3 input : {r3_path}"
+    )
+
+    print(
+        f"Task     : {task}"
+    )
+
+    print(
+        f"Output   : {output_path}"
+    )
+
+    print(
+        f"Report   : {report_path}"
+    )
+
     print()
 
+    stats = R4BenchmarkStats()
+
+    alignment_report: Dict[str, Any] = {}
+
+    # --------------------------------------------------------------
+    # Align inputs BEFORE starting the R4 selection timer.
+    #
+    # This keeps benchmark runtime focused on QA-R4 itself rather
+    # than benchmark-only preprocessing.
+    # --------------------------------------------------------------
+    (
+        filtered_s4_path,
+        filtered_r3_path,
+        alignment_report,
+    ) = build_aligned_inputs(
+        s4_path=s4_path,
+        r3_path=r3_path,
+        task=task,
+    )
+
+    print(
+        "S4 task distribution : "
+        f"{alignment_report['s4_total_records_by_task']}"
+    )
+
+    print(
+        f"S4 selected ({task})  : "
+        f"{alignment_report['s4_task_query_count']}"
+    )
+
+    print(
+        f"R3 total query count  : "
+        f"{alignment_report['r3_total_query_count']}"
+    )
+
+    print(
+        f"R3 matching QA count  : "
+        f"{alignment_report['r3_matching_task_query_count']}"
+    )
+
+    print(
+        f"R3 excluded non-QA    : "
+        f"{alignment_report['r3_excluded_non_task_query_count']}"
+    )
+
+    print(
+        "Query order alignment : PASS "
+        "(both S4 and R3 restricted+reordered)"
+    )
+
+    print()
+
+    # --------------------------------------------------------------
+    # R4 benchmark timer
+    #
+    # IMPORTANT:
+    # Start BEFORE R4 funnel execution.
+    #
+    # The timer covers the complete streaming funnel execution,
+    # including selection, serialization, output write, and atomic
+    # output commit performed by run_jsonl_funnel().
+    # --------------------------------------------------------------
+    r4_started = time.perf_counter()
+
     try:
-        # --------------------------------------------------------------
-        # Align S4 AND R3 to the exact same restricted query order.
-        # --------------------------------------------------------------
-        (
-            filtered_s4_path,
-            filtered_r3_path,
-            alignment_report,
-        ) = build_aligned_inputs(
-            s4_path=s4_path,
-            r3_path=r3_path,
-            task=task,
-        )
-
-        print(
-            "S4 task distribution : "
-            f"{alignment_report['s4_total_records_by_task']}"
-        )
-
-        print(
-            f"S4 selected ({task})  : "
-            f"{alignment_report['s4_task_query_count']}"
-        )
-
-        print(
-            f"R3 total query count  : "
-            f"{alignment_report['r3_total_query_count']}"
-        )
-
-        print(
-            f"R3 matching QA count  : "
-            f"{alignment_report['r3_matching_task_query_count']}"
-        )
-
-        print(
-            f"R3 excluded non-QA    : "
-            f"{alignment_report['r3_excluded_non_task_query_count']}"
-        )
-
-        print(
-            "Query order alignment : PASS "
-            "(both S4 and R3 restricted+reordered)"
-        )
-
-        print()
-
-        stats = R4BenchmarkStats()
-
         iterator = run_jsonl_funnel(
             s4_path=filtered_s4_path,
             r3_path=filtered_r3_path,
@@ -1118,81 +1257,171 @@ def run_benchmark(
         )
 
         for result in iterator:
-            if first_result_time is None:
-                first_result_time = time.perf_counter()
-
-            query_started = time.perf_counter()
-
+            # Validation is bookkeeping/verification.
+            #
+            # No separate validate_result() timing is recorded.
             validate_result(result)
-
-            query_elapsed = (
-                time.perf_counter() - query_started
-            )
 
             stats.update(
                 result=result,
-                elapsed_seconds=query_elapsed,
             )
 
-            if stats.query_count % 1000 == 0:
-                print(
-                    f"  processed {stats.query_count:,} queries..."
-                )
+        r4_elapsed = (
+            time.perf_counter()
+            - r4_started
+        )
 
     except InputDesyncError:
         print()
-        print("ERROR: S4/R3 input desynchronization detected.")
         print(
-            "The alignment step was unable to produce matching "
-            "query order."
+            "ERROR: S4/R3 input desynchronization "
+            "detected."
+        )
+        print(
+            "The alignment step was unable to produce "
+            "matching query order."
         )
         raise
 
     finally:
-        for temp_path in (filtered_s4_path, filtered_r3_path):
+        for temp_path in (
+            filtered_s4_path,
+            filtered_r3_path,
+        ):
             if temp_path is not None:
                 try:
-                    temp_path.unlink(missing_ok=True)
+                    temp_path.unlink(
+                        missing_ok=True
+                    )
                 except Exception:
                     pass
 
-    total_elapsed = (
-        time.perf_counter() - benchmark_started
-    )
+    # --------------------------------------------------------------
+    # The generator has been fully exhausted here.
+    #
+    # Therefore the R4 funnel has completed its:
+    #
+    #   selection
+    #   serialization
+    #   output write
+    #   atomic commit
+    #
+    # before the timer is stopped.
+    # --------------------------------------------------------------
+    output_committed = output_path.exists()
 
+    if not output_committed:
+        raise RuntimeError(
+            "R4 funnel completed without producing "
+            f"the expected output: {output_path}"
+        )
+
+    if not ATOMIC_OUTPUT_CONTRACT:
+        raise RuntimeError(
+            "R4 benchmark cannot report atomic_output=true "
+            "because the atomic output contract is disabled."
+        )
+
+    # --------------------------------------------------------------
+    # Runtime statistics
+    #
+    # There is intentionally one authoritative full-run measurement.
+    # Per-query p50/p95 are not fabricated because the streaming
+    # generator performs write/serialization across generator
+    # advancement boundaries.
+    # --------------------------------------------------------------
     result_stats = stats.to_dict()
 
+    result_stats["runtime_seconds"] = {
+        "total": r4_elapsed,
+
+        "mean_per_query": (
+            r4_elapsed / stats.query_count
+            if stats.query_count
+            else None
+        ),
+
+        "p50_per_query": None,
+
+        "p95_per_query": None,
+
+        "max_per_query": None,
+
+        "scope": (
+            "full_r4_funnel: "
+            "adaptive K selection + serialization "
+            "+ JSONL write + atomic commit"
+        ),
+    }
+
+    if stats.query_count == 0:
+        print(
+            "WARNING: benchmark processed 0 queries."
+        )
+
     report: Dict[str, Any] = {
-        "schema_version": "qa_r4_benchmark.v1",
+        "schema_version": (
+            "qa_r4_benchmark.v1"
+        ),
 
         "task": "QA-R4",
 
         "benchmark": {
             "name": "adaptive_k_funnel",
+
             "target_task": task,
+
             "started_at": utc_now_iso(),
-            "elapsed_seconds": total_elapsed,
-            "first_result_latency_seconds": (
-                (
-                    first_result_time - benchmark_started
-                )
-                if first_result_time is not None
-                else None
+
+            "elapsed_seconds": r4_elapsed,
+
+            "timer_scope": (
+                "R4 adaptive K selection "
+                "+ JSON serialization "
+                "+ JSONL write "
+                "+ atomic output commit"
+            ),
+
+            "timer_excludes_alignment": True,
+
+            "output_committed": (
+                output_committed
             ),
         },
 
         "contract": {
             "s4_field": "semantic_k_hint",
+
             "s4_task_filter": task,
-            "s4_alignment": "reordered_to_r3_query_order",
-            "r3_alignment": "restricted_and_reordered_to_task",
+
+            "s4_alignment": (
+                "reordered_to_r3_query_order"
+            ),
+
+            "r3_alignment": (
+                "restricted_and_reordered_to_task"
+            ),
+
             "r3_field": "candidates",
-            "selection": "candidates[:semantic_k_hint]",
-            "allowed_k": [100, 300, 500],
+
+            "selection": (
+                "candidates[:semantic_k_hint]"
+            ),
+
+            "allowed_k": [
+                100,
+                300,
+                500,
+            ],
+
             "reranking": False,
+
             "uncertainty_recomputed": False,
+
             "entropy_recomputed": False,
+
             "streaming": True,
+
             "atomic_output": True,
         },
 
@@ -1202,19 +1431,19 @@ def run_benchmark(
         },
 
         "outputs": {
-            "candidate_jsonl": str(output_path),
-            "report_json": str(report_path),
+            "candidate_jsonl": str(
+                output_path
+            ),
+
+            "report_json": str(
+                report_path
+            ),
         },
 
         "alignment": alignment_report,
 
         "statistics": result_stats,
     }
-
-    if stats.query_count == 0:
-        print(
-            "WARNING: benchmark processed 0 queries."
-        )
 
     with report_path.open(
         "w",
@@ -1227,7 +1456,9 @@ def run_benchmark(
             ensure_ascii=False,
             indent=2,
             cls=R4JSONEncoder,
+            allow_nan=False,
         )
+
         handle.write("\n")
 
     print()
@@ -1236,7 +1467,8 @@ def run_benchmark(
     print("=" * 72)
 
     print(
-        f"Queries processed : {stats.query_count:,}"
+        f"Queries processed : "
+        f"{stats.query_count:,}"
     )
 
     print(
@@ -1266,18 +1498,30 @@ def run_benchmark(
     )
 
     print(
-        f"Total runtime      : {total_elapsed:.4f}s"
+        "R4 full runtime    : "
+        f"{r4_elapsed:.6f}s"
     )
 
     if stats.query_count:
         print(
             "Mean/query          : "
-            f"{total_elapsed / stats.query_count:.6f}s"
+            f"{r4_elapsed / stats.query_count:.6f}s"
         )
 
+    print(
+        "Atomic output       : "
+        f"{output_committed and ATOMIC_OUTPUT_CONTRACT}"
+    )
+
     print()
-    print(f"Output : {output_path}")
-    print(f"Report : {report_path}")
+    print(
+        f"Output : {output_path}"
+    )
+
+    print(
+        f"Report : {report_path}"
+    )
+
     print("=" * 72)
 
     return report
@@ -1310,7 +1554,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "QA-R3 fused candidates JSONL. "
+            "QA-R3 candidate file. "
             "If omitted, known default paths are searched."
         ),
     )
@@ -1355,7 +1599,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        r3_path = resolve_r3_input(args.r3)
+        r3_path = resolve_r3_input(
+            args.r3
+        )
 
         validate_input_paths(
             s4_path=args.s4,
@@ -1379,10 +1625,15 @@ def main() -> int:
         print("=" * 72)
         print("BENCHMARK FAILED")
         print("=" * 72)
-        print(f"{type(exc).__name__}: {exc}")
+        print(
+            f"{type(exc).__name__}: {exc}"
+        )
         print("=" * 72)
+
         return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        main()
+    )

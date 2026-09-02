@@ -1,8 +1,19 @@
 """INT-01 — review một vertical slice Q&A qua ba contract độc lập.
 
+==============================================================================
+[CHỐT POLICY: SEMANTIC_K_HINT VÀ READER_K]
+1. semantic_k_hint (100-500): Là Retrieval-K. Chỉ dùng làm gợi ý ngân sách 
+   ứng viên cho khâu tìm kiếm (Retrieval).
+2. Tuyệt đối KHÔNG dùng semantic_k_hint trực tiếp làm Reader-K. 
+   Không gửi trực tiếp 100-500 frame vào VLM để tránh quá tải/timeout.
+3. Nếu khâu QA-R4 cần truyền danh sách rút gọn cho Reader (QA-V2), phải tạo 
+   field/policy riêng (ví dụ `reader_k = 1` hoặc `reader_k = 5`). Khâu Retrieval 
+   có trách nhiệm rerank và cắt ngọn danh sách xuống đúng bằng reader_k.
+==============================================================================
+
 Luồng được kiểm:
 
-    QA-S1 QueryPlan -> QA-R1 reader candidates -> QA-V2 reader
+    QA-S1 QueryPlan -> QA-R4/QA-R1 reader candidates -> QA-V2 reader
 
 INT-01 là task kiến trúc/nghiệm thu. Script này không sửa thuật toán của các
 owner. Mọi chênh lệch contract được ghi thành issue có ``owner`` rõ ràng trong
@@ -411,9 +422,10 @@ def audit_qa_r1_handoff(
 
 
 def reader_candidates(record: Mapping[str, Any]) -> list[dict[str, Any]]:
-    candidates = record.get("reader_candidates")
+    # [ADAPTER QA-R4]: Đọc đúng field "candidates" mới, dự phòng "reader_candidates" của R1
+    candidates = record.get("candidates") or record.get("reader_candidates")
     if not isinstance(candidates, list):
-        raise ValueError("QA-R1 query_record thiếu list reader_candidates")
+        raise ValueError("QA-R4/R1 query_record thiếu list candidates (hoặc reader_candidates)")
     return [dict(item) for item in candidates if isinstance(item, dict)]
 
 
@@ -424,11 +436,15 @@ def choose_candidate_image(
     for candidate in candidates:
         video_id = str(candidate.get("video_id", ""))
         n = candidate.get("n")
+        
+        # [ADAPTER QA-R4]: Dùng đúng video_id + n để resolve ảnh
         if not video_id or not isinstance(n, int) or isinstance(n, bool):
             continue
+            
         image_path = Path(image_resolver(video_id, n))
         if image_path.is_file():
             return dict(candidate), image_path
+            
     return None, None
 
 
