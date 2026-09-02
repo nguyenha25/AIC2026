@@ -2734,14 +2734,6 @@ class MultiModalFusionEngine:
         self,
         candidate_ids: Sequence[str],
         fused_scores: Mapping[str, float],
-        sage_map: Mapping[
-            str,
-            Tuple[
-                float,
-                float,
-                CoverageBreakdown,
-            ],
-        ],
         metadata_map: Mapping[str, CandidateMetadata],
         query: SemanticQuery,
         top_k: int,
@@ -3411,18 +3403,30 @@ class MultiModalFusionEngine:
             packed_masks,
         ) = precomputed
 
-        sage_map: Dict[
-            str,
-            Tuple[
-                float,
-                float,
-                CoverageBreakdown,
-            ],
-        ] = {}
+        selected_ids = self._select_greedy(
+            candidate_ids=candidate_ids,
+            fused_scores=fused_scores,
+            metadata_map=metadata_map,
+            query=query,
+            top_k=top_k,
+            precomputed=precomputed,
+        )
 
-        for idx, cid in enumerate(
-            candidate_ids
+        results: List[
+            FusedCandidate
+        ] = []
+
+        candidate_index = {
+            cid: idx
+            for idx, cid in enumerate(candidate_ids)
+        }
+
+        for rank, cid in enumerate(
+            selected_ids,
+            start=1,
         ):
+
+            idx = candidate_index[cid]
 
             breakdown = self._make_coverage_breakdown(
                 matched_entity=int(
@@ -3440,34 +3444,8 @@ class MultiModalFusionEngine:
                 query=query,
             )
 
-            sage_map[cid] = (
-                float(sage[idx]),
-                float(coverage[idx]),
-                breakdown,
-            )
-
-        selected_ids = self._select_greedy(
-            candidate_ids=candidate_ids,
-            fused_scores=fused_scores,
-            sage_map=sage_map,
-            metadata_map=metadata_map,
-            query=query,
-            top_k=top_k,
-            precomputed=precomputed,
-        )
-
-        results: List[
-            FusedCandidate
-        ] = []
-
-        for rank, cid in enumerate(
-            selected_ids,
-            start=1,
-        ):
-
-            sage_score, coverage_score, breakdown = (
-                sage_map[cid]
-            )
+            sage_score = float(sage[idx])
+            coverage_score = float(coverage[idx])
 
             meta = metadata_map.get(cid)
 
@@ -3477,12 +3455,7 @@ class MultiModalFusionEngine:
                 else "unknown"
             )
 
-            normalized_fused = _normalize_score(
-                fused_scores.get(
-                    cid,
-                    0.0,
-                )
-            )
+            normalized_fused = float(fused[idx])
 
             results.append(
                 FusedCandidate(
