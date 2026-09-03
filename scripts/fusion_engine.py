@@ -283,16 +283,21 @@ class FusedCandidate:
     """
     Output của R3 selection.
 
-    fused_score là fused relevance đã được normalize về [0, 1],
-    nhất quán với scoring nội bộ của selector.
+    fused_score là fused relevance đã được normalize về [0, 1].
+
+    selection_score là gain thực tại vòng Greedy/MMR mà candidate
+    được chọn. Đây là score chuyển tiếp sang QA-R4 vì nó phản ánh đúng
+    semantic coverage và diversity của R3.
     """
 
     candidate_id: str
     video_id: str
+    frame_id: int
 
     fused_score: float
     coverage_score: float
     sage_score: float
+    selection_score: float
 
     selected_rank: int
 
@@ -2756,7 +2761,7 @@ class MultiModalFusionEngine:
                 np.ndarray,
             ]
         ] = None,
-    ) -> List[str]:
+    ) -> List[Tuple[str, float]]:
         """
         Greedy semantic coverage + diversity.
 
@@ -2861,7 +2866,7 @@ class MultiModalFusionEngine:
             + len(query.relations)
         )
 
-        selected: List[str] = []
+        selected: List[Tuple[str, float]] = []
 
         # list() once outside the hot loop.
         candidate_id_array = list(
@@ -2999,7 +3004,10 @@ class MultiModalFusionEngine:
             ]
 
             selected.append(
-                best_cid
+                (
+                    best_cid,
+                    float(gain[best_idx]),
+                )
             )
 
             active[best_idx] = False
@@ -3040,7 +3048,7 @@ class MultiModalFusionEngine:
         sage: np.ndarray,
         metadata_map: Mapping[str, CandidateMetadata],
         top_k: int,
-    ) -> List[str]:
+    ) -> List[Tuple[str, float]]:
         """
         Optimized MMR selector.
 
@@ -3099,7 +3107,7 @@ class MultiModalFusionEngine:
             dtype=np.float32,
         )
 
-        selected: List[str] = []
+        selected: List[Tuple[str, float]] = []
 
         candidate_id_array = list(
             candidate_ids
@@ -3173,7 +3181,10 @@ class MultiModalFusionEngine:
             ]
 
             selected.append(
-                best_cid
+                (
+                    best_cid,
+                    float(mmr[best_idx]),
+                )
             )
 
             active[best_idx] = False
@@ -3273,7 +3284,7 @@ class MultiModalFusionEngine:
                 sage_eta=self.sage_eta,
             )
 
-            selected_ids = self._select_mmr(
+            selected_items = self._select_mmr(
                 candidate_ids=candidate_ids,
                 sage=sage,
                 metadata_map=metadata_map,
@@ -3294,8 +3305,13 @@ class MultiModalFusionEngine:
                 FusedCandidate
             ] = []
 
-            for rank, cid in enumerate(
-                selected_ids,
+            candidate_index = {
+                cid: idx
+                for idx, cid in enumerate(candidate_ids)
+            }
+
+            for rank, (cid, selection_score) in enumerate(
+                selected_items,
                 start=1,
             ):
 
@@ -3305,6 +3321,12 @@ class MultiModalFusionEngine:
                     meta.video_id
                     if meta is not None
                     else "unknown"
+                )
+
+                frame_id = (
+                    int(meta.frame_index)
+                    if meta is not None
+                    else -1
                 )
 
                 if meta is None:
@@ -3344,6 +3366,7 @@ class MultiModalFusionEngine:
                     FusedCandidate(
                         candidate_id=cid,
                         video_id=video_id,
+                        frame_id=frame_id,
                         fused_score=float(
                             normalized_fused
                         ),
@@ -3352,8 +3375,11 @@ class MultiModalFusionEngine:
                         ),
                         sage_score=float(
                             sage[
-                                candidate_ids.index(cid)
+                                candidate_index[cid]
                             ]
+                        ),
+                        selection_score=float(
+                            selection_score
                         ),
                         selected_rank=rank,
                         coverage_breakdown=breakdown,
@@ -3403,7 +3429,7 @@ class MultiModalFusionEngine:
             packed_masks,
         ) = precomputed
 
-        selected_ids = self._select_greedy(
+        selected_items = self._select_greedy(
             candidate_ids=candidate_ids,
             fused_scores=fused_scores,
             metadata_map=metadata_map,
@@ -3421,8 +3447,8 @@ class MultiModalFusionEngine:
             for idx, cid in enumerate(candidate_ids)
         }
 
-        for rank, cid in enumerate(
-            selected_ids,
+        for rank, (cid, selection_score) in enumerate(
+            selected_items,
             start=1,
         ):
 
@@ -3455,12 +3481,19 @@ class MultiModalFusionEngine:
                 else "unknown"
             )
 
+            frame_id = (
+                int(meta.frame_index)
+                if meta is not None
+                else -1
+            )
+
             normalized_fused = float(fused[idx])
 
             results.append(
                 FusedCandidate(
                     candidate_id=cid,
                     video_id=video_id,
+                    frame_id=frame_id,
                     fused_score=float(
                         normalized_fused
                     ),
@@ -3470,12 +3503,58 @@ class MultiModalFusionEngine:
                     sage_score=float(
                         sage_score
                     ),
+                    selection_score=float(
+                        selection_score
+                    ),
                     selected_rank=rank,
                     coverage_breakdown=breakdown,
                 )
             )
 
         return results
+
+    # ----------------------------------------------------------------------
+    # QA-R4 HANDOFF
+    # ----------------------------------------------------------------------
+
+    def select_for_r4(
+        self,
+        query_id: str,
+        fused_scores: Mapping[str, float],
+        metadata_map: Mapping[str, CandidateMetadata],
+        query: SemanticQuery,
+        *,
+        top_k: int = 50,
+        selection_method: SelectionMethod = SelectionMethod.GREEDY,
+    ) -> Dict[str, object]:
+        """
+        Chạy R3 và đóng gói trực tiếp contract đầu vào cho QA-R4.
+
+        Output:
+            {
+                "query_id": "...",
+                "candidates": [
+                    {
+                        "video_id": "...",
+                        "frame_id": 123,
+                        "score": 0.91,
+                    }
+                ],
+            }
+        """
+
+        selected = self.select_top_k(
+            fused_scores=fused_scores,
+            metadata_map=metadata_map,
+            query=query,
+            top_k=top_k,
+            selection_method=selection_method,
+        )
+
+        return build_r4_payload(
+            query_id=query_id,
+            candidates=selected,
+        )
 
     # ----------------------------------------------------------------------
     # BACKWARD COMPATIBILITY
@@ -3563,6 +3642,97 @@ class MultiModalFusionEngine:
             top_k=top_k,
             selection_method=selection_method,
         )
+
+
+# ============================================================================
+# QA-R4 OUTPUT CONTRACT
+# ============================================================================
+
+
+def build_r4_payload(
+    query_id: str,
+    candidates: Sequence[FusedCandidate],
+) -> Dict[str, object]:
+    """
+    Serialize kết quả R3 thành input tối thiểu của QA-R4.
+
+    `score` là selection_score thực của Greedy/MMR. Danh sách luôn được
+    chuẩn hóa theo selected_rank để R4 nhận đúng thứ tự selection của R3.
+
+    Candidate thiếu metadata bị reject rõ ràng thay vì phát sinh
+    video_id="unknown" hoặc frame_id=-1 trong payload production.
+    """
+
+    normalized_query_id = str(query_id).strip()
+
+    if not normalized_query_id:
+        raise ValueError(
+            "query_id không được rỗng khi xuất payload cho QA-R4."
+        )
+
+    ordered = sorted(
+        candidates,
+        key=lambda item: item.selected_rank,
+    )
+
+    expected_ranks = list(
+        range(1, len(ordered) + 1)
+    )
+    actual_ranks = [
+        int(item.selected_rank)
+        for item in ordered
+    ]
+
+    if actual_ranks != expected_ranks:
+        raise ValueError(
+            "selected_rank phải liên tiếp từ 1 khi xuất payload QA-R4."
+        )
+
+    seen_candidate_ids: Set[str] = set()
+    payload_candidates: List[Dict[str, object]] = []
+
+    for item in ordered:
+        if item.candidate_id in seen_candidate_ids:
+            raise ValueError(
+                "R3 chứa candidate_id trùng khi xuất payload QA-R4: "
+                f"{item.candidate_id}"
+            )
+
+        seen_candidate_ids.add(item.candidate_id)
+
+        video_id = str(item.video_id).strip()
+        frame_id = int(item.frame_id)
+        score = float(item.selection_score)
+
+        if (
+            not video_id
+            or video_id == "unknown"
+            or frame_id < 0
+        ):
+            raise ValueError(
+                "Candidate thiếu metadata video_id/frame_id "
+                "hợp lệ cho QA-R4: "
+                f"{item.candidate_id}"
+            )
+
+        if not np.isfinite(score):
+            raise ValueError(
+                "Candidate có selection_score không hữu hạn cho QA-R4: "
+                f"{item.candidate_id}"
+            )
+
+        payload_candidates.append(
+            {
+                "video_id": video_id,
+                "frame_id": frame_id,
+                "score": score,
+            }
+        )
+
+    return {
+        "query_id": normalized_query_id,
+        "candidates": payload_candidates,
+    }
 
 
 # ============================================================================

@@ -17,6 +17,8 @@ Khóa contract cho:
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -25,6 +27,7 @@ from scripts.fusion_engine import (
     MultiModalFusionEngine,
     SelectionMethod,
     SemanticQuery,
+    build_r4_payload,
     compute_marginal_semantic_coverage,
     compute_semantic_coverage,
     semantic_similarity,
@@ -887,11 +890,137 @@ def test_scores_are_finite(
         assert np.isfinite(item.fused_score)
         assert np.isfinite(item.coverage_score)
         assert np.isfinite(item.sage_score)
+        assert np.isfinite(item.selection_score)
         assert 0.0 <= item.coverage_score <= 1.0
 
 
 # ============================================================================
-# 11. BACKWARD COMPATIBILITY
+# 11. QA-R4 HANDOFF CONTRACT
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "method",
+    [SelectionMethod.GREEDY, SelectionMethod.MMR],
+)
+def test_output_contains_frame_and_selection_score(
+    engine: MultiModalFusionEngine,
+    query: SemanticQuery,
+    metadata: dict[str, CandidateMetadata],
+    fused_scores: dict[str, float],
+    method: SelectionMethod,
+) -> None:
+    result = engine.select_top_k(
+        fused_scores=fused_scores,
+        metadata_map=metadata,
+        query=query,
+        top_k=3,
+        selection_method=method,
+    )
+
+    assert result
+
+    for item in result:
+        assert item.frame_id == metadata[item.candidate_id].frame_index
+        assert np.isfinite(item.selection_score)
+
+
+def test_select_for_r4_returns_exact_json_contract(
+    engine: MultiModalFusionEngine,
+    query: SemanticQuery,
+    metadata: dict[str, CandidateMetadata],
+    fused_scores: dict[str, float],
+) -> None:
+    selected = engine.select_top_k(
+        fused_scores=fused_scores,
+        metadata_map=metadata,
+        query=query,
+        top_k=3,
+    )
+
+    payload = engine.select_for_r4(
+        query_id="N01",
+        fused_scores=fused_scores,
+        metadata_map=metadata,
+        query=query,
+        top_k=3,
+    )
+
+    assert set(payload) == {"query_id", "candidates"}
+    assert payload["query_id"] == "N01"
+    assert len(payload["candidates"]) == len(selected)
+
+    for actual, expected in zip(payload["candidates"], selected):
+        assert set(actual) == {"video_id", "frame_id", "score"}
+        assert actual == {
+            "video_id": expected.video_id,
+            "frame_id": expected.frame_id,
+            "score": expected.selection_score,
+        }
+
+    # Payload phải dùng toàn kiểu JSON chuẩn, không để lọt NumPy scalar.
+    json.dumps(payload, ensure_ascii=False)
+
+
+def test_build_r4_payload_sorts_by_selected_rank(
+    engine: MultiModalFusionEngine,
+    query: SemanticQuery,
+    metadata: dict[str, CandidateMetadata],
+    fused_scores: dict[str, float],
+) -> None:
+    selected = engine.select_top_k(
+        fused_scores=fused_scores,
+        metadata_map=metadata,
+        query=query,
+        top_k=3,
+    )
+
+    payload = build_r4_payload(
+        query_id="N01",
+        candidates=list(reversed(selected)),
+    )
+
+    assert [
+        item["frame_id"]
+        for item in payload["candidates"]
+    ] == [
+        item.frame_id
+        for item in selected
+    ]
+
+
+def test_r4_payload_rejects_missing_candidate_metadata(
+    engine: MultiModalFusionEngine,
+) -> None:
+    with pytest.raises(ValueError, match="metadata video_id/frame_id"):
+        engine.select_for_r4(
+            query_id="N01",
+            fused_scores={"missing": 0.9},
+            metadata_map={},
+            query=SemanticQuery(),
+            top_k=1,
+        )
+
+
+def test_r4_payload_rejects_empty_query_id(
+    engine: MultiModalFusionEngine,
+    query: SemanticQuery,
+    metadata: dict[str, CandidateMetadata],
+    fused_scores: dict[str, float],
+) -> None:
+    selected = engine.select_top_k(
+        fused_scores=fused_scores,
+        metadata_map=metadata,
+        query=query,
+        top_k=1,
+    )
+
+    with pytest.raises(ValueError, match="query_id"):
+        build_r4_payload("   ", selected)
+
+
+# ============================================================================
+# 12. BACKWARD COMPATIBILITY
 # ============================================================================
 
 
