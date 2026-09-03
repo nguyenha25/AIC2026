@@ -66,18 +66,29 @@ class TestN01SemanticParser(unittest.TestCase):
             with self.subTest(intent=rule["intent"]):
                 self.assertAlmostEqual(sum(rule["modalities"].values()), 1.0)
 
-    def test_trake_giu_quan_he_tuan_tu(self):
+    def test_trake_giu_quan_he_tuan_tu_va_trich_xuat_thuc_the(self):
         plan = self.parser.parse_trake(
-            "07", ["Sự kiện một", "Sự kiện hai", "Sự kiện ba"]
+            "T07", [
+                "người phụ nữ bước ra", 
+                "người phụ nữ cầm túi mini", 
+                "đồng thời người đàn ông lên xe"
+            ]
         )
 
+        # Kiểm tra thứ tự và ID
         self.assertEqual(
             [event.event_id for event in plan.events], ["E1", "E2", "E3"]
         )
+        
+        # Kiểm tra quan hệ thời gian (start, after, concurrent)
         self.assertEqual(
             [event.relation for event in plan.events],
-            ["start", "after:E1", "after:E2"],
+            ["start", "after:E1", "concurrent:E2"],
         )
+        
+        # Kiểm tra bóc tách hành động và thực thể (Action/Entity)
+        self.assertEqual(plan.events[1].actions, ["cầm"])
+        self.assertEqual(plan.events[1].entities, ["túi mini"])
 
     def test_calculate_uncertainty_entropy(self):
         plan = self.parser.parse_qa("1", "Câu hỏi chung chung?")

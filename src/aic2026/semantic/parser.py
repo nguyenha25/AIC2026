@@ -85,17 +85,28 @@ class RuleBasedParser:
         if match := re.search(r"\bbao nhiêu\s+(.+?)(?=\s+(?:đang|có)\b|[?.!]|$)", query):
             self._append_unique(entities, self._clean_entity(match.group(1)))
 
-        if match := re.search(r"\bmón\s+ăn\s+có\s+(.+?)\s+được\s+(?:cầm|cắt|ướp|chiên)\b", query):
+        if match := re.search(r"\bmón\s+ăn\s+có\s+(.+?)\s+được\s+(?:cầm|cắt|ướp|chiên|xào|nấu)\b", query):
             self._append_unique(entities, self._clean_entity(match.group(1)))
 
-        for match in re.finditer(r"\b(cầm|cắt|ướp|chiên|ủng hộ)\s+([^?.!]*)", query):
+        # Mở rộng action verbs: Nấu ăn + Chuyển động / Thể thao / Tương tác đời sống
+        action_pattern = (
+            r"\b(cầm|cắt|ướp|chiên|xào|nấu(?!\s+ăn\b)|đổ|rắc|trộn|thái|băm|nướng|luộc|"
+            r"bước|chạy|nhảy|leo|đi|lên|xuống|lái|xoay(?:\s+vòng)?|chạm|đặt|nâng|ném|đá|"
+            r"đánh|vỗ|bắn|rơi|mở|đóng|chăm sóc|khám|múa|xuất hiện|ủng hộ|"
+            r"bật|đưa|vượt(?:\s+qua)?|nhấc|thả|bứt(?:\s+lên)?|giơ|vo|bọc|nối|"
+            r"nhúng|lăn|hiển thị|biểu diễn|chào|tiến|cử động|tiếp xúc|"
+            r"cho(?=\s+.*?\bvào\b))\s*([^?.!]*)"
+        )
+
+        for match in re.finditer(action_pattern, query):
             action = match.group(1)
             self._append_unique(actions, action)
             clean_entity = self._clean_entity(match.group(2))
-            if action == "chiên" and re.match(r"^(?:giòn|chín|vàng|xém|sơ)\b", clean_entity):
+            if action in ["chiên", "xào", "nấu"] and re.match(r"^(?:giòn|chín|vàng|xém|sơ)\b", clean_entity):
                 clean_entity = ""
             self._append_unique(entities, clean_entity)
-
+        # Lọc bỏ các entity rác nếu regex bắt nhầm
+        entities = [e for e in entities if e and e not in ["ăn này", "này", "đây"]]
         if match := re.search(r"(áp phích|túi mini|con đèo|biển báo|xã|công thức|gói bột|động đất|ủng hộ ai)", query, re.IGNORECASE):
             raw_ent = match.group(1)
             clean_ent = re.sub(r" ai$", "", raw_ent).strip() 
@@ -236,9 +247,25 @@ class RuleBasedParser:
         )
 
     def parse_trake(self, query_id: str, events: List[str]) -> QueryPlanTRAKE:
-        trake_events = [
-            TrakeEvent(event_id=f"E{i+1}", text=text, relation="start" if i == 0 else f"after:E{i}")
-            for i, text in enumerate(events)
-        ]
+        trake_events = []
+        for i, text in enumerate(events):
+            # Tái sử dụng parser QA để bóc tách hành động & thực thể
+            entities, attributes, actions = self._extract_entities_actions(text.lower())
+            
+            # Xử lý temporal relation linh hoạt hơn
+            relation = "start" if i == 0 else f"after:E{i}"
+            if "đồng thời" in text.lower() or "cùng lúc" in text.lower():
+                relation = f"concurrent:E{i}"
+            elif "trước khi" in text.lower() and i > 0:
+                relation = f"before:E{i}" # Đánh dấu edge case nếu văn bản tự đảo ngược
+                
+            trake_events.append(TrakeEvent(
+                event_id=f"E{i+1}", 
+                text=text, 
+                relation=relation,
+                entities=entities,
+                actions=actions
+            ))
+            
         return QueryPlanTRAKE(query_id=query_id, task="trake", events=trake_events)
     

@@ -59,6 +59,8 @@ from scripts.candidate_funnel import (
     W_L,
     GroundTruth,
     SourceFrame,
+    SourceEvidence,
+    MergedFrame,
     VideoCandidate,
     FrameCandidate,
     fuse_video_rrf,
@@ -72,6 +74,10 @@ from scripts.candidate_funnel import (
     evaluate_quality_gate,
     validate_embedding_alignment,
     build_embedding_row_map,
+    calculate_semantic_coverage,
+    derive_query_routing,
+    frame_to_json,
+    run_single_query_benchmark,
 )
 
 
@@ -408,6 +414,52 @@ class TestQAR1Stage1VideoFusion(unittest.TestCase):
 
 class TestQAR1Stage2Provenance(unittest.TestCase):
 
+    def test_query_plan_changes_clip_l_weight_and_candidate_budget(self):
+        routing = derive_query_routing(
+            {
+                "schema_version": "1.1",
+                "preferred_modalities": {
+                    "clip_l": 0.7,
+                    "ocr": 0.1,
+                    "asr": 0.0,
+                    "caption": 0.2,
+                },
+                "semantic_k_hint": 500,
+            }
+        )
+
+        self.assertEqual(routing["query_plan_schema_version"], "1.1")
+        self.assertEqual(routing["semantic_k_hint_applied"], 500)
+        self.assertEqual(routing["routing_weights_applied"]["clip_l"], 0.7)
+        self.assertEqual(routing["unavailable_modalities"], ["caption", "ocr"])
+
+        low_prior = derive_query_routing(
+            {
+                "schema_version": "1.1",
+                "preferred_modalities": {"clip_l": 0.1, "asr": 0.9},
+                "semantic_k_hint": 100,
+            }
+        )
+        self.assertEqual(low_prior["semantic_k_hint_applied"], 300)
+        self.assertEqual(low_prior["routing_weights_applied"]["clip_l"], W_L)
+
+    def test_semantic_coverage_uses_real_source_provenance(self):
+        modalities = {
+            "clip_l": 0.2,
+            "ocr": 0.7,
+            "asr": 0.1,
+            "caption": 0.0,
+        }
+
+        self.assertEqual(
+            calculate_semantic_coverage({"clip_b"}, modalities),
+            0.2,
+        )
+        self.assertEqual(
+            calculate_semantic_coverage({"clip_l", "ocr"}, modalities),
+            0.9,
+        )
+
     def test_merge_same_frame_from_multiple_sources(self):
         """
         Cùng frame n từ CLIP-B và CLIP-L phải được merge,
@@ -594,6 +646,31 @@ class TestQAR1Stage2Provenance(unittest.TestCase):
             },
         )
 
+    def test_candidate_record_exports_semantic_coverage_and_window(self):
+        frame = MergedFrame(
+            n=7,
+            sources={
+                "clip_l": SourceEvidence(rank=2, score=0.8),
+            },
+        )
+        video = make_video("V_1", rank_video=1)
+        candidate = build_frame_candidate(
+            query_id="Q_1",
+            video=video,
+            frame=frame,
+            frame_lookup={("V_1", 7): (210, 7.0)},
+            preferred_modalities={"clip_l": 0.7, "ocr": 0.3},
+            source_weights={"clip_b": 1.0, "clip_l": 0.7},
+        )
+
+        self.assertIsNotNone(candidate)
+        record = frame_to_json(candidate)
+        self.assertEqual(record["semantic_coverage"], 0.7)
+        self.assertEqual(record["window"], {"start": 4.0, "end": 10.0})
+        self.assertEqual(
+            record["routing_weights_applied"],
+            {"clip_b": 1.0, "clip_l": 0.7},
+        )
 
 # ============================================================
 # STAGE 2 — TOP 50
@@ -920,6 +997,111 @@ class TestQAR1TRAKE(unittest.TestCase):
                 gt,
             )
         )
+
+
+# ============================================================
+# QUERYPLAN INTEGRATION
+# ============================================================
+
+class TestQAR1QueryPlanIntegration(unittest.TestCase):
+
+    def test_single_query_record_proves_query_plan_was_applied(self):
+        class FakeIndex:
+            def search(self, query, k):
+                return (
+                    np.asarray([[0.9]], dtype=np.float32),
+                    np.asarray([[0]], dtype=np.int64),
+                )
+
+        gt = make_gt(
+            query_id="12",
+            video_id="V_Target",
+            query_type="hoi_dap",
+            frame_start=100,
+            frame_end=105,
+        )
+        query_plan = {
+            "schema_version": "1.1",
+            "query_id": "12",
+            "preferred_modalities": {
+                "clip_l": 0.7,
+                "ocr": 0.1,
+                "asr": 0.0,
+                "caption": 0.2,
+            },
+            "semantic_k_hint": 500,
+        }
+
+        _, _, _, records, _ = run_single_query_benchmark(
+            index_b=FakeIndex(),
+            index_l=FakeIndex(),
+            b_ids=[("V_Target", 7)],
+            l_ids=[("V_Target", 7)],
+            frame_lookup={("V_Target", 7): (102, 3.4)},
+            gt_data=[gt],
+            query_b=np.zeros((1, 2), dtype=np.float32),
+            query_l=np.zeros((1, 2), dtype=np.float32),
+            b_row_map={"12": 0},
+            l_row_map={"12": 0},
+            query_plans={"12": query_plan},
+        )
+
+        record = records[0]
+        candidate = record["reader_candidates"][0]
+        self.assertEqual(record["query_plan_schema_version"], "1.1")
+        self.assertEqual(record["semantic_k_hint_applied"], 500)
+        self.assertEqual(record["routing_weights_applied"]["clip_l"], 0.7)
+        self.assertEqual(candidate["semantic_coverage"], 0.7)
+        self.assertEqual(candidate["window"], {"start": 0.4, "end": 6.4})
+
+    def test_query_routing_does_not_change_official_top300_gate(self):
+        class FakeIndex:
+            def search(self, query, k):
+                return (
+                    np.asarray([[0.9, 0.8]], dtype=np.float32),
+                    np.asarray([[0, 1]], dtype=np.int64),
+                )
+
+        original_k_fused = candidate_funnel.K_FUSED
+        candidate_funnel.K_FUSED = 1
+        try:
+            gt = make_gt(
+                query_id="12",
+                video_id="V_Z",
+                query_type="hoi_dap",
+                frame_start=100,
+                frame_end=105,
+            )
+            _, _, _, records, _ = run_single_query_benchmark(
+                index_b=FakeIndex(),
+                index_l=FakeIndex(),
+                b_ids=[("V_Z", 1), ("V_A", 1)],
+                l_ids=[("V_A", 1), ("V_Z", 1)],
+                frame_lookup={
+                    ("V_Z", 1): (102, 3.4),
+                    ("V_A", 1): (999, 9.0),
+                },
+                gt_data=[gt],
+                query_b=np.zeros((1, 2), dtype=np.float32),
+                query_l=np.zeros((1, 2), dtype=np.float32),
+                b_row_map={"12": 0},
+                l_row_map={"12": 0},
+                query_plans={
+                    "12": {
+                        "schema_version": "1.1",
+                        "query_id": "12",
+                        "preferred_modalities": {"clip_l": 1.0},
+                        "semantic_k_hint": 100,
+                    }
+                },
+            )
+        finally:
+            candidate_funnel.K_FUSED = original_k_fused
+
+        record = records[0]
+        self.assertTrue(record["hit_video_300"])
+        self.assertEqual(record["gt_video_rank"], 1)
+        self.assertEqual(record["gt_video_rank_routed"], 2)
 
 
 # ============================================================

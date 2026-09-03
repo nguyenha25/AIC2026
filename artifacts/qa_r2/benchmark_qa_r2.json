@@ -1,0 +1,322 @@
+{
+  "qa": "QA-R2",
+  "benchmark": "Multi-Source Score Normalization",
+  "contract": {
+    "candidate_scales": [
+      100,
+      1000,
+      10000
+    ],
+    "num_queries": 100,
+    "acceptance_candidates": 1000,
+    "latency_target_ms": 2.0,
+    "throughput_target_qps": 500.0,
+    "weights": {
+      "clip_b": 1.0,
+      "ocr": 0.5,
+      "asr": 0.3
+    }
+  },
+  "primitive": {
+    "min_max": {
+      "avg_latency_ms": 0.016060400288552046,
+      "p95_latency_ms": 0.016805005725473162,
+      "throughput_ops": 62264.948695756124
+    },
+    "robust": {
+      "avg_latency_ms": 0.11098859994672239,
+      "p95_latency_ms": 0.12380490079522133,
+      "throughput_ops": 9009.934357943319
+    },
+    "rank": {
+      "avg_latency_ms": 0.18331220000982285,
+      "p95_latency_ms": 0.21437500254251057,
+      "throughput_ops": 5455.1742870709895
+    }
+  },
+  "performance": [
+    {
+      "method": "min_max",
+      "num_candidates": 100,
+      "num_queries": 100,
+      "total_time_sec": 0.013195900013670325,
+      "avg_latency_ms": 0.13162999995984137,
+      "p95_latency_ms": 0.2098099677823484,
+      "throughput_qps": 7578.1113752305455
+    },
+    {
+      "method": "robust",
+      "num_candidates": 100,
+      "num_queries": 100,
+      "total_time_sec": 0.037679600063711405,
+      "avg_latency_ms": 0.37641200236976147,
+      "p95_latency_ms": 0.5079750204458833,
+      "throughput_qps": 2653.9559823064133
+    },
+    {
+      "method": "rank",
+      "num_candidates": 100,
+      "num_queries": 100,
+      "total_time_sec": 0.018362200004048645,
+      "avg_latency_ms": 0.18338800175115466,
+      "p95_latency_ms": 0.19292996148578823,
+      "throughput_qps": 5445.97052520674
+    },
+    {
+      "method": "min_max",
+      "num_candidates": 1000,
+      "num_queries": 100,
+      "total_time_sec": 0.09215729997958988,
+      "avg_latency_ms": 0.9212719986680895,
+      "p95_latency_ms": 0.9400600509252399,
+      "throughput_qps": 1085.1012347599924
+    },
+    {
+      "method": "robust",
+      "num_candidates": 1000,
+      "num_queries": 100,
+      "total_time_sec": 0.11567680002190173,
+      "avg_latency_ms": 1.1563470016699284,
+      "p95_latency_ms": 1.1873450712300837,
+      "throughput_qps": 864.4775787458371
+    },
+    {
+      "method": "rank",
+      "num_candidates": 1000,
+      "num_queries": 100,
+      "total_time_sec": 0.14385579992085695,
+      "avg_latency_ms": 1.4381599973421544,
+      "p95_latency_ms": 1.4856200199574232,
+      "throughput_qps": 695.1405508503344
+    },
+    {
+      "method": "min_max",
+      "num_candidates": 10000,
+      "num_queries": 100,
+      "total_time_sec": 0.9234866000479087,
+      "avg_latency_ms": 9.233842998510227,
+      "p95_latency_ms": 10.831989930011332,
+      "throughput_qps": 108.28527451812748
+    },
+    {
+      "method": "robust",
+      "num_candidates": 10000,
+      "num_queries": 100,
+      "total_time_sec": 0.963038899935782,
+      "avg_latency_ms": 9.629544996423647,
+      "p95_latency_ms": 9.876219992293045,
+      "throughput_qps": 103.8379654307508
+    },
+    {
+      "method": "rank",
+      "num_candidates": 10000,
+      "num_queries": 100,
+      "total_time_sec": 1.4323732999619097,
+      "avg_latency_ms": 14.322924998123199,
+      "p95_latency_ms": 15.664985054172575,
+      "throughput_qps": 69.81420276589856
+    }
+  ],
+  "stability": [
+    {
+      "method": "min_max",
+      "scenario": "dense_float",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "min_max",
+      "scenario": "heavy_ties",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "min_max",
+      "scenario": "extreme_outlier",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "min_max",
+      "scenario": "negative_scores",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "min_max",
+      "scenario": "constant",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "min_max",
+      "scenario": "tiny_range",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "min_max",
+      "scenario": "large_magnitude",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "dense_float",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "heavy_ties",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "extreme_outlier",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "negative_scores",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "constant",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "tiny_range",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "robust",
+      "scenario": "large_magnitude",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "dense_float",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "heavy_ties",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "extreme_outlier",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "negative_scores",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "constant",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "tiny_range",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    },
+    {
+      "method": "rank",
+      "scenario": "large_magnitude",
+      "passed": true,
+      "finite": true,
+      "in_unit_range": true,
+      "constant_input_safe": true,
+      "details": "ok"
+    }
+  ],
+  "acceptance": {
+    "candidate_pool": 1000,
+    "latency_target_ms": 2.0,
+    "latency_actual_ms": 1.4381599973421544,
+    "latency_pass": true,
+    "throughput_target_qps": 500.0,
+    "throughput_actual_qps": 695.1405508503344,
+    "throughput_pass": true,
+    "numerical_stability_pass": true,
+    "overall_pass": true
+  }
+}

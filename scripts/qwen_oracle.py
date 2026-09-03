@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -43,6 +44,7 @@ SCHEMA_VERSION = "1.1"
 MODEL_MAC_DINH = "Qwen/Qwen3-VL-2B-Instruct"
 PROMPT_MODE_MAC_DINH = "direct_vi_short"
 SEMANTIC_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+CONFIDENCE_METHOD = "geometric_mean_generated_token_probability_v1"
 
 
 def doc_qa(duong_dan: Path) -> list[dict[str, Any]]:
@@ -78,6 +80,19 @@ def tao_prompt(cau_hoi: str, prompt_mode: str = PROMPT_MODE_MAC_DINH) -> str:
     if prompt_mode != PROMPT_MODE_MAC_DINH:
         raise ValueError(f"prompt_mode chưa hỗ trợ: {prompt_mode}")
     return f"{cau_hoi.strip()} Trả lời ngắn gọn bằng tiếng Việt, chỉ nêu đáp án."
+
+
+def geometric_mean_token_probability(log_probabilities: list[float]) -> float:
+    """Đổi log-prob từng token thành confidence chuỗi trong [0, 1].
+
+    Đây là model confidence chưa hiệu chuẩn, không phải xác suất answer đúng.
+    Tên phương pháp luôn được ghi kèm record để tầng consensus có thể calibrate.
+    """
+    finite = [float(value) for value in log_probabilities if math.isfinite(float(value))]
+    if not finite:
+        return 0.0
+    confidence = math.exp(sum(finite) / len(finite))
+    return min(1.0, max(0.0, float(confidence)))
 
 
 def chon_frame_oracle(q: dict[str, Any], fm: Any) -> Any | None:
@@ -212,10 +227,11 @@ class QwenReader:
         self.model.eval()
         self.device = "cpu"
 
-    def hoi(self, image_path: Path, prompt: str) -> str:
+    def hoi_co_confidence(self, image_path: Path, prompt: str) -> dict[str, Any]:
         if self.processor is None or self.model is None:
             raise RuntimeError("QwenReader chưa được nạp model")
 
+        import torch
         from qwen_vl_utils import process_vision_info
 
         messages = [
@@ -242,20 +258,48 @@ class QwenReader:
             return_tensors="pt",
         ).to(self.device)
 
-        generated_ids = self.model.generate(
+        generated = self.model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
             do_sample=False,
+            return_dict_in_generate=True,
+            output_scores=True,
         )
+        generated_ids = generated.sequences
         generated_ids_trimmed = [
             out_ids[len(in_ids) :]
             for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
-        return self.processor.batch_decode(
+        answer = self.processor.batch_decode(
             generated_ids_trimmed,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0].strip()
+
+        token_ids = generated_ids_trimmed[0]
+        log_probabilities: list[float] = []
+        num_steps = min(len(generated.scores), int(token_ids.shape[0]))
+        with torch.no_grad():
+            for step in range(num_steps):
+                token_id = int(token_ids[step].item())
+                step_logits = generated.scores[step][0].float()
+                log_probability = torch.log_softmax(
+                    step_logits,
+                    dim=-1,
+                )[token_id]
+                log_probabilities.append(float(log_probability.item()))
+
+        return {
+            "answer": answer,
+            "answer_raw": answer,
+            "confidence": geometric_mean_token_probability(log_probabilities),
+            "confidence_method": CONFIDENCE_METHOD,
+            "generated_tokens": num_steps,
+        }
+
+    def hoi(self, image_path: Path, prompt: str) -> str:
+        """API tương thích ngược cho code cũ cần đúng một chuỗi."""
+        return str(self.hoi_co_confidence(image_path, prompt)["answer"])
 
 
 def main() -> int:
@@ -380,8 +424,10 @@ def main() -> int:
         prompt = tao_prompt(str(q["cau_hoi"]), args.prompt_mode)
         try:
             bat_dau = time.perf_counter()
-            pred = reader.hoi(anh, prompt)
+            reader_output = reader.hoi_co_confidence(anh, prompt)
             latency_ms = (time.perf_counter() - bat_dau) * 1000.0
+            pred = str(reader_output["answer"])
+            confidence = float(reader_output["confidence"])
         except Exception as e:
             records.append(
                 {
@@ -413,6 +459,8 @@ def main() -> int:
                     "image_path_rel": str(anh.relative_to(KEYFRAMES_DIR)),
                     "prompt": prompt,
                     "pred_answer": pred,
+                    "confidence": confidence,
+                    "confidence_method": reader_output["confidence_method"],
                     "exact_match": ex,
                     "latency_ms": latency_ms,
                     "status": "error",
@@ -432,6 +480,9 @@ def main() -> int:
                 "image_path_rel": str(anh.relative_to(KEYFRAMES_DIR)),
                 "prompt": prompt,
                 "pred_answer": pred,
+                "confidence": confidence,
+                "confidence_method": reader_output["confidence_method"],
+                "generated_tokens": int(reader_output["generated_tokens"]),
                 "exact_match": ex,
                 "semantic_match": sem,
                 "latency_ms": latency_ms,
@@ -457,6 +508,7 @@ def main() -> int:
             "model_load_ms": model_load_ms,
             "device": reader.device,
             "semantic_model": SEMANTIC_MODEL,
+            "confidence_method": CONFIDENCE_METHOD,
         }
     )
 
@@ -469,6 +521,7 @@ def main() -> int:
         "input_file": str(tep),
         "model": args.model,
         "prompt_mode": args.prompt_mode,
+        "confidence_method": CONFIDENCE_METHOD,
         "max_new_tokens": int(args.max_new_tokens),
         "offline": not args.cho_phep_tai_model,
         "device": reader.device,

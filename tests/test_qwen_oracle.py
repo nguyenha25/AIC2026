@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,15 @@ def test_tao_prompt_keeps_question_and_short_vietnamese_instruction():
 def test_tao_prompt_rejects_unknown_mode():
     with pytest.raises(ValueError):
         m.tao_prompt("Câu hỏi?", "unknown")
+
+
+def test_geometric_mean_token_probability_is_bounded_and_deterministic():
+    confidence = m.geometric_mean_token_probability(
+        [math.log(0.81), math.log(0.49)]
+    )
+
+    assert confidence == pytest.approx(0.63)
+    assert m.geometric_mean_token_probability([]) == 0.0
 
 
 def test_doc_qa_filters_only_hoi_dap(tmp_path: Path):
