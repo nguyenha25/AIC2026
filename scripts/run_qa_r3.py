@@ -254,7 +254,7 @@ def _candidate_id(
 
     try:
         n_value = int(
-            candidate.get("n", index)
+            candidate["n"]
         )
 
         frame_index = int(
@@ -370,18 +370,16 @@ def build_query_inputs(
 
         try:
             n_value = int(
-                candidate.get(
-                    "n",
-                    index,
-                )
+                candidate["n"]
             )
         except (
+            KeyError,
             TypeError,
             ValueError,
         ) as exc:
             raise QAInputError(
                 f"Query {query_id}: candidate[{index}] "
-                "có n không hợp lệ"
+                "thiếu n hợp lệ"
             ) from exc
 
         if cid in metadata_map:

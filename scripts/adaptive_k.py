@@ -14,9 +14,10 @@ QA-R4 receives exactly two JSONL streams:
         query_id
         candidates
 
-R4 performs ONLY:
+R4 converts the retrieval budget into a small Reader/VLM budget and performs:
 
-    candidates[:semantic_k_hint]
+    reader_k = reader_k_by_semantic_k[semantic_k_hint]
+    candidates[:reader_k]
 
 It does NOT:
 
@@ -28,8 +29,12 @@ It does NOT:
     - alter R3 ordering
     - load the entire R3 stream into RAM
 
-The semantic_k_hint is the R4 retrieval/funnel K.
-It is NOT Reader-K.
+The semantic_k_hint is a retrieval-budget signal. It is never sent directly to
+the Reader/VLM as its frame count. The default Reader policy is:
+
+    100 -> 4 frames
+    300 -> 8 frames
+    500 -> 12 frames
 
 Default allowed K:
 
@@ -83,6 +88,9 @@ class AdaptiveKResult:
     k_requested:
         Original semantic_k_hint requested by S4.
 
+    reader_k_requested:
+        Reader/VLM frame budget resolved from semantic_k_hint.
+
     k_effective:
         Actual number of candidates returned.
 
@@ -95,6 +103,7 @@ class AdaptiveKResult:
 
     query_id: str
     k_requested: int
+    reader_k_requested: int
     k_effective: int
     k_available: int
     selected_candidates: Tuple[Dict[str, Any], ...]
@@ -118,14 +127,35 @@ class AdaptiveKConfig:
     strict:
         If True, semantic_k_hint must belong to allowed_k.
         If False, invalid values are clamped to the nearest allowed K.
+
+    reader_k_by_semantic_k:
+        Explicit mapping from retrieval budget to Reader/VLM frame budget.
     """
 
     allowed_k: Tuple[int, ...] = (100, 300, 500)
+    reader_k_by_semantic_k: Tuple[Tuple[int, int], ...] = (
+        (100, 4),
+        (300, 8),
+        (500, 12),
+    )
     strict: bool = True
 
     def __post_init__(self) -> None:
         normalized = self._normalize_allowed_k(self.allowed_k)
         object.__setattr__(self, "allowed_k", normalized)
+
+        reader_policy = self._normalize_reader_policy(
+            self.reader_k_by_semantic_k
+        )
+        if tuple(key for key, _ in reader_policy) != normalized:
+            raise ValueError(
+                "reader_k_by_semantic_k keys must exactly match allowed_k"
+            )
+        object.__setattr__(
+            self,
+            "reader_k_by_semantic_k",
+            reader_policy,
+        )
 
         if not isinstance(self.strict, bool):
             raise ValueError("strict must be a boolean")
@@ -176,6 +206,44 @@ class AdaptiveKConfig:
             normalized.append(integer_value)
 
         return tuple(sorted(set(normalized)))
+
+    @staticmethod
+    def _normalize_reader_policy(
+        values: Iterable[Tuple[int, int]],
+    ) -> Tuple[Tuple[int, int], ...]:
+        try:
+            pairs = tuple(values)
+        except TypeError as exc:
+            raise ValueError(
+                "reader_k_by_semantic_k must be an iterable of pairs"
+            ) from exc
+
+        if not pairs:
+            raise ValueError("reader_k_by_semantic_k must not be empty")
+
+        normalized: Dict[int, int] = {}
+        for pair in pairs:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise ValueError(
+                    "reader_k_by_semantic_k must contain (semantic_k, reader_k) pairs"
+                )
+            semantic_k, reader_k = pair
+            if isinstance(semantic_k, bool) or isinstance(reader_k, bool):
+                raise ValueError("reader K policy values must be integers")
+            try:
+                semantic_k = int(semantic_k)
+                reader_k = int(reader_k)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("reader K policy values must be integers") from exc
+            if semantic_k <= 0 or reader_k <= 0:
+                raise ValueError("reader K policy values must be positive")
+            if semantic_k in normalized:
+                raise ValueError(
+                    f"duplicate semantic K in reader policy: {semantic_k}"
+                )
+            normalized[semantic_k] = reader_k
+
+        return tuple(sorted(normalized.items()))
 
 
 # ============================================================================
@@ -512,8 +580,9 @@ class AdaptiveKEngine:
 
         1. validate semantic_k_hint
         2. validate all candidate payloads
-        3. resolve allowed K
-        4. take candidates[:K]
+        3. resolve allowed semantic K
+        4. map semantic K to Reader-K
+        5. take candidates[:Reader-K]
 
     It never reranks or modifies candidate order.
     """
@@ -598,6 +667,15 @@ class AdaptiveKEngine:
     # Selection
     # ------------------------------------------------------------------
 
+    def _reader_k_for(self, semantic_k: int) -> int:
+        policy = dict(self.config.reader_k_by_semantic_k)
+        try:
+            return policy[semantic_k]
+        except KeyError as exc:  # Protected by config validation.
+            raise ValueError(
+                f"no Reader-K policy for semantic_k_hint={semantic_k}"
+            ) from exc
+
     def select(
         self,
         query_id: str,
@@ -605,7 +683,7 @@ class AdaptiveKEngine:
         semantic_k_hint: Any,
     ) -> AdaptiveKResult:
         """
-        Select exact R3 prefix according to semantic_k_hint.
+        Select an exact R3 prefix using the Reader-K policy.
 
         No reranking.
         No deduplication.
@@ -650,6 +728,10 @@ class AdaptiveKEngine:
             semantic_k_hint
         )
 
+        reader_k_requested = self._reader_k_for(
+            k_resolved
+        )
+
         k_available = len(candidate_list)
 
         # --------------------------------------------------------------
@@ -660,6 +742,7 @@ class AdaptiveKEngine:
             return AdaptiveKResult(
                 query_id=query_id,
                 k_requested=k_requested,
+                reader_k_requested=reader_k_requested,
                 k_effective=0,
                 k_available=0,
                 selected_candidates=(),
@@ -671,7 +754,7 @@ class AdaptiveKEngine:
         # Candidate pool smaller than requested K
         # --------------------------------------------------------------
 
-        if k_available < k_resolved:
+        if k_available < reader_k_requested:
             selected = tuple(
                 candidate_list[:k_available]
             )
@@ -679,6 +762,7 @@ class AdaptiveKEngine:
             return AdaptiveKResult(
                 query_id=query_id,
                 k_requested=k_requested,
+                reader_k_requested=reader_k_requested,
                 k_effective=k_available,
                 k_available=k_available,
                 selected_candidates=selected,
@@ -691,13 +775,14 @@ class AdaptiveKEngine:
         # --------------------------------------------------------------
 
         selected = tuple(
-            candidate_list[:k_resolved]
+            candidate_list[:reader_k_requested]
         )
 
         return AdaptiveKResult(
             query_id=query_id,
             k_requested=k_requested,
-            k_effective=k_resolved,
+            reader_k_requested=reader_k_requested,
+            k_effective=reader_k_requested,
             k_available=k_available,
             selected_candidates=selected,
             status=status,
@@ -1104,6 +1189,11 @@ def _self_check() -> None:
     )
 
     assert config.strict is True
+    assert config.reader_k_by_semantic_k == (
+        (100, 4),
+        (300, 8),
+        (500, 12),
+    )
 
     engine = AdaptiveKEngine(config)
 
@@ -1129,16 +1219,17 @@ def _self_check() -> None:
     )
 
     assert result.k_requested == 100
-    assert result.k_effective == 100
+    assert result.reader_k_requested == 4
+    assert result.k_effective == 4
     assert result.k_available == 500
 
     assert len(
         result.selected_candidates
-    ) == 100
+    ) == 4
 
     assert (
         result.selected_candidates
-        == tuple(candidates[:100])
+        == tuple(candidates[:4])
     )
 
     # --------------------------------------------------------------
@@ -1161,7 +1252,7 @@ def _self_check() -> None:
 
     assert (
         query_plan_result.k_effective
-        == 300
+        == 8
     )
 
     # --------------------------------------------------------------
@@ -1182,7 +1273,8 @@ def _self_check() -> None:
     )
 
     assert clamped.k_requested == 250
-    assert clamped.k_effective == 300
+    assert clamped.reader_k_requested == 8
+    assert clamped.k_effective == 8
 
     assert (
         clamped.status
@@ -1220,7 +1312,8 @@ def _self_check() -> None:
 
     assert decoded["query_id"] == "self-check"
     assert decoded["k_requested"] == 100
-    assert decoded["k_effective"] == 100
+    assert decoded["reader_k_requested"] == 4
+    assert decoded["k_effective"] == 4
 
     print(
         "QA-R4 adaptive_k self-check: PASS"

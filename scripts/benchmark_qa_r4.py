@@ -51,7 +51,8 @@ This does NOT:
     - evaluate VLM answer quality
 
 R4 behavior:
-    candidates[:semantic_k_hint]
+    reader_k = {100: 4, 300: 8, 500: 12}[semantic_k_hint]
+    candidates[:reader_k]
 
 Benchmark timing contract:
     The benchmark timer starts immediately before R4 funnel execution
@@ -820,6 +821,7 @@ class R4BenchmarkStats:
         self.query_count = 0
 
         self.requested_k = Counter()
+        self.reader_requested_k = Counter()
         self.effective_k = Counter()
 
         self.status = Counter()
@@ -864,6 +866,10 @@ class R4BenchmarkStats:
             result.k_requested
         ] += 1
 
+        self.reader_requested_k[
+            result.reader_k_requested
+        ] += 1
+
         self.effective_k[
             result.k_effective
         ] += 1
@@ -901,10 +907,10 @@ class R4BenchmarkStats:
             result.k_available
         )
 
-        if result.k_requested > 0:
+        if result.reader_k_requested > 0:
             self.selection_ratios.append(
                 selected_count
-                / result.k_requested
+                / result.reader_k_requested
             )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -924,6 +930,13 @@ class R4BenchmarkStats:
                 str(k): count
                 for k, count in sorted(
                     self.requested_k.items()
+                )
+            },
+
+            "reader_requested_k_distribution": {
+                str(k): count
+                for k, count in sorted(
+                    self.reader_requested_k.items()
                 )
             },
 
@@ -1075,11 +1088,20 @@ def validate_result(
             f"{result.k_effective}"
         )
 
-    if result.k_effective > result.k_requested:
+    if result.reader_k_requested not in {
+        4,
+        8,
+        12,
+    }:
         raise AssertionError(
-            "Effective K exceeds requested K: "
+            f"Unexpected Reader-K: {result.reader_k_requested}"
+        )
+
+    if result.k_effective > result.reader_k_requested:
+        raise AssertionError(
+            "Effective K exceeds requested Reader-K: "
             f"{result.k_effective} > "
-            f"{result.k_requested}"
+            f"{result.reader_k_requested}"
         )
 
     if len(result.selected_candidates) != (
@@ -1404,9 +1426,13 @@ def run_benchmark(
 
             "r3_field": "candidates",
 
-            "selection": (
-                "candidates[:semantic_k_hint]"
-            ),
+            "selection": "candidates[:reader_k]",
+
+            "reader_k_policy": {
+                "100": 4,
+                "300": 8,
+                "500": 12,
+            },
 
             "allowed_k": [
                 100,
@@ -1472,8 +1498,13 @@ def run_benchmark(
     )
 
     print(
-        "Requested K       : "
+        "Semantic K       : "
         f"{dict(sorted(stats.requested_k.items()))}"
+    )
+
+    print(
+        "Reader requested K: "
+        f"{dict(sorted(stats.reader_requested_k.items()))}"
     )
 
     print(

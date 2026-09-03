@@ -134,6 +134,41 @@ def load_qa_r1_profile(path: Path) -> dict[str, Any]:
     return data
 
 
+def load_qa_r4_output(path: Path) -> dict[str, Any]:
+    """Load the Reader-facing QA-R4 JSONL artifact as a query profile."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Không tìm thấy QA-R4 output: {path}")
+
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8-sig") as stream:
+        for line_no, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"QA-R4 JSON lỗi ở dòng {line_no}: {exc}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"QA-R4 dòng {line_no} phải là JSON object")
+            records.append(row)
+
+    if not records:
+        raise ValueError("QA-R4 output không có record")
+
+    query_ids = [str(row.get("query_id", "")) for row in records]
+    if any(not query_id for query_id in query_ids):
+        raise ValueError("QA-R4 có record thiếu query_id")
+    if len(query_ids) != len(set(query_ids)):
+        raise ValueError("QA-R4 có query_id trùng")
+
+    return {
+        "schema_version": "qa_r4_output.v1",
+        "task": "QA-R4",
+        "source_path": str(path),
+        "query_records": records,
+    }
+
+
 def find_qa_r1_record(
     profile: Mapping[str, Any],
     query_id: str,
@@ -253,6 +288,72 @@ def audit_candidate(
     query_id: str,
 ) -> list[IntegrationIssue]:
     issues: list[IntegrationIssue] = []
+
+    # Reader-facing QA-R4 candidates intentionally use a compact contract.
+    # They do not pretend to be the richer QA-R1 CandidateRecord.
+    if "frame_id" in candidate and "frame_idx" not in candidate:
+        required_r4 = {"video_id", "frame_id", "n", "score"}
+        missing_r4 = sorted(required_r4 - set(candidate))
+        if missing_r4:
+            issues.append(
+                _issue(
+                    "P0",
+                    "Thi (QA-R4)",
+                    "QA-R4 -> reader",
+                    "QA_R4_MISSING_FIELDS",
+                    "Candidate QA-R4 thiếu trường Reader bắt buộc.",
+                    missing=missing_r4,
+                )
+            )
+            return issues
+
+        for field_name in ("frame_id", "n"):
+            value = candidate.get(field_name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                issues.append(
+                    _issue(
+                        "P0",
+                        "Thi (QA-R4)",
+                        "QA-R4 -> reader",
+                        "QA_R4_INTEGER_FIELD",
+                        f"{field_name} phải là integer không âm.",
+                        field=field_name,
+                        observed=value,
+                    )
+                )
+
+        score = candidate.get("score")
+        if (
+            not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not math.isfinite(float(score))
+        ):
+            issues.append(
+                _issue(
+                    "P0",
+                    "Thi (QA-R4)",
+                    "QA-R4 -> reader",
+                    "QA_R4_SCORE_INVALID",
+                    "score phải là số hữu hạn.",
+                    observed=score,
+                )
+            )
+        if not str(candidate.get("video_id", "")).strip():
+            issues.append(
+                _issue(
+                    "P0",
+                    "Thi (QA-R4)",
+                    "QA-R4 -> reader",
+                    "QA_R4_VIDEO_ID_MISSING",
+                    "video_id không được rỗng.",
+                )
+            )
+        return issues
+
     required = {
         "schema_version",
         "query_id",
@@ -422,11 +523,94 @@ def audit_qa_r1_handoff(
 
 
 def reader_candidates(record: Mapping[str, Any]) -> list[dict[str, Any]]:
-    # [ADAPTER QA-R4]: Đọc đúng field "candidates" mới, dự phòng "reader_candidates" của R1
-    candidates = record.get("candidates") or record.get("reader_candidates")
-    if not isinstance(candidates, list):
-        raise ValueError("QA-R4/R1 query_record thiếu list candidates (hoặc reader_candidates)")
-    return [dict(item) for item in candidates if isinstance(item, dict)]
+    candidates: Any = None
+    selected_field: str | None = None
+    for field_name in (
+        "selected_candidates",
+        "candidates",
+        "reader_candidates",
+    ):
+        if field_name in record:
+            selected_field = field_name
+            candidates = record[field_name]
+            break
+
+    if selected_field is None or not isinstance(candidates, list):
+        raise ValueError(
+            "QA-R4/R1 query_record thiếu list selected_candidates, "
+            "candidates hoặc reader_candidates"
+        )
+    if not all(isinstance(item, dict) for item in candidates):
+        raise ValueError(f"{selected_field} phải chỉ chứa JSON object")
+    return [dict(item) for item in candidates]
+
+
+def audit_qa_r4_handoff(
+    plan: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> list[IntegrationIssue]:
+    """Validate the cross-stage contract actually consumed by the Reader."""
+    issues: list[IntegrationIssue] = []
+    candidates = reader_candidates(record)
+
+    expected_query_id = str(plan.get("query_id", ""))
+    if str(record.get("query_id", "")) != expected_query_id:
+        issues.append(
+            _issue(
+                "P0",
+                "Thi (QA-R4)",
+                "QA-R4 -> reader",
+                "QA_R4_QUERY_ID_MISMATCH",
+                "QA-R4 không giữ nguyên query_id của QueryPlan.",
+                expected=expected_query_id,
+                observed=record.get("query_id"),
+            )
+        )
+
+    semantic_k = plan.get("semantic_k_hint")
+    if semantic_k is not None and record.get("k_requested") != semantic_k:
+        issues.append(
+            _issue(
+                "P0",
+                "Thi (QA-R4)",
+                "QueryPlan -> QA-R4",
+                "QA_R4_SEMANTIC_K_MISMATCH",
+                "QA-R4 không ghi đúng semantic_k_hint đã nhận.",
+                expected=semantic_k,
+                observed=record.get("k_requested"),
+            )
+        )
+
+    reader_k = record.get("reader_k_requested")
+    if (
+        not isinstance(reader_k, int)
+        or isinstance(reader_k, bool)
+        or not 1 <= reader_k <= 12
+    ):
+        issues.append(
+            _issue(
+                "P0",
+                "Thi (QA-R4)",
+                "QA-R4 -> reader",
+                "QA_R4_READER_K_INVALID",
+                "reader_k_requested phải nằm trong [1, 12].",
+                observed=reader_k,
+            )
+        )
+
+    if record.get("k_effective") != len(candidates):
+        issues.append(
+            _issue(
+                "P0",
+                "Thi (QA-R4)",
+                "QA-R4 -> reader",
+                "QA_R4_EFFECTIVE_K_MISMATCH",
+                "k_effective không khớp số candidate đã xuất.",
+                expected=len(candidates),
+                observed=record.get("k_effective"),
+            )
+        )
+    return issues
 
 
 def choose_candidate_image(
@@ -541,7 +725,7 @@ def adapt_reader_output(
                 "scores": dict(candidate.get("scores", {})),
                 "rank_final": candidate.get("rank_final"),
             },
-            "confidence": candidate.get("score_fused"),
+            "confidence": candidate.get("score_fused", candidate.get("score")),
         },
     ]
 
@@ -555,7 +739,7 @@ def adapt_reader_output(
         "confidence_method": confidence_method,
         "answer_type": str(plan.get("answer_type", "short_text")),
         "video_id": str(candidate.get("video_id", "")),
-        "frame_idx": candidate.get("frame_idx"),
+        "frame_idx": candidate.get("frame_idx", candidate.get("frame_id")),
         "model_id": model_id,
         "prompt_version": "qa_vi_1.1",
         "latency_ms": round(float(latency_ms), 3),
@@ -609,10 +793,14 @@ def review_vertical_slice(
     plan = parse_query_plan(query)
     record = find_qa_r1_record(profile, str(query["id"]))
     candidates = reader_candidates(record)
+    source_task = str(profile.get("task", "QA-R1"))
 
     issues: list[IntegrationIssue] = []
     issues.extend(audit_query_plan(plan))
-    issues.extend(audit_qa_r1_handoff(plan, profile, record))
+    if source_task == "QA-R4":
+        issues.extend(audit_qa_r4_handoff(plan, record))
+    else:
+        issues.extend(audit_qa_r1_handoff(plan, profile, record))
     for candidate in candidates:
         issues.extend(audit_candidate(candidate, str(query["id"])))
 
@@ -667,11 +855,16 @@ def review_vertical_slice(
         "question": str(query["cau_hoi"]),
         "status": "pass" if summary["p0"] == 0 and reader_executed else "reviewed_with_blockers",
         "reader_executed": reader_executed,
+        "candidate_source": source_task,
         "query_plan": plan,
         "qa_r1_record_summary": {
             key: value
             for key, value in record.items()
-            if key != "reader_candidates"
+            if key not in {
+                "selected_candidates",
+                "candidates",
+                "reader_candidates",
+            }
         },
         "candidate_count": len(candidates),
         "selected_candidate": selected,
@@ -683,6 +876,12 @@ def review_vertical_slice(
             "query_plan_created": bool(plan),
             "candidate_provenance_present": bool(
                 selected and selected.get("source_hits") and selected.get("source_ranks")
+            ),
+            "candidate_locator_valid": bool(
+                selected
+                and str(selected.get("video_id", "")).strip()
+                and isinstance(selected.get("n"), int)
+                and not isinstance(selected.get("n"), bool)
             ),
             "reader_executed": reader_executed,
             "evidence_answer_schema_valid": bool(
@@ -726,7 +925,13 @@ def main() -> int:
     )
     parser.add_argument("--query-id", required=True)
     parser.add_argument("--questions", type=Path)
-    parser.add_argument("--qa-r1-profile", type=Path)
+    candidate_input = parser.add_mutually_exclusive_group()
+    candidate_input.add_argument("--qa-r1-profile", type=Path)
+    candidate_input.add_argument(
+        "--qa-r4-output",
+        type=Path,
+        help="QA-R4 Reader-facing JSONL (qa_r4_adaptive_candidates.jsonl)",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--reader", choices=("qwen", "skip"), default="qwen")
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -739,14 +944,22 @@ def main() -> int:
     from src.aic2026.paths import DEV_QUERIES_PATH, RUNS_DIR, keyframe_image
 
     questions_path = args.questions or DEV_QUERIES_PATH
-    profile_path = args.qa_r1_profile or (RUNS_DIR / "dev_qa_r1_profile.json")
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
     output_path = args.output or (
         RUNS_DIR / f"{timestamp}_INT-01" / "report" / "int_01_vertical_slice.json"
     )
 
     query = load_qa_query(questions_path, args.query_id)
-    profile = load_qa_r1_profile(profile_path)
+    if args.qa_r4_output is not None:
+        profile = load_qa_r4_output(args.qa_r4_output)
+    elif args.qa_r1_profile is not None:
+        profile = load_qa_r1_profile(args.qa_r1_profile)
+    else:
+        default_r4_path = RUNS_DIR / "qa_r4_adaptive_candidates.jsonl"
+        if default_r4_path.is_file():
+            profile = load_qa_r4_output(default_r4_path)
+        else:
+            profile = load_qa_r1_profile(RUNS_DIR / "dev_qa_r1_profile.json")
     reader = None
     if args.reader == "qwen":
         reader = build_qwen_reader(args.model, args.max_new_tokens)
@@ -765,6 +978,7 @@ def main() -> int:
     print("INT-01 — QUERYPLAN -> CANDIDATES -> READER")
     print("=" * 76)
     print(f"Query              : {report['query_id']}")
+    print(f"Candidate source   : {report['candidate_source']}")
     print(f"Candidates         : {report['candidate_count']}")
     print(f"Reader executed    : {report['reader_executed']}")
     print(f"P0 / P1            : {summary['p0']} / {summary['p1']}")

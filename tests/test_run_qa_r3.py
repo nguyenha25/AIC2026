@@ -213,6 +213,24 @@ def test_missing_requested_query_is_rejected(tmp_path: Path) -> None:
         )
 
 
+def test_missing_n_is_rejected_instead_of_using_list_index(tmp_path: Path) -> None:
+    r1_path, n01_path = _write_inputs(tmp_path)
+    output_path = tmp_path / "qa_r3_candidates.json"
+
+    profile = json.loads(r1_path.read_text(encoding="utf-8"))
+    del profile["query_records"][0]["reader_candidates"][0]["n"]
+    r1_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(QAInputError, match="thiếu n"):
+        run_qa_r3(
+            r1_path=r1_path,
+            n01_path=n01_path,
+            output_path=output_path,
+            query_id="N01",
+            top_k=2,
+        )
+
+
 def test_output_comes_from_upstream_ids_not_mock_pool(tmp_path: Path) -> None:
     r1_path, n01_path = _write_inputs(tmp_path)
     output_path = tmp_path / "qa_r3_candidates.json"

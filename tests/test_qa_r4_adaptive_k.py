@@ -359,7 +359,7 @@ def test_r4_output_contains_reader_required_candidate_fields(
         "selected_candidates"
     ]
 
-    assert len(selected) == 100
+    assert len(selected) == 4
 
     required = {
         "video_id",
@@ -466,6 +466,37 @@ def test_r4_reader_handoff_preserves_candidate_identity(
         for item in candidates
     ]
 
+
+@pytest.mark.parametrize(
+    ("semantic_k_hint", "reader_k"),
+    [(100, 4), (300, 8), (500, 12)],
+)
+def test_semantic_retrieval_budget_maps_to_bounded_reader_k(
+    semantic_k_hint,
+    reader_k,
+):
+    from scripts.adaptive_k import AdaptiveKEngine
+
+    candidates = [
+        {
+            "video_id": f"V{i:03d}",
+            "frame_id": 1000 + i,
+            "n": i,
+            "score": 1.0 / (i + 1),
+        }
+        for i in range(20)
+    ]
+
+    result = AdaptiveKEngine().select(
+        query_id="reader-budget",
+        candidates=candidates,
+        semantic_k_hint=semantic_k_hint,
+    )
+
+    assert result.k_requested == semantic_k_hint
+    assert result.reader_k_requested == reader_k
+    assert result.k_effective == reader_k
+    assert list(result.selected_candidates) == candidates[:reader_k]
 
 # ============================================================================ 
 # 8.4 — Candidate schema rejection
@@ -904,7 +935,7 @@ def test_benchmark_executes_actual_r4_selection(
 
     assert statistics[
         "selected_candidate_total"
-    ] == 100
+    ] == 4
 
     assert statistics[
         "query_count"
@@ -1002,7 +1033,7 @@ def test_benchmark_does_not_count_validation_as_selection(
 
     assert report["statistics"][
         "selected_candidate_total"
-    ] == 100
+    ] == 4
 
 
 # ============================================================================ 
@@ -1077,13 +1108,14 @@ def test_end_to_end_s4_r3_r4_reader_contract(
 
     assert result.query_id == "e2e-q01"
     assert result.k_requested == 100
+    assert result.reader_k_requested == 4
     assert result.k_available == 100
-    assert result.k_effective == 100
+    assert result.k_effective == 4
     assert result.status == "ok"
 
     assert list(
         result.selected_candidates
-    ) == r3_candidates
+    ) == r3_candidates[:4]
 
     # Reader-facing serialized artifact.
     record = json.loads(
@@ -1098,7 +1130,7 @@ def test_end_to_end_s4_r3_r4_reader_contract(
         "selected_candidates"
     ]
 
-    assert len(reader_candidates) == 100
+    assert len(reader_candidates) == 4
 
     required = {
         "video_id",
@@ -1113,7 +1145,7 @@ def test_end_to_end_s4_r3_r4_reader_contract(
     )
 
     # Exact R3 -> R4 preservation.
-    assert reader_candidates == r3_candidates
+    assert reader_candidates == r3_candidates[:4]
 
 
 def test_end_to_end_short_pool_is_explicitly_clamped(
@@ -1142,7 +1174,7 @@ def test_end_to_end_short_pool_is_explicitly_clamped(
             "n": i + 1,
             "score": 1.0 / (i + 1),
         }
-        for i in range(12)
+        for i in range(3)
     ]
 
     s4_path.write_text(
@@ -1174,8 +1206,9 @@ def test_end_to_end_short_pool_is_explicitly_clamped(
     result = results[0]
 
     assert result.k_requested == 100
-    assert result.k_available == 12
-    assert result.k_effective == 12
+    assert result.reader_k_requested == 4
+    assert result.k_available == 3
+    assert result.k_effective == 3
 
     assert result.status == "ok_with_warning"
 

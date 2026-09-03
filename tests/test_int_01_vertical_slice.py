@@ -9,7 +9,10 @@ from scripts.int_01_vertical_slice import (
     audit_candidate,
     audit_qa_r1_handoff,
     find_qa_r1_record,
+    load_qa_r4_output,
     normalize_answer,
+    parse_query_plan,
+    reader_candidates,
     review_vertical_slice,
 )
 
@@ -76,6 +79,25 @@ class TestInt01Contracts(unittest.TestCase):
     def test_find_qa_r1_record_rejects_missing_query(self):
         with self.assertRaises(KeyError):
             find_qa_r1_record(make_profile(), "99")
+
+    def test_reader_candidates_prefers_r4_selected_candidates(self):
+        record = {
+            "selected_candidates": [],
+            "candidates": [{"video_id": "must-not-be-used"}],
+        }
+        self.assertEqual(reader_candidates(record), [])
+
+    def test_load_qa_r4_output_reads_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "qa_r4.jsonl"
+            path.write_text(
+                '{"query_id":"12","selected_candidates":[]}\n',
+                encoding="utf-8",
+            )
+            profile = load_qa_r4_output(path)
+
+        self.assertEqual(profile["task"], "QA-R4")
+        self.assertEqual(profile["query_records"][0]["query_id"], "12")
 
     def test_candidate_requires_integer_frame_and_provenance(self):
         candidate = make_candidate()
@@ -179,6 +201,48 @@ class TestInt01Contracts(unittest.TestCase):
             {"clip_l": 18, "ocr": 3},
         )
         self.assertTrue(report["acceptance"]["candidate_provenance_present"])
+        self.assertEqual(report["status"], "pass")
+
+    def test_vertical_slice_consumes_real_r4_contract(self):
+        plan = parse_query_plan(make_query())
+        candidate = {
+            "video_id": "L23_V024",
+            "frame_id": 6695,
+            "n": 57,
+            "score": 0.72,
+        }
+        profile = {
+            "task": "QA-R4",
+            "query_records": [
+                {
+                    "query_id": "12",
+                    "k_requested": plan["semantic_k_hint"],
+                    "reader_k_requested": 4,
+                    "k_effective": 1,
+                    "selected_candidates": [candidate],
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "057.jpg"
+            image.write_bytes(b"fake-image")
+            report = review_vertical_slice(
+                query=make_query(),
+                profile=profile,
+                image_resolver=lambda video_id, n: image,
+                reader=lambda image_path, question: {
+                    "answer": "Xã Giang Ly",
+                    "confidence": 0.87,
+                    "confidence_method": "test_probability_v1",
+                },
+                model_id="reader-v3",
+            )
+
+        self.assertEqual(report["candidate_source"], "QA-R4")
+        self.assertEqual(report["evidence_answer"]["frame_idx"], 6695)
+        self.assertTrue(report["acceptance"]["candidate_locator_valid"])
+        self.assertFalse(report["issues"])
         self.assertEqual(report["status"], "pass")
 
 
