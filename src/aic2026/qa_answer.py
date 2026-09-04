@@ -626,7 +626,11 @@ def tra_loi(
 
         # Không dùng một thứ tự cho mọi câu. BLIP-VQA base không đọc tốt chữ
         # và tên riêng; OCR rác lại không được phép chặn ASR ở câu địa điểm.
-        if loai in (DEM, MAU):
+        if loai == DEM:
+            # Câu hỏi đếm: không cho OCR-number chặn VLM.
+            # Một con số xuất hiện trên ảnh không nhất thiết là kết quả đếm.
+            thu_tu = (bang_vlm,)
+        elif loai == MAU:
             thu_tu = (bang_vlm, bang_ocr, bang_asr)
         elif loai in (CHU_TREN_HINH, THOI_GIAN, DIA_DIEM):
             thu_tu = (bang_ocr, bang_asr, bang_vlm)

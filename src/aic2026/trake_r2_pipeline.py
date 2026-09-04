@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from aic2026.trake_r2_dp import solve_strict_increasing_path
-from aic2026.trake_r2_score import build_dense_score_fn
+from aic2026.trake_r2_score import (
+    build_dense_score_fn,
+    select_video_by_sparse_dp,
+)
 from aic2026.trake_r2_windows import (
     generate_dense_time_grid,
     chon_video_rrf,
     gop_cac_cua_so_theo_video,
+    rank_video_candidates_rrf,
+    windows_from_anchor_times,
 )
 
 
@@ -128,6 +133,110 @@ def _align_trake_fixed_window(
     )
 
 
+def _align_prepared_dense_scorer(
+    events_tr_r1: Mapping[str, dict],
+    scorer: Any,
+    *,
+    video_id: str,
+    windows: Sequence[tuple[float, float]],
+    min_gap: int = 1,
+) -> dict[str, Any]:
+    """Chạy DP trực tiếp trên dense frames thật đã được scorer encode.
+
+    Production không đi qua lưới timestamp giả rồi map nearest-frame nữa.
+    Vì vậy strict-increasing áp dụng trực tiếp lên vị trí dense frame và
+    output giữ được ``frame_idx`` thật.
+    """
+
+    event_ids = list(events_tr_r1.keys())
+    frames = list(getattr(scorer, "frames", []))
+    score_matrix = getattr(scorer, "score_matrix", None)
+
+    if not frames:
+        raise ValueError(
+            f"Không có dense frame thật cho video={video_id!r}"
+        )
+
+    if score_matrix is None:
+        raise ValueError("Dense scorer chưa có score_matrix")
+
+    for left, right in zip(frames, frames[1:]):
+        left_frame_idx = int(left.frame_idx)
+        right_frame_idx = int(right.frame_idx)
+        left_pts_time = float(left.pts_time)
+        right_pts_time = float(right.pts_time)
+
+        # Timestamp bằng nhau là hợp lệ khi frame map bị lượng tử/làm tròn;
+        # output TRAKE chỉ yêu cầu frame_idx thật tăng nghiêm ngặt.
+        if left_frame_idx >= right_frame_idx:
+            raise ValueError(
+                "Dense frame_idx không tăng nghiêm ngặt cho "
+                f"video={video_id!r}: "
+                f"{left_frame_idx} -> {right_frame_idx}"
+            )
+
+        if left_pts_time > right_pts_time:
+            raise ValueError(
+                "Dense pts_time bị giảm cho "
+                f"video={video_id!r}: "
+                f"frame_idx={left_frame_idx}, pts_time={left_pts_time} "
+                f"-> frame_idx={right_frame_idx}, "
+                f"pts_time={right_pts_time}"
+            )
+
+    matrix = score_matrix.tolist()
+    chosen_positions, total_score = solve_strict_increasing_path(
+        matrix,
+        min_gap=min_gap,
+    )
+
+    chosen_frames = [
+        frames[position]
+        for position in chosen_positions
+    ]
+
+    chosen_frame_idx = [
+        int(frame.frame_idx)
+        for frame in chosen_frames
+    ]
+
+    if any(
+        left >= right
+        for left, right in zip(
+            chosen_frame_idx,
+            chosen_frame_idx[1:],
+        )
+    ):
+        raise ValueError(
+            "Dense DP vi phạm invariant frame_idx tăng nghiêm ngặt"
+        )
+
+    return {
+        "video_id": str(video_id),
+        "windows": [
+            [float(start), float(end)]
+            for start, end in windows
+        ],
+        "dense_frame_times": [
+            float(frame.pts_time)
+            for frame in frames
+        ],
+        "chosen_positions": [
+            int(position)
+            for position in chosen_positions
+        ],
+        "chosen_frame_idx": [
+            int(frame_idx)
+            for frame_idx in chosen_frame_idx
+        ],
+        "chosen_times": {
+            event_id: float(frame.pts_time)
+            for event_id, frame in zip(event_ids, chosen_frames)
+        },
+        "total_score": float(total_score),
+    }
+
+
 def align_trake_query(
     events_tr_r1: dict,
     score_fn: Callable[[str, float], float],
@@ -210,6 +319,167 @@ def align_trake_query(
 # ============================================================================
 
 
+def _tr_r1_results_to_events(
+    tr_r1_results: Sequence,
+) -> dict[str, dict[str, Any]]:
+    """Adapter duy nhất từ TRR1Result sang contract nội bộ của TR-R2."""
+
+    events: dict[str, dict[str, Any]] = {}
+
+    for result in tr_r1_results:
+        event_id = str(result.event_id)
+
+        if event_id in events:
+            raise ValueError(f"Trùng event_id trong TR-R2: {event_id!r}")
+
+        events[event_id] = {
+            "text": str(result.text),
+            "relation": result.relation,
+            "regions": [
+                {
+                    "video_id": str(region.video_id),
+                    "start_time": float(region.start_time),
+                    "end_time": float(region.end_time),
+                    "score": float(region.score),
+                    "hits": region.hits,
+                }
+                for region in result.regions
+            ],
+        }
+
+    return events
+
+
+def _select_sparse_video_and_windows(
+    events_tr_r1: Mapping[str, dict[str, Any]],
+    *,
+    rrf_k: int,
+    video_beam_size: int,
+    sparse_min_gap: int,
+    sparse_window_padding_seconds: float,
+    window_padding_seconds: float,
+    sparse_use_query_expansion: bool,
+    sparse_max_query_variants: int,
+) -> tuple[str, list[tuple[float, float]], dict[str, Any]]:
+    """Candidate beam -> video-local sparse DP -> anchor windows."""
+
+    if video_beam_size <= 0:
+        raise ValueError("video_beam_size phải > 0")
+
+    if sparse_min_gap < 1:
+        raise ValueError("sparse_min_gap phải >= 1")
+
+    if sparse_window_padding_seconds < 0:
+        raise ValueError("sparse_window_padding_seconds phải >= 0")
+
+    if window_padding_seconds < 0:
+        raise ValueError("window_padding_seconds phải >= 0")
+
+    events_regions = {
+        event_id: data["regions"]
+        for event_id, data in events_tr_r1.items()
+    }
+    event_texts = {
+        event_id: str(data["text"])
+        for event_id, data in events_tr_r1.items()
+    }
+
+    candidate_video_ids = rank_video_candidates_rrf(
+        events_regions,
+        k=rrf_k,
+        limit=video_beam_size,
+    )
+
+    sparse_selection = select_video_by_sparse_dp(
+        event_texts,
+        candidate_video_ids,
+        min_gap=sparse_min_gap,
+        use_query_expansion=sparse_use_query_expansion,
+        max_query_variants=sparse_max_query_variants,
+    )
+
+    video_id = str(sparse_selection["video_id"])
+    chosen_times = sparse_selection.get("chosen_times")
+
+    if not isinstance(chosen_times, dict):
+        raise ValueError("Sparse selector không trả chosen_times dạng dict")
+
+    missing_events = [
+        event_id
+        for event_id in events_tr_r1
+        if event_id not in chosen_times
+    ]
+
+    if missing_events:
+        raise ValueError(
+            "Sparse selector thiếu event: " + ", ".join(missing_events)
+        )
+
+    windows = windows_from_anchor_times(
+        [
+            float(chosen_times[event_id])
+            for event_id in events_tr_r1
+        ],
+        padding_seconds=sparse_window_padding_seconds,
+    )
+
+    if window_padding_seconds > 0:
+        windows = [
+            (
+                max(0.0, start - window_padding_seconds),
+                end + window_padding_seconds,
+            )
+            for start, end in windows
+        ]
+
+    sparse_selection = dict(sparse_selection)
+    sparse_selection["candidate_video_ids"] = candidate_video_ids
+    sparse_selection["windows"] = [
+        [float(start), float(end)]
+        for start, end in windows
+    ]
+
+    return video_id, windows, sparse_selection
+
+
+def run_trake_r2_sparse_selection(
+    tr_r1_results: Sequence,
+    *,
+    rrf_k: int = 60,
+    video_beam_size: int = 12,
+    sparse_min_gap: int = 1,
+    sparse_window_padding_seconds: float = 5.0,
+    window_padding_seconds: float = 0.0,
+    sparse_use_query_expansion: bool = True,
+    sparse_max_query_variants: int = 4,
+) -> dict[str, Any]:
+    """Chạy riêng video-local sparse stage, không cần dense frames."""
+
+    if not tr_r1_results:
+        raise ValueError(
+            "TR-R2 sparse selection yêu cầu ít nhất một TRR1Result."
+        )
+
+    events_tr_r1 = _tr_r1_results_to_events(tr_r1_results)
+    video_id, windows, selection = _select_sparse_video_and_windows(
+        events_tr_r1,
+        rrf_k=rrf_k,
+        video_beam_size=video_beam_size,
+        sparse_min_gap=sparse_min_gap,
+        sparse_window_padding_seconds=sparse_window_padding_seconds,
+        window_padding_seconds=window_padding_seconds,
+        sparse_use_query_expansion=sparse_use_query_expansion,
+        sparse_max_query_variants=sparse_max_query_variants,
+    )
+
+    return {
+        "video_id": video_id,
+        "event_ids": list(events_tr_r1.keys()),
+        "windows": windows,
+        "selection": selection,
+    }
+
+
 def run_trake_r2(
     tr_r1_results: Sequence,
     *,
@@ -218,17 +488,22 @@ def run_trake_r2(
     rrf_k: int = 60,
     window_padding_seconds: float = 0.0,
     batch_size: int = 16,
+    video_beam_size: int = 12,
+    sparse_min_gap: int = 1,
+    sparse_window_padding_seconds: float = 5.0,
+    sparse_use_query_expansion: bool = True,
+    sparse_max_query_variants: int = 4,
 ) -> dict:
     """
     Production orchestration:
 
         TR-R1Result
-            -> normalize CoarseRegion
-            -> chọn video
-            -> chọn nhiều coarse windows
+            -> Top-B video beam
+            -> rescore toàn bộ sparse keyframe trong từng video
+            -> strict-increasing sparse DP chọn video + anchors
+            -> local dense windows quanh anchors
             -> dense CLIP-L scorer
-            -> dense score matrix
-            -> strict-increasing DP
+            -> strict-increasing dense DP
 
     `tr_r1_results` là output trực tiếp của:
         tim_nhieu_su_kien(...)
@@ -238,8 +513,8 @@ def run_trake_r2(
     nên không load model lần thứ hai.
 
     Quan trọng:
-        - video selection chỉ dùng TR-R1
-        - window selection chỉ dùng TR-R1
+        - video/window selection không dùng GT
+        - sparse image vectors được tái sử dụng, không encode ảnh lại
         - không dùng GT
     """
 
@@ -248,99 +523,138 @@ def run_trake_r2(
             "TR-R2 yêu cầu ít nhất một TRR1Result."
         )
 
-    # ------------------------------------------------------------------
-    # 1. Adapter TR-R1Result -> contract của TR-R2.
-    # ------------------------------------------------------------------
+    events_tr_r1 = _tr_r1_results_to_events(tr_r1_results)
 
-    events_tr_r1 = {
-        result.event_id: {
-            "text": result.text,
-            "relation": result.relation,
-            "regions": [
-                {
-                    "video_id": region.video_id,
-                    "start_time": region.start_time,
-                    "end_time": region.end_time,
-                    "score": region.score,
-                    "hits": region.hits,
-                }
-                for region in result.regions
-            ],
-        }
-        for result in tr_r1_results
-    }
-
-    # ------------------------------------------------------------------
-    # 2. Giữ nguyên thứ tự event của QueryPlan.
-    # ------------------------------------------------------------------
-
-    event_ids = list(events_tr_r1.keys())
-
-    # ------------------------------------------------------------------
-    # 3. Chọn video DUY NHẤT bằng RRF.
-    # ------------------------------------------------------------------
-
-    events_regions = {
-        event_id: data["regions"]
-        for event_id, data in events_tr_r1.items()
-    }
-
-    video_id = chon_video_rrf(
-        events_regions,
-        k=rrf_k,
-    )
-
-    # ------------------------------------------------------------------
-    # 4. Chọn nhiều coarse windows của video.
-    #
-    # Đây là điểm thay đổi chính so với implementation cũ.
-    # ------------------------------------------------------------------
-
-    windows = gop_cac_cua_so_theo_video(
-        events_regions,
-        video_id,
-    )
-
-    # ------------------------------------------------------------------
-    # 5. Padding từng window độc lập.
-    # ------------------------------------------------------------------
-
-    windows = [
-        (
-            max(0.0, start - window_padding_seconds),
-            end + window_padding_seconds,
+    video_id, windows, sparse_selection = (
+        _select_sparse_video_and_windows(
+            events_tr_r1,
+            rrf_k=rrf_k,
+            video_beam_size=video_beam_size,
+            sparse_min_gap=sparse_min_gap,
+            sparse_window_padding_seconds=(
+                sparse_window_padding_seconds
+            ),
+            window_padding_seconds=window_padding_seconds,
+            sparse_use_query_expansion=(
+                sparse_use_query_expansion
+            ),
+            sparse_max_query_variants=(
+                sparse_max_query_variants
+            ),
         )
-        for start, end in windows
-    ]
-
-    # ------------------------------------------------------------------
-    # 6. Event text -> dense CLIP-L scorer.
-    #
-    # Scorer phải encode dense frames thuộc TẤT CẢ windows,
-    # nhưng chỉ load CLIP-L runtime một lần.
-    # ------------------------------------------------------------------
+    )
 
     event_texts = {
         event_id: data["text"]
         for event_id, data in events_tr_r1.items()
     }
 
-    _scorer, score_fn = build_dense_score_fn(
+    scorer, _score_fn = build_dense_score_fn(
         video_id=video_id,
         windows=windows,
         event_texts=event_texts,
         batch_size=batch_size,
     )
 
-    # ------------------------------------------------------------------
-    # 7. Dense time grid + strict-increasing DP.
-    # ------------------------------------------------------------------
-
-    return _align_trake_fixed_windows(
+    alignment = _align_prepared_dense_scorer(
         events_tr_r1,
-        score_fn,
+        scorer,
         video_id=video_id,
         windows=windows,
-        step=step,
         min_gap=min_gap,
     )
+
+    alignment["sparse_selection"] = sparse_selection
+    alignment["step"] = float(step)
+
+    return alignment
+
+def run_trake_r2_diagnostics(
+    tr_r1_results: Sequence,
+    *,
+    step: float = 0.16,
+    min_gap: int = 1,
+    rrf_k: int = 60,
+    window_padding_seconds: float = 0.0,
+    batch_size: int = 16,
+    video_beam_size: int = 12,
+    sparse_min_gap: int = 1,
+    sparse_window_padding_seconds: float = 5.0,
+    sparse_use_query_expansion: bool = True,
+    sparse_max_query_variants: int = 4,
+) -> dict:
+    """
+    Phiên bản diagnostics của TR-R2 dành cho TR-E2.
+
+    Giữ nguyên toàn bộ logic production của run_trake_r2(),
+    nhưng trả thêm DenseClipLScorer để TR-E2 có thể đọc:
+
+        - scorer.frames
+        - scorer.score_matrix
+
+    Không dùng ground truth.
+    Không thay đổi contract của run_trake_r2() cũ.
+    """
+
+    if not tr_r1_results:
+        raise ValueError(
+            "TR-R2 diagnostics yêu cầu ít nhất một TRR1Result."
+        )
+
+    events_tr_r1 = _tr_r1_results_to_events(tr_r1_results)
+    event_ids = list(events_tr_r1.keys())
+
+    video_id, windows, sparse_selection = (
+        _select_sparse_video_and_windows(
+            events_tr_r1,
+            rrf_k=rrf_k,
+            video_beam_size=video_beam_size,
+            sparse_min_gap=sparse_min_gap,
+            sparse_window_padding_seconds=(
+                sparse_window_padding_seconds
+            ),
+            window_padding_seconds=window_padding_seconds,
+            sparse_use_query_expansion=(
+                sparse_use_query_expansion
+            ),
+            sparse_max_query_variants=(
+                sparse_max_query_variants
+            ),
+        )
+    )
+
+    event_texts = {
+        event_id: data["text"]
+        for event_id, data in events_tr_r1.items()
+    }
+
+    scorer, _score_fn = build_dense_score_fn(
+        video_id=video_id,
+        windows=windows,
+        event_texts=event_texts,
+        batch_size=batch_size,
+    )
+
+    alignment = _align_prepared_dense_scorer(
+        events_tr_r1,
+        scorer,
+        video_id=video_id,
+        windows=windows,
+        min_gap=min_gap,
+    )
+
+    alignment["sparse_selection"] = sparse_selection
+    alignment["step"] = float(step)
+
+    # ------------------------------------------------------------------
+    # 8. Trả thêm scorer cho TR-E2.
+    # ------------------------------------------------------------------
+
+    return {
+        "video_id": video_id,
+        "event_ids": event_ids,
+        "windows": windows,
+        "alignment": alignment,
+        "scorer": scorer,
+        "sparse_selection": sparse_selection,
+    }

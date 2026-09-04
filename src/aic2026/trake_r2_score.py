@@ -2,11 +2,20 @@
 trake_r2_score.py
 =================
 
-TR-R2 local dense CLIP-L scorer.
+TR-R2 video-local sparse selector và local dense CLIP-L scorer.
 
 Mục tiêu
 --------
-Sau khi TR-R2 đã chọn được:
+Module có hai tầng:
+
+    1. Top-B video candidate
+       -> rescore toàn bộ sparse CLIP-L keyframes mỗi video
+       -> strict-increasing DP chọn video + anchors;
+
+    2. Sau khi chọn video, encode dense frames trong local windows
+       quanh anchors để chạy dense DP/TR-E2.
+
+Ở tầng dense, sau khi TR-R2 đã chọn được:
 
     video_id
     local temporal windows
@@ -36,13 +45,15 @@ Runtime này trả:
 
     model, tokenizer, device, index, ids
 
-TR-R2 chỉ dùng:
+Sparse selection dùng:
 
     model
     tokenizer
     device
+    ids
 
-Index/ids của FAISS không dùng trong local dense scoring.
+và đọc image embeddings đã có từ ``derived/clip_l/<video_id>.npy``.
+Không encode lại sparse images và không reconstruct FAISS vectors.
 
 Dense frame dùng frame_idx thật, không dùng n.
 
@@ -70,7 +81,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -78,7 +89,11 @@ import torch
 from PIL import Image
 
 from aic2026.paths import DATA_ROOT
-from aic2026.trake_retrieval import _get_trr1_clip_l_runtime
+from aic2026.trake_r2_dp import solve_strict_increasing_path
+from aic2026.trake_retrieval import (
+    _get_trr1_clip_l_runtime,
+    _query_variants,
+)
 
 
 # ---------------------------------------------------------------------
@@ -112,6 +127,15 @@ class DenseFrame:
     frame_idx: int
     pts_time: float
     path: Path
+
+
+@dataclass(frozen=True)
+class SparseKeyframe:
+    """Một keyframe sparse và mapping thật dùng cho video-local DP."""
+
+    n: int
+    frame_idx: int
+    pts_time: float
 
 
 # ---------------------------------------------------------------------
@@ -474,6 +498,417 @@ def _normalize_embeddings(
     ).clamp_min(1e-12)
 
 
+def _encode_texts_with_runtime(
+    model: Any,
+    tokenizer: Any,
+    device: Any,
+    texts: Sequence[str],
+) -> torch.Tensor:
+    """Encode và L2-normalize text bằng runtime CLIP-L đã load."""
+
+    if not texts:
+        raise ValueError("texts không được rỗng")
+
+    tokens = tokenizer(list(texts))
+
+    if hasattr(tokens, "to"):
+        tokens = tokens.to(device)
+    elif isinstance(tokens, dict):
+        tokens = {
+            key: value.to(device)
+            if hasattr(value, "to")
+            else value
+            for key, value in tokens.items()
+        }
+
+    with torch.inference_mode():
+        features = model.encode_text(tokens)
+
+    return _normalize_embeddings(features.float())
+
+
+def solve_sparse_video_paths(
+    event_ids: Sequence[str],
+    frames_by_video: Mapping[str, Sequence[SparseKeyframe]],
+    score_matrices: Mapping[str, np.ndarray],
+    *,
+    min_gap: int = 1,
+    candidate_order: Sequence[str] | None = None,
+    anchor_time_matrices: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, Any]:
+    """Chạy strict-increasing DP trên từng video và chọn path tốt nhất.
+
+    Đây là lõi pure/testable. Mỗi ma trận có shape
+    ``(num_events, num_sparse_keyframes)`` và các cột phải cùng thứ tự với
+    ``frames_by_video[video_id]``.
+    """
+
+    normalized_event_ids = [str(event_id) for event_id in event_ids]
+
+    if not normalized_event_ids:
+        raise ValueError("event_ids không được rỗng")
+
+    if min_gap < 1:
+        raise ValueError("sparse min_gap phải >= 1")
+
+    if candidate_order is None:
+        ordered_video_ids = list(frames_by_video.keys())
+    else:
+        ordered_video_ids = [str(video_id) for video_id in candidate_order]
+
+    if not ordered_video_ids:
+        raise ValueError("Không có sparse video candidate")
+
+    candidate_results: list[dict[str, Any]] = []
+
+    for beam_rank, video_id in enumerate(ordered_video_ids, start=1):
+        if video_id not in frames_by_video:
+            continue
+
+        if video_id not in score_matrices:
+            raise ValueError(
+                f"Thiếu sparse score matrix cho video={video_id!r}"
+            )
+
+        frames = list(frames_by_video[video_id])
+        matrix = np.asarray(score_matrices[video_id], dtype=np.float32)
+
+        expected_shape = (len(normalized_event_ids), len(frames))
+
+        if matrix.shape != expected_shape:
+            raise ValueError(
+                f"Sparse matrix video={video_id!r} có shape "
+                f"{matrix.shape}, cần {expected_shape}"
+            )
+
+        if not np.isfinite(matrix).all():
+            raise ValueError(
+                f"Sparse matrix video={video_id!r} chứa NaN/Inf"
+            )
+
+        if anchor_time_matrices is None:
+            anchor_times = np.broadcast_to(
+                np.asarray(
+                    [float(frame.pts_time) for frame in frames],
+                    dtype=np.float64,
+                ),
+                expected_shape,
+            )
+        else:
+            if video_id not in anchor_time_matrices:
+                raise ValueError(
+                    "Thiếu sparse anchor-time matrix cho "
+                    f"video={video_id!r}"
+                )
+
+            anchor_times = np.asarray(
+                anchor_time_matrices[video_id],
+                dtype=np.float64,
+            )
+
+            if anchor_times.shape != expected_shape:
+                raise ValueError(
+                    f"Sparse anchor-time matrix video={video_id!r} có "
+                    f"shape {anchor_times.shape}, cần {expected_shape}"
+                )
+
+        if not np.isfinite(anchor_times).all():
+            raise ValueError(
+                "Sparse anchor-time matrix chứa NaN/Inf cho "
+                f"video={video_id!r}"
+            )
+
+        if len(frames) < 1 + (len(normalized_event_ids) - 1) * min_gap:
+            continue
+
+        for left, right in zip(frames, frames[1:]):
+            left_frame_idx = int(left.frame_idx)
+            right_frame_idx = int(right.frame_idx)
+            left_pts_time = float(left.pts_time)
+            right_pts_time = float(right.pts_time)
+
+            # TRAKE nộp frame_idx thật, vì vậy đây mới là invariant phải
+            # tăng nghiêm ngặt. Hai sparse keyframe kề nhau có thể có cùng
+            # pts_time do timestamp trong frame map bị lượng tử/làm tròn.
+            if left_frame_idx >= right_frame_idx:
+                raise ValueError(
+                    "Sparse frame_idx không tăng nghiêm ngặt cho "
+                    f"video={video_id!r}: "
+                    f"{left_frame_idx} -> {right_frame_idx}"
+                )
+
+            if left_pts_time > right_pts_time:
+                raise ValueError(
+                    "Sparse pts_time bị giảm cho "
+                    f"video={video_id!r}: "
+                    f"frame_idx={left_frame_idx}, pts_time={left_pts_time} "
+                    f"-> frame_idx={right_frame_idx}, "
+                    f"pts_time={right_pts_time}"
+                )
+
+        chosen_positions, total_score = solve_strict_increasing_path(
+            matrix.tolist(),
+            min_gap=min_gap,
+        )
+
+        chosen_frames = [
+            frames[position]
+            for position in chosen_positions
+        ]
+
+        candidate_results.append(
+            {
+                "video_id": video_id,
+                "beam_rank": int(beam_rank),
+                "num_sparse_frames": len(frames),
+                "chosen_positions": [
+                    int(position)
+                    for position in chosen_positions
+                ],
+                "chosen_frame_idx": [
+                    int(frame.frame_idx)
+                    for frame in chosen_frames
+                ],
+                "chosen_times": {
+                    event_id: float(anchor_times[event_index, position])
+                    for event_index, (event_id, position) in enumerate(
+                        zip(normalized_event_ids, chosen_positions)
+                    )
+                },
+                "total_score": float(total_score),
+                "mean_score": float(total_score) / len(normalized_event_ids),
+            }
+        )
+
+    if not candidate_results:
+        raise ValueError(
+            "Không video candidate nào có đủ sparse keyframe cho DP"
+        )
+
+    candidate_results.sort(
+        key=lambda item: (
+            -float(item["mean_score"]),
+            int(item["beam_rank"]),
+            str(item["video_id"]),
+        )
+    )
+
+    winner = dict(candidate_results[0])
+    winner["candidate_scores"] = [
+        {
+            "video_id": str(item["video_id"]),
+            "beam_rank": int(item["beam_rank"]),
+            "num_sparse_frames": int(item["num_sparse_frames"]),
+            "total_score": float(item["total_score"]),
+            "mean_score": float(item["mean_score"]),
+        }
+        for item in candidate_results
+    ]
+
+    return winner
+
+
+def select_video_by_sparse_dp(
+    event_texts: Mapping[str, str],
+    video_ids: Sequence[str],
+    *,
+    min_gap: int = 1,
+    use_query_expansion: bool = True,
+    max_query_variants: int = 4,
+) -> dict[str, Any]:
+    """Rescore toàn bộ sparse CLIP-L keyframe trong candidate videos.
+
+    Text được encode một lần cho cả query. Với mỗi event, điểm của một
+    keyframe là cosine lớn nhất qua các query variants. Image embeddings
+    được đọc từ ``derived/clip_l/<video_id>.npy``; không encode lại ảnh và
+    không dùng GT.
+    """
+
+    normalized_event_texts = {
+        str(event_id): str(text).strip()
+        for event_id, text in event_texts.items()
+    }
+
+    if not normalized_event_texts:
+        raise ValueError("event_texts không được rỗng")
+
+    if any(not text for text in normalized_event_texts.values()):
+        raise ValueError("Mọi sparse event text phải khác rỗng")
+
+    if min_gap < 1:
+        raise ValueError("sparse min_gap phải >= 1")
+
+    if max_query_variants <= 0:
+        raise ValueError("max_query_variants phải > 0")
+
+    candidate_video_ids: list[str] = []
+
+    for raw_video_id in video_ids:
+        video_id = str(raw_video_id)
+        if video_id and video_id not in candidate_video_ids:
+            candidate_video_ids.append(video_id)
+
+    if not candidate_video_ids:
+        raise ValueError("video_ids không được rỗng")
+
+    model, tokenizer, device, _index, ids = _get_trr1_clip_l_runtime()
+    model.eval()
+
+    required_columns = {"video_id", "n", "frame_idx", "pts_time"}
+    missing_columns = required_columns - set(ids.columns)
+
+    if missing_columns:
+        raise ValueError(
+            "clip_l_ids thiếu cột: " + ", ".join(sorted(missing_columns))
+        )
+
+    event_ids = list(normalized_event_texts.keys())
+    flat_variants: list[str] = []
+    variant_positions: dict[str, list[int]] = {}
+
+    for event_id in event_ids:
+        variants = _query_variants(
+            normalized_event_texts[event_id],
+            use_query_expansion=use_query_expansion,
+            max_query_variants=max_query_variants,
+        )
+
+        positions: list[int] = []
+
+        for variant in variants:
+            positions.append(len(flat_variants))
+            flat_variants.append(str(variant))
+
+        if not positions:
+            raise ValueError(
+                f"Không tạo được query variant cho event={event_id!r}"
+            )
+
+        variant_positions[event_id] = positions
+
+    text_features = _encode_texts_with_runtime(
+        model,
+        tokenizer,
+        device,
+        flat_variants,
+    ).detach().cpu().numpy().astype(np.float32, copy=False)
+
+    from aic2026.index import clip_l_index
+
+    frames_by_video: dict[str, list[SparseKeyframe]] = {}
+    score_matrices: dict[str, np.ndarray] = {}
+    anchor_time_matrices: dict[str, np.ndarray] = {}
+
+    for video_id in candidate_video_ids:
+        rows = ids[
+            ids["video_id"].astype(str) == video_id
+        ][["n", "frame_idx", "pts_time"]].copy()
+
+        if rows.empty:
+            continue
+
+        rows = rows.sort_values("n").reset_index(drop=True)
+
+        if rows["n"].duplicated().any():
+            raise ValueError(
+                f"clip_l_ids trùng n cho video={video_id!r}"
+            )
+
+        image_features = clip_l_index.doc_dac_trung(
+            video_id,
+            so_hang_can=len(rows),
+        ).astype(np.float32, copy=False)
+
+        norms = np.linalg.norm(image_features, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        image_features = image_features / norms
+
+        pts_times = rows["pts_time"].astype(float).to_numpy()
+        frame_indices = rows["frame_idx"].astype(int).to_numpy()
+
+        if not np.isfinite(pts_times).all():
+            raise ValueError(
+                f"clip_l_ids chứa pts_time NaN/Inf cho video={video_id!r}"
+            )
+
+        temporal_order = np.lexsort((frame_indices, pts_times))
+
+        rows = rows.iloc[temporal_order].reset_index(drop=True)
+        image_features = image_features[temporal_order]
+        pts_times = pts_times[temporal_order]
+        frame_indices = frame_indices[temporal_order]
+
+        variant_scores = text_features @ image_features.T
+
+        raw_event_scores = np.stack(
+            [
+                np.max(
+                    variant_scores[variant_positions[event_id]],
+                    axis=0,
+                )
+                for event_id in event_ids
+            ],
+            axis=0,
+        ).astype(np.float32, copy=False)
+
+        # frame_idx là đơn vị output của TRAKE. Trong frame map thực tế có
+        # trường hợp hai keyframe (hai n/pts_time khác nhau) cùng quy đổi về
+        # một frame_idx. Nếu để nguyên hai cột, DP có thể chọn cùng frame_idx
+        # cho hai event và vi phạm strict-increasing. Gộp theo frame_idx,
+        # nhưng lấy max score RIÊNG cho từng event để không làm mất keyframe
+        # có tín hiệu CLIP tốt hơn.
+        representative_rows: list[int] = []
+        collapsed_score_columns: list[np.ndarray] = []
+        collapsed_time_columns: list[np.ndarray] = []
+
+        for frame_idx in np.unique(frame_indices):
+            positions = np.flatnonzero(frame_indices == frame_idx)
+            representative_rows.append(
+                int(positions[np.argmin(pts_times[positions])])
+            )
+            scores_for_frame = raw_event_scores[:, positions]
+            best_positions = np.argmax(scores_for_frame, axis=1)
+
+            collapsed_score_columns.append(
+                scores_for_frame[
+                    np.arange(len(event_ids)),
+                    best_positions,
+                ]
+            )
+            collapsed_time_columns.append(
+                pts_times[positions[best_positions]]
+            )
+
+        rows = rows.iloc[representative_rows].reset_index(drop=True)
+        event_scores = np.stack(
+            collapsed_score_columns,
+            axis=1,
+        ).astype(np.float32, copy=False)
+
+        frames_by_video[video_id] = [
+            SparseKeyframe(
+                n=int(row.n),
+                frame_idx=int(row.frame_idx),
+                pts_time=float(row.pts_time),
+            )
+            for row in rows.itertuples(index=False)
+        ]
+        score_matrices[video_id] = event_scores
+        anchor_time_matrices[video_id] = np.stack(
+            collapsed_time_columns,
+            axis=1,
+        ).astype(np.float64, copy=False)
+
+    return solve_sparse_video_paths(
+        event_ids,
+        frames_by_video,
+        score_matrices,
+        min_gap=min_gap,
+        candidate_order=candidate_video_ids,
+        anchor_time_matrices=anchor_time_matrices,
+    )
+
+
 # ---------------------------------------------------------------------
 # Dense scorer
 # ---------------------------------------------------------------------
@@ -670,26 +1105,12 @@ class DenseClipLScorer:
                 "CLIP-L tokenizer chưa được load."
             )
 
-        tokens = self.tokenizer(
-            list(texts)
+        return _encode_texts_with_runtime(
+            self.model,
+            self.tokenizer,
+            self.device,
+            texts,
         )
-
-        if hasattr(tokens, "to"):
-            tokens = tokens.to(
-                self.device
-            )
-
-        with torch.inference_mode():
-            features = self.model.encode_text(
-                tokens
-            )
-
-        features = features.float()
-        features = _normalize_embeddings(
-            features
-        )
-
-        return features
 
     # -----------------------------------------------------------------
     # Image encoding
