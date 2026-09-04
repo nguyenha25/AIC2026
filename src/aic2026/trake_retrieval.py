@@ -152,12 +152,12 @@ class TRR1Config:
 
     top_k: int = 500
 
-    max_region_duration_seconds: float = 10.0
-    region_merge_gap_seconds: float = 2.0
-    region_padding_seconds: float = 0.0
-    min_region_duration_seconds: float = 0.5
+    max_region_duration_seconds: float = 3.0
+    region_merge_gap_seconds: float = 0.5
+    region_padding_seconds: float = 0.1
+    min_region_duration_seconds: float = 0.16
 
-    max_regions_per_event: int = 5
+    max_regions_per_event: int = 10
     min_hits_per_region: int = 1
 
     peak_weight: float = 0.50
@@ -165,7 +165,7 @@ class TRR1Config:
     density_weight: float = 0.20
 
     use_query_expansion: bool = True
-    max_query_variants: int = 2
+    max_query_variants: int = 4
 
     video_consensus_weight: float = 0.45
     video_rrf_k: float = 60.0
@@ -389,15 +389,8 @@ def _mo_rong_trr1(
     text: str,
     *,
     use_query_expansion: bool = True,
-    max_query_variants: int = 2,
+    max_query_variants: int = 4,
 ) -> list[str]:
-    """
-    Việt -> các cụm tiếng Anh cho CLIP-L.
-
-    Chỉ nhánh CLIP dùng kết quả Marian.
-
-    OCR/ASR không đi qua hàm này.
-    """
 
     text = (text or "").strip()
 
@@ -407,46 +400,54 @@ def _mo_rong_trr1(
     if not use_query_expansion:
         return [text]
 
-    if max_query_variants <= 0:
-        return [text]
-
     try:
         from aic2026.query_expand import mo_rong
 
-        result = mo_rong(
-            text,
-            nguon="marian",
-        )
-
-        variants = getattr(
-            result,
-            "cum_tieng_anh",
-            None,
-        )
-
-        if not variants:
-            return [text]
-
         output: list[str] = []
 
-        for variant in variants:
-            variant = str(
-                variant or ""
-            ).strip()
-
-            if not variant:
+        for nguon in (
+            "marian",
+            "tu_dien",
+        ):
+            try:
+                result = mo_rong(
+                    text,
+                    nguon=nguon,
+                )
+            except Exception:
                 continue
 
-            if variant not in output:
-                output.append(variant)
+            variants = getattr(
+                result,
+                "cum_tieng_anh",
+                None,
+            )
 
-            if len(output) >= max_query_variants:
-                break
+            if not variants:
+                continue
+
+            for variant in variants:
+                variant = str(
+                    variant or ""
+                ).strip()
+
+                if (
+                    variant
+                    and variant not in output
+                ):
+                    output.append(
+                        variant
+                    )
+
+                if (
+                    len(output)
+                    >= max_query_variants
+                ):
+                    return output
 
         return output or [text]
 
     except Exception:
-        # Marian hỏng thì không làm chết TR-R1.
         return [text]
 
 
@@ -800,66 +801,135 @@ def _merge_query_variant_hits(
     hits_by_variant: Iterable[
         list[dict[str, Any]]
     ],
+    *,
+    rrf_k: float = 60.0,
 ) -> list[dict[str, Any]]:
-    """
-    Gộp các variant.
 
-    Cùng frame:
-        giữ cosine cao nhất.
-
-    Không cộng cosine giữa các variant.
-
-    Lý do:
-        cosine giữa các query variant không cùng một calibration
-        tuyệt đối; cộng trực tiếp sẽ làm score phụ thuộc số variant
-        và tạo bias cho frame xuất hiện ở nhiều variant.
-    """
-
-    merged: dict[
+    fused: dict[
         tuple[Any, ...],
         dict[str, Any],
+    ] = {}
+
+    rrf_scores: dict[
+        tuple[Any, ...],
+        float,
+    ] = {}
+
+    variant_ranks: dict[
+        tuple[Any, ...],
+        list[int],
     ] = {}
 
     for variant_idx, hits in enumerate(
         hits_by_variant
     ):
-        for hit in hits:
+        for rank, hit in enumerate(
+            hits,
+            start=1,
+        ):
             if not isinstance(
                 hit,
                 dict,
             ):
                 continue
 
-            key = _hit_key(hit)
-
-            candidate = dict(hit)
-
-            candidate.setdefault(
-                "variant_index",
-                int(variant_idx),
+            key = _hit_key(
+                hit
             )
 
-            previous = merged.get(key)
+            # -------------------------------------------------
+            # RRF: mỗi variant đóng góp bằng rank.
+            # -------------------------------------------------
 
-            if previous is None:
-                merged[key] = candidate
-                continue
+            rrf_scores[key] = (
+                rrf_scores.get(
+                    key,
+                    0.0,
+                )
+                + 1.0
+                / (
+                    rrf_k
+                    + float(rank)
+                )
+            )
 
-            if _safe_score(candidate) > _safe_score(
-                previous
+            variant_ranks.setdefault(
+                key,
+                [],
+            ).append(
+                int(rank)
+            )
+
+            # -------------------------------------------------
+            # Giữ hit gốc có cosine mạnh nhất
+            # để bảo toàn provenance.
+            # -------------------------------------------------
+
+            previous = fused.get(
+                key
+            )
+
+            candidate = dict(
+                hit
+            )
+
+            if (
+                previous is None
+                or _safe_score(
+                    candidate
+                )
+                > _safe_score(
+                    previous
+                )
             ):
-                merged[key] = candidate
+                fused[key] = candidate
 
-    output = list(
-        merged.values()
-    )
+    output: list[
+        dict[str, Any]
+    ] = []
+
+    for key, hit in fused.items():
+        candidate = dict(
+            hit
+        )
+
+        candidate[
+            "clip_score"
+        ] = float(
+            _safe_score(hit)
+        )
+
+        candidate[
+            "score"
+        ] = float(
+            rrf_scores[key]
+        )
+
+        candidate[
+            "variant_ranks"
+        ] = tuple(
+            variant_ranks[key]
+        )
+
+        candidate[
+            "source"
+        ] = "clip_l_rrf"
+
+        output.append(
+            candidate
+        )
 
     output.sort(
         key=lambda hit: (
-            -_safe_score(hit),
-            _safe_video_id(hit),
+            -float(
+                hit["score"]
+            ),
+            _safe_video_id(
+                hit
+            ),
             _safe_time(hit)
-            if _safe_time(hit) is not None
+            if _safe_time(hit)
+            is not None
             else float("inf"),
         )
     )
@@ -1510,7 +1580,74 @@ def _score_regions(
 # ============================================================================
 # TEMPORAL GROUPING
 # ============================================================================
+def _select_diverse_regions(
+    regions: list[CoarseRegion],
+    limit: int,
+    *,
+    max_per_video: int = 2,
+) -> list[CoarseRegion]:
 
+    if limit <= 0:
+        return []
+
+    selected: list[
+        CoarseRegion
+    ] = []
+
+    counts: dict[
+        str,
+        int,
+    ] = {}
+
+    # ---------------------------------------------------------
+    # Pass 1:
+    # tối đa max_per_video để tránh một video chiếm hết top-N.
+    # ---------------------------------------------------------
+
+    for region in regions:
+
+        count = counts.get(
+            region.video_id,
+            0,
+        )
+
+        if count >= max_per_video:
+            continue
+
+        selected.append(
+            region
+        )
+
+        counts[
+            region.video_id
+        ] = count + 1
+
+        if len(selected) >= limit:
+            return selected
+
+    # ---------------------------------------------------------
+    # Pass 2:
+    # nếu chưa đủ thì fill lại theo score.
+    # ---------------------------------------------------------
+
+    selected_ids = {
+        id(region)
+        for region in selected
+    }
+
+    for region in regions:
+
+        if id(region) in selected_ids:
+            continue
+
+        selected.append(
+            region
+        )
+
+        if len(selected) >= limit:
+            break
+
+    return selected
 
 def _gom_vung(
     hits: list[dict[str, Any]],
@@ -1661,9 +1798,11 @@ def _gom_vung(
         video_scores=video_scores,
     )
 
-    return regions[
-        : config.max_regions_per_event
-    ]
+    return _select_diverse_regions(
+        regions,
+        config.max_regions_per_event,
+        max_per_video=2,
+    )
 
 
 # ============================================================================
