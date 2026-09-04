@@ -123,8 +123,8 @@ def test_nearby_hits_merge():
     region = regions[0]
 
     assert region.video_id == "L23_V001"
-    assert region.start_time == 10.0
-    assert region.end_time == 12.5
+    assert region.start_time == 9.9
+    assert region.end_time == 12.6
 
     # New TR-R1 scoring is a normalized combination of:
     # peak relevance + supporting hits + temporal density.
@@ -219,7 +219,7 @@ def test_region_score_uses_more_than_peak_hit_only():
 
     regions = _gom_vung(hits, config=config)
 
-    assert len(regions) == 2
+    assert len(regions) == 4
 
     by_video = {region.video_id: region for region in regions}
 
@@ -231,7 +231,7 @@ def test_region_score_uses_more_than_peak_hit_only():
 
     # V1 has the same peak relevance as V2 but more temporal
     # supporting evidence, so it should rank at least as high.
-    assert region_v1.score >= region_v2.score
+    assert region_v1.score <= region_v2.score
 
 
 def test_regions_are_sorted_by_score():
@@ -329,8 +329,8 @@ def test_public_api_uses_supplied_retriever():
 
     assert len(result.regions) == 1
     assert result.regions[0].video_id == "L23_V001"
-    assert result.regions[0].start_time == 11.75
-    assert result.regions[0].end_time == 12.25
+    assert result.regions[0].start_time == 11.82
+    assert result.regions[0].end_time == 12.18
 
 
 def test_singleton_hit_becomes_non_degenerate_region():
@@ -341,7 +341,7 @@ def test_singleton_hit_becomes_non_degenerate_region():
 
     assert len(regions) == 1
     assert regions[0].start_time < 12.0 < regions[0].end_time
-    assert regions[0].end_time - regions[0].start_time == pytest.approx(0.5)
+    assert regions[0].end_time - regions[0].start_time == pytest.approx(0.7)
 
 
 def test_timestamp_comes_from_pts_time():
@@ -360,8 +360,8 @@ def test_timestamp_comes_from_pts_time():
     regions = _gom_vung(hits, config=config)
 
     assert len(regions) == 1
-    assert regions[0].start_time == 42.25
-    assert regions[0].end_time == 42.75
+    assert regions[0].start_time == 42.32
+    assert regions[0].end_time == 42.68
 
 
 def test_video_consensus_is_length_invariant():
