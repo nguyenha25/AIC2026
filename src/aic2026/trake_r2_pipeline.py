@@ -344,3 +344,134 @@ def run_trake_r2(
         step=step,
         min_gap=min_gap,
     )
+
+def run_trake_r2_diagnostics(
+    tr_r1_results: Sequence,
+    *,
+    step: float = 0.16,
+    min_gap: int = 1,
+    rrf_k: int = 60,
+    window_padding_seconds: float = 0.0,
+    batch_size: int = 16,
+) -> dict:
+    """
+    Phiên bản diagnostics của TR-R2 dành cho TR-E2.
+
+    Giữ nguyên toàn bộ logic production của run_trake_r2(),
+    nhưng trả thêm DenseClipLScorer để TR-E2 có thể đọc:
+
+        - scorer.frames
+        - scorer.score_matrix
+
+    Không dùng ground truth.
+    Không thay đổi contract của run_trake_r2() cũ.
+    """
+
+    if not tr_r1_results:
+        raise ValueError(
+            "TR-R2 diagnostics yêu cầu ít nhất một TRR1Result."
+        )
+
+    # ------------------------------------------------------------------
+    # 1. Adapter TR-R1Result -> contract của TR-R2.
+    # ------------------------------------------------------------------
+
+    events_tr_r1 = {
+        result.event_id: {
+            "text": result.text,
+            "relation": result.relation,
+            "regions": [
+                {
+                    "video_id": region.video_id,
+                    "start_time": region.start_time,
+                    "end_time": region.end_time,
+                    "score": region.score,
+                    "hits": region.hits,
+                }
+                for region in result.regions
+            ],
+        }
+        for result in tr_r1_results
+    }
+
+    # ------------------------------------------------------------------
+    # 2. Giữ nguyên thứ tự event của QueryPlan.
+    # ------------------------------------------------------------------
+
+    event_ids = list(events_tr_r1.keys())
+
+    # ------------------------------------------------------------------
+    # 3. Chọn video DUY NHẤT bằng RRF.
+    # ------------------------------------------------------------------
+
+    events_regions = {
+        event_id: data["regions"]
+        for event_id, data in events_tr_r1.items()
+    }
+
+    video_id = chon_video_rrf(
+        events_regions,
+        k=rrf_k,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Chọn nhiều coarse windows của video.
+    # ------------------------------------------------------------------
+
+    windows = gop_cac_cua_so_theo_video(
+        events_regions,
+        video_id,
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Padding từng window độc lập.
+    # ------------------------------------------------------------------
+
+    windows = [
+        (
+            max(0.0, start - window_padding_seconds),
+            end + window_padding_seconds,
+        )
+        for start, end in windows
+    ]
+
+    # ------------------------------------------------------------------
+    # 6. Event text -> dense CLIP-L scorer.
+    # ------------------------------------------------------------------
+
+    event_texts = {
+        event_id: data["text"]
+        for event_id, data in events_tr_r1.items()
+    }
+
+    scorer, score_fn = build_dense_score_fn(
+        video_id=video_id,
+        windows=windows,
+        event_texts=event_texts,
+        batch_size=batch_size,
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Dense time grid + strict-increasing DP.
+    # ------------------------------------------------------------------
+
+    alignment = _align_trake_fixed_windows(
+        events_tr_r1,
+        score_fn,
+        video_id=video_id,
+        windows=windows,
+        step=step,
+        min_gap=min_gap,
+    )
+
+    # ------------------------------------------------------------------
+    # 8. Trả thêm scorer cho TR-E2.
+    # ------------------------------------------------------------------
+
+    return {
+        "video_id": video_id,
+        "event_ids": event_ids,
+        "windows": windows,
+        "alignment": alignment,
+        "scorer": scorer,
+    }
