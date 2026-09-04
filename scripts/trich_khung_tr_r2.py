@@ -8,9 +8,10 @@ from typing import Any
 
 from aic2026.frame_map import load_frame_map
 from aic2026.paths import video_file
+from aic2026.trake_r2_score import select_video_by_sparse_dp
 from aic2026.trake_r2_windows import (
-    chon_video_rrf,
-    gop_cac_cua_so_theo_video,
+    rank_video_candidates_rrf,
+    windows_from_anchor_times,
 )
 
 # QUAN TRỌNG:
@@ -24,6 +25,10 @@ from scripts.trich_khung_day import trich, thong_tin_video
 # ============================================================
 
 ARTIFACT = Path(r"D:\aic-data\runs\tr_r1_candidates.jsonl")
+
+VIDEO_BEAM_SIZE = 12
+SPARSE_MIN_GAP = 1
+SPARSE_WINDOW_PADDING_SECONDS = 5.0
 
 
 # ============================================================
@@ -170,6 +175,32 @@ def build_events_regions(
     return events_regions
 
 
+def build_event_texts(
+    event_records: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Lấy event text theo đúng event_index, không đọc GT."""
+
+    output: dict[str, str] = {}
+
+    for event in event_records:
+        event_id = str(event.get("event_id", "")).strip()
+        tr_r1 = event.get("tr_r1")
+
+        if not event_id or not isinstance(tr_r1, dict):
+            raise ValueError("Artifact thiếu event_id hoặc tr_r1")
+
+        text = str(
+            tr_r1.get("text", event.get("text", ""))
+        ).strip()
+
+        if not text:
+            raise ValueError(f"event={event_id!r} không có text")
+
+        output[event_id] = text
+
+    return output
+
+
 # ============================================================
 # FPS
 # ============================================================
@@ -253,36 +284,63 @@ def extract_query(
     *,
     buoc_giay: float = 0.16,
     ghi_de: bool = False,
+    video_beam_size: int = VIDEO_BEAM_SIZE,
+    sparse_min_gap: int = SPARSE_MIN_GAP,
+    sparse_window_padding_seconds: float = (
+        SPARSE_WINDOW_PADDING_SECONDS
+    ),
 ) -> None:
     """
     Chạy extraction cho một query:
 
-        TR-R1 regions
+        TR-R1 regions -> Top-B video beam
             ↓
-        RRF chọn video
+        video-local sparse CLIP-L + strict DP
             ↓
-        merge windows
+        local windows quanh sparse anchors
             ↓
         seconds → frame indices
             ↓
         Task 9 trich()
     """
 
-    events_regions = build_events_regions(event_records)
+    ordered_records = sorted(
+        event_records,
+        key=lambda item: int(item.get("event_index", 0)),
+    )
+
+    events_regions = build_events_regions(ordered_records)
+    event_texts = build_event_texts(ordered_records)
 
     # --------------------------------------------------------
-    # 1. Chọn video bằng TR-R1 RRF
+    # 1. Candidate beam -> video-local sparse DP
     # --------------------------------------------------------
 
-    video_id = chon_video_rrf(events_regions)
-
-    # --------------------------------------------------------
-    # 2. Lấy các cửa sổ thời gian TR-R2
-    # --------------------------------------------------------
-
-    windows = gop_cac_cua_so_theo_video(
+    candidate_video_ids = rank_video_candidates_rrf(
         events_regions,
-        video_id,
+        limit=video_beam_size,
+    )
+
+    sparse_selection = select_video_by_sparse_dp(
+        event_texts,
+        candidate_video_ids,
+        min_gap=sparse_min_gap,
+    )
+
+    video_id = str(sparse_selection["video_id"])
+
+    # --------------------------------------------------------
+    # 2. Local windows quanh sparse anchors
+    # --------------------------------------------------------
+
+    chosen_times = sparse_selection.get("chosen_times")
+
+    if not isinstance(chosen_times, dict):
+        raise ValueError("Sparse selector không trả chosen_times")
+
+    windows = windows_from_anchor_times(
+        [chosen_times[event_id] for event_id in event_texts],
+        padding_seconds=sparse_window_padding_seconds,
     )
 
     if not windows:
@@ -309,11 +367,8 @@ def extract_query(
             f"{video_id!r}: {source_video}"
         )
 
-    _, raw_total_frames = thong_tin_video(source_video)
-    try:
-        total_frames = int(raw_total_frames)
-    except (ValueError, TypeError):
-        total_frames = None
+    video_info = thong_tin_video(source_video)
+    total_frames = int(video_info["so_khung"])
 
     # --------------------------------------------------------
     # 5. In thông tin
@@ -324,7 +379,12 @@ def extract_query(
     print(
         f"[TR-R2] query={query_id} "
         f"video={video_id} "
+        f"beam={len(candidate_video_ids)} "
         f"windows={len(windows)}"
+    )
+    print(
+        f"[TR-R2] sparse_mean_score="
+        f"{float(sparse_selection['mean_score']):.6f}"
     )
     print(
         f"[TR-R2] fps={fps:.6f} "
@@ -441,6 +501,27 @@ def parse_args() -> argparse.Namespace:
         help="Cho phép ghi đè frame đã tồn tại.",
     )
 
+    parser.add_argument(
+        "--video-beam-size",
+        type=int,
+        default=VIDEO_BEAM_SIZE,
+        help="Số video RRF đưa vào sparse DP, mặc định 12.",
+    )
+
+    parser.add_argument(
+        "--sparse-min-gap",
+        type=int,
+        default=SPARSE_MIN_GAP,
+        help="Khoảng cách vị trí keyframe tối thiểu của sparse DP.",
+    )
+
+    parser.add_argument(
+        "--window-padding-seconds",
+        type=float,
+        default=SPARSE_WINDOW_PADDING_SECONDS,
+        help="Padding mỗi phía quanh sparse anchor, mặc định 5 giây.",
+    )
+
     return parser.parse_args()
 
 
@@ -451,6 +532,15 @@ def main() -> None:
         raise ValueError(
             f"--buoc-giay phải > 0, nhận {args.buoc_giay}"
         )
+
+    if args.video_beam_size <= 0:
+        raise ValueError("--video-beam-size phải > 0")
+
+    if args.sparse_min_gap < 1:
+        raise ValueError("--sparse-min-gap phải >= 1")
+
+    if args.window_padding_seconds < 0:
+        raise ValueError("--window-padding-seconds phải >= 0")
 
     # --------------------------------------------------------
     # Load artifact
@@ -492,6 +582,9 @@ def main() -> None:
     print(f"Artifact : {args.artifact}")
     print(f"Queries  : {len(query_ids)}")
     print(f"Step     : {args.buoc_giay}s")
+    print(f"Beam     : {args.video_beam_size}")
+    print(f"Sparse gap: {args.sparse_min_gap}")
+    print(f"Padding  : {args.window_padding_seconds}s")
     print(f"Ghi đè   : {args.ghi_de}")
     print()
 
@@ -509,6 +602,11 @@ def main() -> None:
                 queries[query_id],
                 buoc_giay=args.buoc_giay,
                 ghi_de=args.ghi_de,
+                video_beam_size=args.video_beam_size,
+                sparse_min_gap=args.sparse_min_gap,
+                sparse_window_padding_seconds=(
+                    args.window_padding_seconds
+                ),
             )
             success += 1
 

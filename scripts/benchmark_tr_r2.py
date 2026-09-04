@@ -11,9 +11,9 @@ PHẠM VI
         ↓
     reconstruct TRR1Result
         ↓
-    run_trake_r2()
+    Top-B video beam + video-local sparse DP
         ↓
-    dense CLIP-L scoring
+    local dense CLIP-L scoring
         ↓
     strict-increasing temporal DP
         ↓
@@ -55,6 +55,7 @@ import open_clip  # noqa: F401
 # NORMAL IMPORTS
 # ============================================================================
 
+import argparse
 import json
 import statistics
 import time
@@ -66,7 +67,10 @@ from aic2026.trake_retrieval import (
     CoarseRegion,
     TRR1Result,
 )
-from aic2026.trake_r2_pipeline import run_trake_r2
+from aic2026.trake_r2_pipeline import (
+    run_trake_r2,
+    run_trake_r2_sparse_selection,
+)
 
 
 # ============================================================================
@@ -75,12 +79,17 @@ from aic2026.trake_r2_pipeline import run_trake_r2
 
 INPUT_PATH = RUNS_DIR / "tr_r1_candidates.jsonl"
 OUTPUT_PATH = RUNS_DIR / "tr_r2_benchmark.json"
+SPARSE_OUTPUT_PATH = RUNS_DIR / "tr_r2_sparse_video_benchmark.json"
 
 STEP = 0.16
 MIN_GAP = 1
 RRF_K = 60
 WINDOW_PADDING_SECONDS = 0.0
 BATCH_SIZE = 16
+VIDEO_BEAM_SIZE = 12
+SPARSE_MIN_GAP = 1
+SPARSE_WINDOW_PADDING_SECONDS = 5.0
+SPARSE_MAX_QUERY_VARIANTS = 4
 
 
 # ============================================================================
@@ -615,6 +624,125 @@ def percentile(
 # ============================================================================
 
 
+def benchmark_sparse_video_selection() -> dict[str, Any]:
+    """Đo riêng candidate-beam + video-local sparse DP, không chạy dense."""
+
+    records = doc_jsonl(INPUT_PATH)
+    grouped = group_records_by_query(records)
+
+    if not grouped:
+        raise RuntimeError("TR-R1 artifact không có query.")
+
+    query_results: list[dict[str, Any]] = []
+    latency_ms: list[float] = []
+    correct = 0
+    beam_hits = 0
+
+    total_queries = len(grouped)
+
+    for query_index, (query_id, records_for_query) in enumerate(
+        sorted(grouped.items(), key=lambda item: item[0]),
+        start=1,
+    ):
+        print(
+            f"[TR-R2-SPARSE] {query_index}/{total_queries} "
+            f"query={query_id}",
+            flush=True,
+        )
+
+        gt_events = get_gt_events_from_records(records_for_query)
+        gt_video_id = str(gt_events[0]["video_id"])
+        tr_r1_results = build_tr_r1_results(records_for_query)
+
+        started = time.perf_counter()
+        sparse = run_trake_r2_sparse_selection(
+            tr_r1_results,
+            rrf_k=RRF_K,
+            video_beam_size=VIDEO_BEAM_SIZE,
+            sparse_min_gap=SPARSE_MIN_GAP,
+            sparse_window_padding_seconds=(
+                SPARSE_WINDOW_PADDING_SECONDS
+            ),
+            window_padding_seconds=WINDOW_PADDING_SECONDS,
+            sparse_max_query_variants=(
+                SPARSE_MAX_QUERY_VARIANTS
+            ),
+        )
+        elapsed = (time.perf_counter() - started) * 1000.0
+        latency_ms.append(elapsed)
+
+        predicted_video_id = str(sparse["video_id"])
+        selection = dict(sparse["selection"])
+        candidate_video_ids = [
+            str(video_id)
+            for video_id in selection.get("candidate_video_ids", [])
+        ]
+        video_match = predicted_video_id == gt_video_id
+        beam_hit = gt_video_id in candidate_video_ids
+
+        correct += int(video_match)
+        beam_hits += int(beam_hit)
+
+        query_results.append(
+            {
+                "query_id": query_id,
+                "gt_video_id": gt_video_id,
+                "predicted_video_id": predicted_video_id,
+                "video_match": video_match,
+                "beam_hit": beam_hit,
+                "candidate_video_ids": candidate_video_ids,
+                "sparse_chosen_frame_idx": selection.get(
+                    "chosen_frame_idx"
+                ),
+                "sparse_chosen_times": selection.get("chosen_times"),
+                "sparse_mean_score": selection.get("mean_score"),
+                "candidate_scores": selection.get("candidate_scores"),
+                "windows": sparse.get("windows"),
+                "latency_ms": elapsed,
+            }
+        )
+
+    return {
+        "task": "TR-R2-SPARSE-VIDEO-SELECTION",
+        "description": (
+            "Top-B RRF beam followed by video-local sparse CLIP-L "
+            "strict-increasing DP"
+        ),
+        "input_artifact": str(INPUT_PATH),
+        "data_root": str(DATA_ROOT),
+        "config": {
+            "rrf_k": RRF_K,
+            "video_beam_size": VIDEO_BEAM_SIZE,
+            "sparse_min_gap": SPARSE_MIN_GAP,
+            "sparse_window_padding_seconds": (
+                SPARSE_WINDOW_PADDING_SECONDS
+            ),
+            "sparse_max_query_variants": (
+                SPARSE_MAX_QUERY_VARIANTS
+            ),
+        },
+        "evaluation": {
+            "note": (
+                "GT chỉ dùng scoring. Candidate beam, sparse scores, "
+                "video, anchors và windows không dùng GT."
+            )
+        },
+        "summary": {
+            "num_queries": total_queries,
+            "beam_hits": beam_hits,
+            "beam_recall": beam_hits / total_queries,
+            "video_correct_queries": correct,
+            "video_accuracy": correct / total_queries,
+            "latency_ms": {
+                "p50": percentile(latency_ms, 50.0),
+                "p95": percentile(latency_ms, 95.0),
+                "max": max(latency_ms) if latency_ms else 0.0,
+            },
+        },
+        "queries": query_results,
+    }
+
+
 def benchmark() -> dict[str, Any]:
     records = doc_jsonl(
         INPUT_PATH
@@ -704,7 +832,8 @@ def benchmark() -> dict[str, Any]:
         # ------------------------------------------------------------------
         # QUAN TRỌNG:
         #
-        # run_trake_r2() tự chọn video/window từ TR-R1 regions.
+        # run_trake_r2() tự tạo video beam từ TR-R1, rescore toàn bộ
+        # sparse keyframes và tạo local windows quanh sparse anchors.
         #
         # Không truyền GT video/window vào đây.
         # ------------------------------------------------------------------
@@ -720,6 +849,14 @@ def benchmark() -> dict[str, Any]:
                 WINDOW_PADDING_SECONDS
             ),
             batch_size=BATCH_SIZE,
+            video_beam_size=VIDEO_BEAM_SIZE,
+            sparse_min_gap=SPARSE_MIN_GAP,
+            sparse_window_padding_seconds=(
+                SPARSE_WINDOW_PADDING_SECONDS
+            ),
+            sparse_max_query_variants=(
+                SPARSE_MAX_QUERY_VARIANTS
+            ),
         )
 
         elapsed = (
@@ -881,8 +1018,9 @@ def benchmark() -> dict[str, Any]:
                     predicted_video_id
                     == gt_video_id
                 ),
-                "window": result.get(
-                    "window"
+                "windows": result.get("windows"),
+                "sparse_selection": result.get(
+                    "sparse_selection"
                 ),
                 "dense_frame_count": len(
                     result.get(
@@ -911,8 +1049,8 @@ def benchmark() -> dict[str, Any]:
     return {
         "task": "TR-R2",
         "description": (
-            "Dense CLIP-L temporal alignment "
-            "with strict-increasing DP"
+            "Video-local sparse CLIP-L selection followed by "
+            "dense CLIP-L strict-increasing DP"
         ),
         "input_artifact": str(
             INPUT_PATH
@@ -928,13 +1066,21 @@ def benchmark() -> dict[str, Any]:
                 WINDOW_PADDING_SECONDS
             ),
             "batch_size": BATCH_SIZE,
+            "video_beam_size": VIDEO_BEAM_SIZE,
+            "sparse_min_gap": SPARSE_MIN_GAP,
+            "sparse_window_padding_seconds": (
+                SPARSE_WINDOW_PADDING_SECONDS
+            ),
+            "sparse_max_query_variants": (
+                SPARSE_MAX_QUERY_VARIANTS
+            ),
         },
         "evaluation": {
             "note": (
                 "GT lấy từ tr_r1_candidates.jsonl "
                 "và chỉ dùng cho evaluation. "
-                "Video/window của TR-R2 được chọn "
-                "hoàn toàn từ TR-R1 output."
+                "Video beam lấy từ TR-R1; video/path được chọn "
+                "bằng sparse CLIP-L + DP, không dùng GT."
             ),
             "temporal_hit_definition": (
                 "Chosen timestamp nằm trong GT interval."
@@ -1026,7 +1172,58 @@ def benchmark() -> dict[str, Any]:
 # ============================================================================
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark TR-R2 sparse video selection hoặc full dense."
+    )
+    parser.add_argument(
+        "--sparse-only",
+        action="store_true",
+        help=(
+            "Chỉ chạy video-local sparse DP; không yêu cầu dense frames."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
+    if args.sparse_only:
+        print("=" * 72)
+        print("TR-R2 — VIDEO-LOCAL SPARSE CLIP-L SELECTION")
+        print("=" * 72)
+        print(f"DATA_ROOT : {DATA_ROOT}")
+        print(f"INPUT     : {INPUT_PATH}")
+        print(f"OUTPUT    : {SPARSE_OUTPUT_PATH}")
+        print()
+
+        result = benchmark_sparse_video_selection()
+        ghi_json(SPARSE_OUTPUT_PATH, result)
+        summary = result["summary"]
+
+        print()
+        print("=" * 72)
+        print("TR-R2 SPARSE RESULT")
+        print("=" * 72)
+        print(
+            f"Queries       : {summary['num_queries']}"
+        )
+        print(
+            f"Beam recall   : {summary['beam_recall']:.4f}"
+        )
+        print(
+            f"Video accuracy: {summary['video_accuracy']:.4f}"
+        )
+        print(
+            f"Latency p50   : {summary['latency_ms']['p50']:.2f} ms"
+        )
+        print(
+            f"Latency p95   : {summary['latency_ms']['p95']:.2f} ms"
+        )
+        print(f"Saved: {SPARSE_OUTPUT_PATH}")
+        return
+
     print("=" * 72)
     print(
         "TR-R2 — DENSE CLIP-L TEMPORAL ALIGNMENT"
