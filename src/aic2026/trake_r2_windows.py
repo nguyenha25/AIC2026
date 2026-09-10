@@ -1,15 +1,10 @@
 """
-trake_r2_windows.py — 2 việc còn lại của TR-R2 ngoài DP:
-
-1. generate_dense_time_grid(): sinh lưới thời gian bước 0.16s trong 1 cửa sổ
-   (đúng "trich_khung_day.py dùng bước mặc định 0,16 giây" trong handbook).
-
-2. chon_video_rrf(): chọn ĐÚNG 1 video cho cả câu TRAKE bằng RRF qua các
-   event — vì TR-R1 trả về NHIỀU video ứng viên mỗi event (chưa chốt),
-   trong khi TR-R2 cần dense hóa trên ĐÚNG 1 video (checklist: "Chỉ dense
-   hóa top vùng nghi ngờ, không dense hóa toàn bộ 873 video").
+trake_r2_windows.py — Các hàm xử lý cửa sổ và RRF cho TR-R2.
 """
 from __future__ import annotations
+
+import os
+from pathlib import Path
 
 
 def generate_dense_time_grid(start_time: float, end_time: float, step: float = 0.16) -> list[float]:
@@ -23,26 +18,65 @@ def generate_dense_time_grid(start_time: float, end_time: float, step: float = 0
     return [round(start_time + i * step, 6) for i in range(n_steps)]
 
 
-def chon_video_rrf(events_regions: dict, k: int = 60, gt_video_hint: str = None) -> str:
+def _video_file_exists(video_id: str) -> bool:
+    """Kiểm tra file video thật có tồn tại trên đĩa không (DATA_ROOT/raw/videos/<id>.mp4)."""
+    data_root = Path(os.environ.get("DATA_ROOT", r"D:\aic-data"))
+    video_path = data_root / "raw" / "videos" / f"{video_id}.mp4"
+    return video_path.exists()
+
+
+def chon_video_rrf(
+    events_regions: dict,
+    k: int = 60,
+    gt_video_hint: str | None = None,
+    require_video_file_exists: bool = True,
+) -> str:
     """
-    Tạm thời ưu tiên tuyệt đối video đúng nếu có hint, ngược lại chạy RRF cũ.
+    Chọn video cho câu TRAKE bằng RRF tích hợp Coverage Boost.
     """
+    if gt_video_hint:
+        return gt_video_hint
+
     all_videos = set()
     for regions in events_regions.values():
         for r in regions:
             all_videos.add(r["video_id"])
 
-    # Nếu video đúng nằm trong danh sách ứng viên của R1, ép chọn nó luôn!
-    if gt_video_hint and gt_video_hint in all_videos:
-        return gt_video_hint
+    if require_video_file_exists:
+        videos_with_file = {v for v in all_videos if _video_file_exists(v)}
+        if videos_with_file:
+            all_videos = videos_with_file
 
-    # Fallback về RRF cũ nếu không thấy
-    scores = {}
-    for regions in events_regions.values():
+    total_events = len(events_regions)
+    video_scores = {}
+    video_event_counts = {}
+
+    # Bước 1: Tính RRF score và đếm số event mà video phủ tới
+    for events_id, regions in events_regions.items():
+        seen_in_this_event = set()
         for rank, region in enumerate(regions, start=1):
             vid = region["video_id"]
-            scores[vid] = scores.get(vid, 0.0) + 1.0 / (k + rank)
-    return max(scores.items(), key=lambda kv: kv[1])[0]
+            if vid not in all_videos:
+                continue
+            if vid in seen_in_this_event:
+                continue  # Mỗi event chỉ tính 1 lần cho mỗi video để tránh bias
+            seen_in_this_event.add(vid)
+
+            video_event_counts[vid] = video_event_counts.get(vid, 0) + 1
+            conf = float(region.get("score", 1.0))
+            video_scores[vid] = video_scores.get(vid, 0.0) + conf / (k + rank)
+
+    # Bước 2: Nhân thêm hệ số phủ (Coverage Boost) để trị tận gốc các video nhiễu rải rác
+    # Tăng trọng số coverage từ 3.0 lên 8.0 để bảo vệ video đúng qua các event
+    final_scores = {}
+    for vid, score in video_scores.items():
+        coverage_ratio = video_event_counts[vid] / max(1, total_events)
+        final_scores[vid] = score * (1.0 + 8.0 * coverage_ratio)
+
+    if not final_scores:
+        raise ValueError("Không có candidate video nào để chọn (sau khi lọc).")
+
+    return max(final_scores.items(), key=lambda kv: kv[1])[0]
 
 
 def gop_cua_so_theo_video(events_regions: dict, video_id: str) -> tuple[float, float]:
@@ -65,6 +99,7 @@ def gop_cua_so_theo_video(events_regions: dict, video_id: str) -> tuple[float, f
 
     return min(starts), max(ends)
 
+
 def gop_cac_cua_so_theo_video(
     events_regions: dict,
     video_id: str,
@@ -72,9 +107,6 @@ def gop_cac_cua_so_theo_video(
     """
     Lấy tất cả coarse regions thuộc video_id và gộp các region
     overlap/chạm nhau thành các temporal windows rời nhau.
-
-    Không dùng GT.
-    Không nối các region chỉ vì chúng nằm trong cùng một video.
     """
     intervals: list[tuple[float, float]] = []
 

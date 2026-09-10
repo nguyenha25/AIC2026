@@ -99,13 +99,13 @@ OUTPUT_PATH = RUNS_DIR / "tr_r1_benchmark.json"
 
 TOP_K = 500
 
-MAX_REGION_DURATION_SECONDS = 10.0
+MAX_REGION_DURATION_SECONDS = 60.0
 REGION_MERGE_GAP_SECONDS = 2.0
 MIN_REGION_DURATION_SECONDS = 0.5
-MAX_REGIONS_PER_EVENT = 10
+MAX_REGIONS_PER_EVENT = 100
 VIDEO_CONSENSUS_WEIGHT = 0.45
 VIDEO_RRF_K = 60.0
-
+REGION_PADDING_SECONDS = 30.0
 
 # ---------------------------------------------------------------------------
 # IO
@@ -845,6 +845,7 @@ def benchmark() -> dict[str, Any]:
             VIDEO_CONSENSUS_WEIGHT
         ),
         video_rrf_k=VIDEO_RRF_K,
+        region_padding_seconds=REGION_PADDING_SECONDS,
     )
 
     query_results: list[
