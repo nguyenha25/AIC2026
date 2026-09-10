@@ -302,3 +302,35 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
 
     assert result["chosen_times"]["E1"] == 1.0
     assert result["chosen_times"]["E2"] == 3.0
+
+def test_chon_video_rrf_counts_each_video_once_per_event():
+    events_regions = {
+        "E1": [
+            {"video_id": "V1", "start_time": 1.0, "end_time": 2.0},
+            {"video_id": "V1", "start_time": 3.0, "end_time": 4.0},
+            {"video_id": "V1", "start_time": 5.0, "end_time": 6.0},
+            {"video_id": "V2", "start_time": 7.0, "end_time": 8.0},
+        ],
+        "E2": [
+            {"video_id": "V2", "start_time": 9.0, "end_time": 10.0},
+        ],
+    }
+
+    assert chon_video_rrf(events_regions) == "V2"
+
+import pytest
+
+
+def test_chon_video_rrf_rejects_gt_hint():
+    events_regions = {
+        "E1": [
+            {"video_id": "V1", "start_time": 1.0, "end_time": 2.0},
+            {"video_id": "V2", "start_time": 3.0, "end_time": 4.0},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="gt_video_hint"):
+        chon_video_rrf(
+            events_regions,
+            gt_video_hint="V2",
+        )
