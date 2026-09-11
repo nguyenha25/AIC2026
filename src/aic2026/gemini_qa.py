@@ -78,9 +78,22 @@ def _short_answer(value: Any, limit: int = 80) -> str:
 
 
 def _default_image_path(video_id: str, n: int) -> Path:
-    from .paths import keyframe_image
+    """
+    Gemini ưu tiên ảnh keyframe gốc.
+    Nếu máy chưa tải shard keyframe thì dùng thumbnail đã có sẵn.
+    """
+    from .paths import keyframe_image, thumbnail_image
 
-    return keyframe_image(video_id, n)
+    keyframe = keyframe_image(video_id, n)
+    if keyframe.is_file():
+        return keyframe
+
+    thumbnail = thumbnail_image(video_id, n)
+    if thumbnail.is_file():
+        return thumbnail
+
+    # Trả keyframe path để caller có thể báo thiếu ảnh như trước.
+    return keyframe
 
 
 def _default_evidence(video_id: str, n: int, pts_time: float) -> tuple[str, str]:
