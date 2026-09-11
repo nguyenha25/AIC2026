@@ -2141,11 +2141,15 @@ elif ket_qua_hien_tai and loai_truy_van == TRAKE:
 
     tr_r2 = trake.get("tr_r2", {})
     ui_config = trake.get("ui_config", {})
+    try:
+        sparse_margin_label = f"{float(tr_r2.get('sparse_margin')):.4f}"
+    except (TypeError, ValueError):
+        sparse_margin_label = "—"
     with st.expander("Chẩn đoán pipeline", expanded=False):
         cot_1, cot_2, cot_3, cot_4 = st.columns(4)
         cot_1.metric("Video đã chọn", trake.get("video_id", "—"))
         cot_2.metric("Video beam", ui_config.get("video_beam_size", "—"))
-        cot_3.metric("Sparse margin", f"{float(tr_r2.get('sparse_margin', 0)):.4f}")
+        cot_3.metric("Sparse margin", sparse_margin_label)
         cot_4.metric(
             "Dense rerank",
             "Có" if tr_r2.get("dense_rerank_applied") else "Không",
