@@ -90,6 +90,20 @@ VIDEO_BEAM_SIZE = 12
 SPARSE_MIN_GAP = 1
 SPARSE_WINDOW_PADDING_SECONDS = 5.0
 SPARSE_MAX_QUERY_VARIANTS = 4
+REGION_PRIOR_WEIGHT = 0.0
+REGION_DECAY_SECONDS = 8.0
+VIDEO_PRIOR_WEIGHT = 0.0
+ORDER_GAIN_WEIGHT = 0.0
+SPAN_PENALTY_WEIGHT = 0.041
+SPAN_SCALE_SECONDS = 60.0
+ADAPTIVE_DENSE_RERANK = True
+DENSE_RERANK_TOP_K = 3
+DENSE_RERANK_MARGIN = 0.015
+DENSE_SPARSE_PRIOR_WEIGHT = 0.25
+DENSE_ANCHOR_MAX_DRIFT_SECONDS = 2.0
+DENSE_ANCHOR_PENALTY_PER_SECOND = 0.01
+DENSE_ANCHOR_FORWARD_REWARD_PER_SECOND = 0.0
+QUERY_IDS: tuple[str, ...] = ()
 
 
 # ============================================================================
@@ -337,6 +351,23 @@ def group_records_by_query(
         )
 
     return grouped
+
+
+def filter_grouped_queries(
+    grouped: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Giới hạn smoke test theo query mà không thay đổi artifact nguồn."""
+
+    if not QUERY_IDS:
+        return grouped
+
+    missing = [query_id for query_id in QUERY_IDS if query_id not in grouped]
+    if missing:
+        raise ValueError(
+            "--query-id không tồn tại trong artifact: " + ", ".join(missing)
+        )
+
+    return {query_id: grouped[query_id] for query_id in QUERY_IDS}
 
 
 def build_tr_r1_results(
@@ -628,7 +659,7 @@ def benchmark_sparse_video_selection() -> dict[str, Any]:
     """Đo riêng candidate-beam + video-local sparse DP, không chạy dense."""
 
     records = doc_jsonl(INPUT_PATH)
-    grouped = group_records_by_query(records)
+    grouped = filter_grouped_queries(group_records_by_query(records))
 
     if not grouped:
         raise RuntimeError("TR-R1 artifact không có query.")
@@ -667,6 +698,12 @@ def benchmark_sparse_video_selection() -> dict[str, Any]:
             sparse_max_query_variants=(
                 SPARSE_MAX_QUERY_VARIANTS
             ),
+            region_prior_weight=REGION_PRIOR_WEIGHT,
+            region_decay_seconds=REGION_DECAY_SECONDS,
+            video_prior_weight=VIDEO_PRIOR_WEIGHT,
+            order_gain_weight=ORDER_GAIN_WEIGHT,
+            span_penalty_weight=SPAN_PENALTY_WEIGHT,
+            span_scale_seconds=SPAN_SCALE_SECONDS,
         )
         elapsed = (time.perf_counter() - started) * 1000.0
         latency_ms.append(elapsed)
@@ -679,6 +716,11 @@ def benchmark_sparse_video_selection() -> dict[str, Any]:
         ]
         video_match = predicted_video_id == gt_video_id
         beam_hit = gt_video_id in candidate_video_ids
+        gt_beam_rank = (
+            candidate_video_ids.index(gt_video_id) + 1
+            if beam_hit
+            else None
+        )
 
         correct += int(video_match)
         beam_hits += int(beam_hit)
@@ -690,6 +732,7 @@ def benchmark_sparse_video_selection() -> dict[str, Any]:
                 "predicted_video_id": predicted_video_id,
                 "video_match": video_match,
                 "beam_hit": beam_hit,
+                "gt_beam_rank": gt_beam_rank,
                 "candidate_video_ids": candidate_video_ids,
                 "sparse_chosen_frame_idx": selection.get(
                     "chosen_frame_idx"
@@ -720,6 +763,12 @@ def benchmark_sparse_video_selection() -> dict[str, Any]:
             "sparse_max_query_variants": (
                 SPARSE_MAX_QUERY_VARIANTS
             ),
+            "region_prior_weight": REGION_PRIOR_WEIGHT,
+            "region_decay_seconds": REGION_DECAY_SECONDS,
+            "video_prior_weight": VIDEO_PRIOR_WEIGHT,
+            "order_gain_weight": ORDER_GAIN_WEIGHT,
+            "span_penalty_weight": SPAN_PENALTY_WEIGHT,
+            "span_scale_seconds": SPAN_SCALE_SECONDS,
         },
         "evaluation": {
             "note": (
@@ -733,6 +782,20 @@ def benchmark_sparse_video_selection() -> dict[str, Any]:
             "beam_recall": beam_hits / total_queries,
             "video_correct_queries": correct,
             "video_accuracy": correct / total_queries,
+            "conditional_accuracy_given_beam": (
+                correct / beam_hits if beam_hits else 0.0
+            ),
+            "beam_recall_at": {
+                str(cut): sum(
+                    query["gt_beam_rank"] is not None
+                    and int(query["gt_beam_rank"]) <= cut
+                    for query in query_results
+                ) / total_queries
+                for cut in sorted(
+                    {1, 5, 12, VIDEO_BEAM_SIZE}
+                )
+                if cut <= VIDEO_BEAM_SIZE
+            },
             "latency_ms": {
                 "p50": percentile(latency_ms, 50.0),
                 "p95": percentile(latency_ms, 95.0),
@@ -748,9 +811,7 @@ def benchmark() -> dict[str, Any]:
         INPUT_PATH
     )
 
-    grouped = group_records_by_query(
-        records
-    )
+    grouped = filter_grouped_queries(group_records_by_query(records))
 
     if not grouped:
         raise RuntimeError(
@@ -761,11 +822,19 @@ def benchmark() -> dict[str, Any]:
         dict[str, Any]
     ] = []
 
+    failed_queries: list[
+        dict[str, Any]
+    ] = []
+
     latency_ms: list[float] = []
 
     total_events = 0
     video_correct_events = 0
     temporal_hit_events = 0
+    query_video_matches = 0
+    correct_video_temporal_hits = 0
+    window_covered_events = 0
+    correct_video_temporal_errors: list[float] = []
 
     temporal_errors: list[float] = []
     ious: list[float] = []
@@ -840,24 +909,60 @@ def benchmark() -> dict[str, Any]:
 
         started = time.perf_counter()
 
-        result = run_trake_r2(
-            tr_r1_results,
-            step=STEP,
-            min_gap=MIN_GAP,
-            rrf_k=RRF_K,
-            window_padding_seconds=(
-                WINDOW_PADDING_SECONDS
-            ),
-            batch_size=BATCH_SIZE,
-            video_beam_size=VIDEO_BEAM_SIZE,
-            sparse_min_gap=SPARSE_MIN_GAP,
-            sparse_window_padding_seconds=(
-                SPARSE_WINDOW_PADDING_SECONDS
-            ),
-            sparse_max_query_variants=(
-                SPARSE_MAX_QUERY_VARIANTS
-            ),
-        )
+        try:
+            result = run_trake_r2(
+                tr_r1_results,
+                step=STEP,
+                min_gap=MIN_GAP,
+                rrf_k=RRF_K,
+                window_padding_seconds=(
+                    WINDOW_PADDING_SECONDS
+                ),
+                batch_size=BATCH_SIZE,
+                video_beam_size=VIDEO_BEAM_SIZE,
+                sparse_min_gap=SPARSE_MIN_GAP,
+                sparse_window_padding_seconds=(
+                    SPARSE_WINDOW_PADDING_SECONDS
+                ),
+                sparse_max_query_variants=(
+                    SPARSE_MAX_QUERY_VARIANTS
+                ),
+                region_prior_weight=REGION_PRIOR_WEIGHT,
+                region_decay_seconds=REGION_DECAY_SECONDS,
+                video_prior_weight=VIDEO_PRIOR_WEIGHT,
+                order_gain_weight=ORDER_GAIN_WEIGHT,
+                span_penalty_weight=SPAN_PENALTY_WEIGHT,
+                span_scale_seconds=SPAN_SCALE_SECONDS,
+                adaptive_dense_rerank=ADAPTIVE_DENSE_RERANK,
+                dense_rerank_top_k=DENSE_RERANK_TOP_K,
+                dense_rerank_margin=DENSE_RERANK_MARGIN,
+                dense_sparse_prior_weight=DENSE_SPARSE_PRIOR_WEIGHT,
+                dense_anchor_max_drift_seconds=(
+                    DENSE_ANCHOR_MAX_DRIFT_SECONDS
+                ),
+                dense_anchor_penalty_per_second=(
+                    DENSE_ANCHOR_PENALTY_PER_SECOND
+                ),
+                dense_anchor_forward_reward_per_second=(
+                    DENSE_ANCHOR_FORWARD_REWARD_PER_SECOND
+                ),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            elapsed = (time.perf_counter() - started) * 1000.0
+            failure = {
+                "query_id": query_id,
+                "gt_video_id": gt_video_id,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "latency_ms": elapsed,
+            }
+            failed_queries.append(failure)
+            print(
+                f"[SKIP] query={query_id}: "
+                f"{failure['error_type']}: {failure['error']}",
+                flush=True,
+            )
+            continue
 
         elapsed = (
             time.perf_counter()
@@ -871,6 +976,10 @@ def benchmark() -> dict[str, Any]:
         predicted_video_id = str(
             result["video_id"]
         )
+
+        query_video_match = predicted_video_id == gt_video_id
+        if query_video_match:
+            query_video_matches += 1
 
         chosen_times = result.get(
             "chosen_times",
@@ -934,14 +1043,24 @@ def benchmark() -> dict[str, Any]:
                 gt["end_time"],
             )
 
-            iou = temporal_iou(
-                prediction_time,
-                gt["start_time"],
-                gt["end_time"],
+            iou = (
+                temporal_iou(
+                    prediction_time,
+                    gt["start_time"],
+                    gt["end_time"],
+                )
+                if video_correct
+                else 0.0
             )
 
-            temporal_hit = (
-                error == 0.0
+            timestamp_in_gt_interval = error == 0.0
+            temporal_hit = video_correct and timestamp_in_gt_interval
+
+            windows = result.get("windows", [])
+            window_covers_gt = video_correct and any(
+                float(window[1]) >= float(gt["start_time"])
+                and float(window[0]) <= float(gt["end_time"])
+                for window in windows
             )
 
             total_events += 1
@@ -951,6 +1070,13 @@ def benchmark() -> dict[str, Any]:
 
             if temporal_hit:
                 temporal_hit_events += 1
+                correct_video_temporal_hits += 1
+
+            if window_covers_gt:
+                window_covered_events += 1
+
+            if video_correct:
+                correct_video_temporal_errors.append(error)
 
             temporal_errors.append(
                 error
@@ -997,6 +1123,8 @@ def benchmark() -> dict[str, Any]:
                     "video_match": video_correct,
                     "temporal_error_seconds": error,
                     "temporal_iou": iou,
+                    "timestamp_in_gt_interval": timestamp_in_gt_interval,
+                    "window_covers_gt": window_covers_gt,
                 }
             )
 
@@ -1015,8 +1143,7 @@ def benchmark() -> dict[str, Any]:
                 "gt_video_id": gt_video_id,
                 "predicted_video_id": predicted_video_id,
                 "video_match": (
-                    predicted_video_id
-                    == gt_video_id
+                    query_video_match
                 ),
                 "windows": result.get("windows"),
                 "sparse_selection": result.get(
@@ -1034,6 +1161,12 @@ def benchmark() -> dict[str, Any]:
                     )
                     for event_id in ordered_event_ids
                 },
+                "chosen_frame_idx": [
+                    int(frame_idx)
+                    for frame_idx in result.get("chosen_frame_idx", [])
+                ],
+                "anchor_constraint": result.get("anchor_constraint"),
+                "dense_rerank": result.get("dense_rerank"),
                 "total_score": float(
                     result.get(
                         "total_score",
@@ -1074,6 +1207,26 @@ def benchmark() -> dict[str, Any]:
             "sparse_max_query_variants": (
                 SPARSE_MAX_QUERY_VARIANTS
             ),
+            "region_prior_weight": REGION_PRIOR_WEIGHT,
+            "region_decay_seconds": REGION_DECAY_SECONDS,
+            "video_prior_weight": VIDEO_PRIOR_WEIGHT,
+            "order_gain_weight": ORDER_GAIN_WEIGHT,
+            "span_penalty_weight": SPAN_PENALTY_WEIGHT,
+            "span_scale_seconds": SPAN_SCALE_SECONDS,
+            "adaptive_dense_rerank": ADAPTIVE_DENSE_RERANK,
+            "dense_rerank_top_k": DENSE_RERANK_TOP_K,
+            "dense_rerank_margin": DENSE_RERANK_MARGIN,
+            "dense_sparse_prior_weight": DENSE_SPARSE_PRIOR_WEIGHT,
+            "dense_anchor_max_drift_seconds": (
+                DENSE_ANCHOR_MAX_DRIFT_SECONDS
+            ),
+            "dense_anchor_penalty_per_second": (
+                DENSE_ANCHOR_PENALTY_PER_SECOND
+            ),
+            "dense_anchor_forward_reward_per_second": (
+                DENSE_ANCHOR_FORWARD_REWARD_PER_SECOND
+            ),
+            "query_ids": list(QUERY_IDS),
         },
         "evaluation": {
             "note": (
@@ -1095,12 +1248,26 @@ def benchmark() -> dict[str, Any]:
             ),
         },
         "summary": {
+            "num_queries_total": total_queries,
+            "num_queries_succeeded": len(query_results),
+            "num_queries_failed": len(failed_queries),
+            "dense_coverage": (
+                len(query_results) / total_queries
+                if total_queries
+                else 0.0
+            ),
             "num_queries": len(
                 query_results
             ),
             "num_events": total_events,
             "video_match_events": (
                 video_correct_events
+            ),
+            "query_video_matches": query_video_matches,
+            "query_video_accuracy": (
+                query_video_matches / len(query_results)
+                if query_results
+                else 0.0
             ),
             "video_accuracy": (
                 video_correct_events
@@ -1115,6 +1282,24 @@ def benchmark() -> dict[str, Any]:
                 temporal_hit_events
                 / total_events
                 if total_events
+                else 0.0
+            ),
+            "correct_video_events": video_correct_events,
+            "correct_video_temporal_hits": correct_video_temporal_hits,
+            "temporal_hit_rate_given_correct_video": (
+                correct_video_temporal_hits / video_correct_events
+                if video_correct_events
+                else 0.0
+            ),
+            "window_covered_events_on_correct_video": window_covered_events,
+            "window_coverage_rate_given_correct_video": (
+                window_covered_events / video_correct_events
+                if video_correct_events
+                else 0.0
+            ),
+            "mean_temporal_error_seconds_given_correct_video": (
+                statistics.mean(correct_video_temporal_errors)
+                if correct_video_temporal_errors
                 else 0.0
             ),
             "mean_temporal_error_seconds": (
@@ -1164,6 +1349,7 @@ def benchmark() -> dict[str, Any]:
             },
         },
         "queries": query_results,
+        "failed_queries": failed_queries,
     }
 
 
@@ -1183,11 +1369,144 @@ def parse_args() -> argparse.Namespace:
             "Chỉ chạy video-local sparse DP; không yêu cầu dense frames."
         ),
     )
+    parser.add_argument(
+        "--video-beam-size",
+        type=int,
+        default=VIDEO_BEAM_SIZE,
+        help="Kích thước video beam; dùng 12 cho baseline, 24 để đo headroom.",
+    )
+    parser.add_argument(
+        "--region-prior-weight",
+        type=float,
+        default=REGION_PRIOR_WEIGHT,
+    )
+    parser.add_argument(
+        "--video-prior-weight",
+        type=float,
+        default=VIDEO_PRIOR_WEIGHT,
+    )
+    parser.add_argument(
+        "--order-gain-weight",
+        type=float,
+        default=ORDER_GAIN_WEIGHT,
+    )
+    parser.add_argument(
+        "--span-penalty-weight",
+        type=float,
+        default=SPAN_PENALTY_WEIGHT,
+    )
+    parser.add_argument(
+        "--dense-rerank-top-k",
+        type=int,
+        default=DENSE_RERANK_TOP_K,
+    )
+    parser.add_argument(
+        "--dense-rerank-margin",
+        type=float,
+        default=DENSE_RERANK_MARGIN,
+    )
+    parser.add_argument(
+        "--dense-anchor-max-drift-seconds",
+        type=float,
+        default=DENSE_ANCHOR_MAX_DRIFT_SECONDS,
+        help="Giới hạn mỗi dense event quanh sparse anchor; mặc định 2 giây.",
+    )
+    parser.add_argument(
+        "--dense-anchor-penalty-per-second",
+        type=float,
+        default=DENSE_ANCHOR_PENALTY_PER_SECOND,
+        help="Phạt tuyến tính khi dense frame rời sparse anchor.",
+    )
+    parser.add_argument(
+        "--dense-anchor-forward-reward-per-second",
+        type=float,
+        default=DENSE_ANCHOR_FORWARD_REWARD_PER_SECOND,
+        help="Reward tuyến tính cho dense frame sau sparse anchor.",
+    )
+    parser.add_argument(
+        "--query-id",
+        action="append",
+        default=[],
+        help="Chỉ benchmark query này; có thể truyền nhiều lần.",
+    )
+    parser.add_argument(
+        "--no-adaptive-dense-rerank",
+        action="store_true",
+        help="Tắt dense rerank nhiều video để đo baseline tương thích cũ.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT_PATH,
+        help="Output JSON của full dense benchmark.",
+    )
+    parser.add_argument(
+        "--sparse-output",
+        type=Path,
+        default=SPARSE_OUTPUT_PATH,
+        help="Output JSON của sparse-only benchmark.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    global VIDEO_BEAM_SIZE
+    global REGION_PRIOR_WEIGHT
+    global VIDEO_PRIOR_WEIGHT
+    global ORDER_GAIN_WEIGHT
+    global SPAN_PENALTY_WEIGHT
+    global DENSE_RERANK_TOP_K
+    global DENSE_RERANK_MARGIN
+    global DENSE_ANCHOR_MAX_DRIFT_SECONDS
+    global DENSE_ANCHOR_PENALTY_PER_SECOND
+    global DENSE_ANCHOR_FORWARD_REWARD_PER_SECOND
+    global QUERY_IDS
+    global ADAPTIVE_DENSE_RERANK
+    global OUTPUT_PATH
+    global SPARSE_OUTPUT_PATH
+
     args = parse_args()
+
+    if args.video_beam_size <= 0:
+        raise ValueError("--video-beam-size phải > 0")
+
+    if args.dense_rerank_top_k <= 0:
+        raise ValueError("--dense-rerank-top-k phải > 0")
+
+    for name in (
+        "region_prior_weight",
+        "video_prior_weight",
+        "order_gain_weight",
+        "span_penalty_weight",
+        "dense_rerank_margin",
+        "dense_anchor_penalty_per_second",
+        "dense_anchor_forward_reward_per_second",
+    ):
+        if float(getattr(args, name)) < 0:
+            raise ValueError(f"--{name.replace('_', '-')} phải >= 0")
+
+    VIDEO_BEAM_SIZE = int(args.video_beam_size)
+    REGION_PRIOR_WEIGHT = float(args.region_prior_weight)
+    VIDEO_PRIOR_WEIGHT = float(args.video_prior_weight)
+    ORDER_GAIN_WEIGHT = float(args.order_gain_weight)
+    SPAN_PENALTY_WEIGHT = float(args.span_penalty_weight)
+    DENSE_RERANK_TOP_K = int(args.dense_rerank_top_k)
+    DENSE_RERANK_MARGIN = float(args.dense_rerank_margin)
+    if float(args.dense_anchor_max_drift_seconds) <= 0:
+        raise ValueError("--dense-anchor-max-drift-seconds phải > 0")
+    DENSE_ANCHOR_MAX_DRIFT_SECONDS = float(
+        args.dense_anchor_max_drift_seconds
+    )
+    DENSE_ANCHOR_PENALTY_PER_SECOND = float(
+        args.dense_anchor_penalty_per_second
+    )
+    DENSE_ANCHOR_FORWARD_REWARD_PER_SECOND = float(
+        args.dense_anchor_forward_reward_per_second
+    )
+    QUERY_IDS = tuple(dict.fromkeys(str(query_id) for query_id in args.query_id))
+    ADAPTIVE_DENSE_RERANK = not args.no_adaptive_dense_rerank
+    OUTPUT_PATH = Path(args.output)
+    SPARSE_OUTPUT_PATH = Path(args.sparse_output)
 
     if args.sparse_only:
         print("=" * 72)
@@ -1215,6 +1534,11 @@ def main() -> None:
         print(
             f"Video accuracy: {summary['video_accuracy']:.4f}"
         )
+        print(
+            "Conditional acc: "
+            f"{summary['conditional_accuracy_given_beam']:.4f}"
+        )
+        print(f"Recall@B      : {summary['beam_recall_at']}")
         print(
             f"Latency p50   : {summary['latency_ms']['p50']:.2f} ms"
         )
@@ -1262,7 +1586,13 @@ def main() -> None:
 
     print(
         f"Queries       : "
-        f"{summary['num_queries']}"
+        f"{summary['num_queries_succeeded']}/"
+        f"{summary['num_queries_total']}"
+    )
+
+    print(
+        f"Dense failed  : "
+        f"{summary['num_queries_failed']}"
     )
 
     print(
@@ -1271,13 +1601,28 @@ def main() -> None:
     )
 
     print(
-        f"Video accuracy: "
+        f"Query video acc: "
+        f"{summary['query_video_accuracy']:.4f}"
+    )
+
+    print(
+        f"Event video acc: "
         f"{summary['video_accuracy']:.4f}"
     )
 
     print(
         f"Temporal hit  : "
         f"{summary['temporal_hit_rate']:.4f}"
+    )
+
+    print(
+        f"Hit | video OK: "
+        f"{summary['temporal_hit_rate_given_correct_video']:.4f}"
+    )
+
+    print(
+        f"Window cover : "
+        f"{summary['window_coverage_rate_given_correct_video']:.4f}"
     )
 
     print(

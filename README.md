@@ -3,6 +3,17 @@
 Kho mã nguồn của nhóm. **Chỉ chứa chương trình, không chứa dữ liệu.**
 Dữ liệu nằm ở một thư mục riêng, khai báo trong `.env` của từng máy.
 
+> Bản này bổ sung region-guided sparse DP, RRF/order/span scoring,
+> adaptive dense top-3 và ranked TRAKE submission. Xem toàn bộ lệnh chạy tại
+> [`docs/TR_E2_OPTIMIZED_RUNBOOK.md`](docs/TR_E2_OPTIMIZED_RUNBOOK.md).
+
+Giao diện hợp nhất KIS, Q&A và TRAKE: xem
+[`docs/UI_KIS_QA_TRAKE.md`](docs/UI_KIS_QA_TRAKE.md). Chạy bằng:
+
+```powershell
+streamlit run src/aic2026/ui/app.py
+```
+
 Chuẩn bị Task 4 (rerank top-100): xem
 [`docs/decisions/task4_rerank_chuan_bi.md`](docs/decisions/task4_rerank_chuan_bi.md).
 

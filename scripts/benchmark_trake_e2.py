@@ -330,6 +330,12 @@ def benchmark_one(
         "gt_video_id": gt_video,
         "predicted_video_id": pred_video,
         "video_correct": pred_video == gt_video,
+        "sparse_margin": diag.get("sparse_margin"),
+        "dense_candidates_requested": diag.get(
+            "dense_candidates_requested"
+        ),
+        "dense_rerank_applied": diag.get("dense_rerank_applied"),
+        "dense_candidates": diag.get("dense_candidates", []),
         "num_events": len(details),
         "r2_hits": sum(bool(x["r2_hit"]) for x in details),
         "e2_hits": sum(bool(x["e2_hit"]) for x in details),

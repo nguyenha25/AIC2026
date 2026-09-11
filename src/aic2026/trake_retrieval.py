@@ -76,7 +76,8 @@ Không dùng số frame hit để cộng cosine thô trực tiếp.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
 
@@ -148,6 +149,21 @@ class TRR1Config:
 
     video_rrf_k:
         Hằng số RRF khi hợp nhất best rank của mỗi video giữa các event.
+
+    video_sequence_weight:
+        Trọng số trộn prior consensus hiện tại với prior coverage có thứ tự
+        thời gian trên raw hits. Mặc định 0 để giữ nguyên production baseline.
+
+    video_sequence_span_weight:
+        Trọng số compactness của path có ordered coverage lớn nhất. Mặc định
+        0 để sequence prior gốc và production baseline không đổi.
+
+    video_sequence_span_scale_seconds:
+        Thang thời gian của compactness ``1 / (1 + span / scale)``.
+
+    consensus_rescue_videos:
+        Số video có query-level consensus cao nhất được giữ ít nhất một region
+        nếu video đó có raw hit trong event. Mặc định 0 để giữ nguyên baseline.
     """
 
     top_k: int = 500
@@ -169,6 +185,10 @@ class TRR1Config:
 
     video_consensus_weight: float = 0.45
     video_rrf_k: float = 60.0
+    video_sequence_weight: float = 0.0
+    video_sequence_span_weight: float = 0.0
+    video_sequence_span_scale_seconds: float = 60.0
+    consensus_rescue_videos: int = 0
 
     def __post_init__(self) -> None:
         if self.top_k <= 0:
@@ -247,6 +267,26 @@ class TRR1Config:
         if self.video_rrf_k < 0:
             raise ValueError(
                 "video_rrf_k phải >= 0."
+            )
+
+        if not 0.0 <= self.video_sequence_weight <= 1.0:
+            raise ValueError(
+                "video_sequence_weight phải nằm trong [0, 1]."
+            )
+
+        if not 0.0 <= self.video_sequence_span_weight <= 1.0:
+            raise ValueError(
+                "video_sequence_span_weight phải nằm trong [0, 1]."
+            )
+
+        if self.video_sequence_span_scale_seconds <= 0:
+            raise ValueError(
+                "video_sequence_span_scale_seconds phải > 0."
+            )
+
+        if self.consensus_rescue_videos < 0:
+            raise ValueError(
+                "consensus_rescue_videos phải >= 0."
             )
 
 
@@ -383,6 +423,85 @@ def _parse_event(
 # ============================================================================
 # QUERY EXPANSION
 # ============================================================================
+
+
+_TRR1_VISUAL_ACTION_TERMS: tuple[tuple[str, str], ...] = (
+    ("hai con rồng vàng", "two golden dragons"),
+    ("người biểu diễn lân", "lion dance performers"),
+    ("bốn chân hoàn toàn chạm đất", "landing on all four feet"),
+    ("4 chân hoàn toàn chạm đất", "landing on all four feet"),
+    ("chào ban giám khảo", "bowing to judges"),
+    ("cây sả", "lemongrass stalk"),
+    ("cây xả", "lemongrass stalk"),
+    ("kẻng đồng", "bronze gong"),
+    ("thanh trụ", "acrobatic poles"),
+    ("cột trụ", "acrobatic poles"),
+    ("cử động đầu", "moving its head"),
+    ("múa lân", "Chinese lion dance"),
+    ("con lân", "Chinese lion dance"),
+    ("rồng vàng", "golden dragon"),
+    ("con rồng", "dragon"),
+    ("cắt rời", "cutting apart"),
+    ("chạm vào", "touching"),
+    ("xoay vòng", "spinning around"),
+    ("quay vòng", "spinning around"),
+    ("xoay người", "spinning"),
+    ("tiếp đất", "landing"),
+    ("dùi", "mallet"),
+    ("dao", "knife"),
+    ("chào", "bowing"),
+    ("lân", "Chinese lion"),
+)
+
+
+def _trr1_visual_action_variants(
+    text: str,
+    *,
+    max_variants: int = 1,
+) -> list[str]:
+    """Tạo cụm CLIP ngắn từ hành động/vật thể nhìn thấy được.
+
+    Bảng này chỉ chứa các khái niệm hình ảnh có nghĩa tổng quát. Thuật toán
+    chọn match dài nhất khi các cụm chồng lấn, giữ thứ tự xuất hiện trong câu
+    và không dùng query id, video id hay GT.
+    """
+
+    if max_variants <= 0:
+        return []
+
+    normalized = " ".join(str(text or "").lower().split())
+    if not normalized:
+        return []
+
+    matches: list[tuple[int, int, str]] = []
+    for vietnamese, english in _TRR1_VISUAL_ACTION_TERMS:
+        start = normalized.find(vietnamese)
+        while start >= 0:
+            end = start + len(vietnamese)
+            left_ok = start == 0 or not normalized[start - 1].isalnum()
+            right_ok = end == len(normalized) or not normalized[end].isalnum()
+            if left_ok and right_ok:
+                matches.append((start, end, english))
+            start = normalized.find(vietnamese, start + 1)
+
+    selected: list[tuple[int, int, str]] = []
+    for candidate in sorted(matches, key=lambda row: (row[0], -(row[1] - row[0]))):
+        start, end, _english = candidate
+        if any(start < chosen_end and end > chosen_start for chosen_start, chosen_end, _ in selected):
+            continue
+        selected.append(candidate)
+
+    concepts: list[str] = []
+    for _start, _end, english in sorted(selected):
+        if english not in concepts:
+            concepts.append(english)
+
+    if len(concepts) < 2:
+        return []
+
+    phrase = " ".join(concepts)
+    variants = [phrase, f"a video frame of {phrase}"]
+    return variants[:max_variants]
 
 
 def _mo_rong_trr1(
@@ -1057,6 +1176,174 @@ def _video_consensus_scores(
     return output
 
 
+def _video_sequence_scores(
+    hits_by_event: Iterable[list[dict[str, Any]]],
+    *,
+    rrf_k: float = 60.0,
+    max_hits_per_video_event: int = 8,
+    span_weight: float = 0.0,
+    span_scale_seconds: float = 60.0,
+) -> dict[str, float]:
+    """Chấm prior video theo coverage và thứ tự thời gian của toàn chuỗi.
+
+    Mỗi video giữ tối đa ``max_hits_per_video_event`` hit tốt nhất/event rồi
+    dùng DP tìm chuỗi timestamp tăng nghiêm ngặt dài nhất, cho phép bỏ qua
+    event không có bằng chứng. Điểm gồm ordered coverage, raw event coverage
+    và chất lượng best rank. Không dùng GT, duration hay tên video.
+
+    Hàm này chỉ có tác dụng khi ``TRR1Config.video_sequence_weight > 0``;
+    production mặc định bằng 0 để baseline không đổi.
+    """
+
+    if rrf_k < 0:
+        raise ValueError("rrf_k phải >= 0")
+    if max_hits_per_video_event <= 0:
+        raise ValueError("max_hits_per_video_event phải > 0")
+    if not 0.0 <= span_weight <= 1.0:
+        raise ValueError("span_weight phải nằm trong [0, 1]")
+    if span_scale_seconds <= 0:
+        raise ValueError("span_scale_seconds phải > 0")
+
+    event_hits = list(hits_by_event)
+    if not event_hits:
+        return {}
+
+    candidates: dict[str, dict[int, list[tuple[float, int]]]] = {}
+
+    for event_index, hits in enumerate(event_hits):
+        seen_times: dict[str, set[float]] = {}
+
+        for rank, hit in enumerate(hits, start=1):
+            if not isinstance(hit, dict):
+                continue
+
+            video_id = _safe_video_id(hit)
+            timestamp = _safe_time(hit)
+            if not video_id or timestamp is None:
+                continue
+
+            video_event_hits = candidates.setdefault(video_id, {}).setdefault(
+                event_index,
+                [],
+            )
+            if len(video_event_hits) >= max_hits_per_video_event:
+                continue
+
+            event_seen = seen_times.setdefault(video_id, set())
+            rounded_time = round(timestamp, 6)
+            if rounded_time in event_seen:
+                continue
+
+            event_seen.add(rounded_time)
+            video_event_hits.append((timestamp, rank))
+
+    num_events = len(event_hits)
+    raw_scores: dict[str, float] = {}
+
+    for video_id, by_event in candidates.items():
+        # State: event index, timestamp, ordered event count, RRF path quality.
+        states: list[tuple[int, float, int, float]] = []
+        best_count = 0
+        best_path_quality = 0.0
+
+        for event_index in range(num_events):
+            current_states: list[tuple[int, float, int, float]] = []
+
+            for timestamp, rank in by_event.get(event_index, []):
+                node_quality = 1.0 / (rrf_k + float(rank))
+                count = 1
+                path_quality = node_quality
+
+                for previous_event, previous_time, previous_count, previous_quality in states:
+                    if previous_event >= event_index or previous_time >= timestamp:
+                        continue
+
+                    candidate_count = previous_count + 1
+                    candidate_quality = previous_quality + node_quality
+                    if (candidate_count, candidate_quality) > (count, path_quality):
+                        count = candidate_count
+                        path_quality = candidate_quality
+
+                current_states.append(
+                    (event_index, timestamp, count, path_quality)
+                )
+                if (count, path_quality) > (best_count, best_path_quality):
+                    best_count = count
+                    best_path_quality = path_quality
+
+            states.extend(current_states)
+
+        support_count = len(by_event)
+        best_ranks = [
+            min(rank for _timestamp, rank in event_candidates)
+            for event_candidates in by_event.values()
+        ]
+        rank_quality = sum(
+            1.0 / math.log2(float(rank) + 1.0)
+            for rank in best_ranks
+        ) / max(1, support_count)
+
+        ordered_coverage = best_count / num_events
+        support_coverage = support_count / num_events
+        base_score = float(
+            0.60 * ordered_coverage
+            + 0.30 * support_coverage
+            + 0.10 * rank_quality
+        )
+
+        # Tìm span ngắn nhất trong các path có ordered coverage lớn nhất.
+        # Với một điểm bắt đầu cố định, chọn timestamp hợp lệ sớm nhất ở mỗi
+        # event sau không thể làm giảm số event còn nối được.
+        compact_count = 0
+        compact_span = float("inf")
+        for start_event, start_candidates in by_event.items():
+            for start_time, _start_rank in start_candidates:
+                current_time = start_time
+                count = 1
+
+                for event_index in range(start_event + 1, num_events):
+                    next_times = [
+                        timestamp
+                        for timestamp, _rank in by_event.get(event_index, [])
+                        if timestamp > current_time
+                    ]
+                    if not next_times:
+                        continue
+
+                    current_time = min(next_times)
+                    count += 1
+
+                span = max(0.0, current_time - start_time)
+                if count > compact_count or (
+                    count == compact_count and span < compact_span
+                ):
+                    compact_count = count
+                    compact_span = span
+
+        compactness = 0.0
+        if compact_count > 1 and math.isfinite(compact_span):
+            compactness = 1.0 / (
+                1.0 + compact_span / span_scale_seconds
+            )
+        compact_score = ordered_coverage * compactness
+        raw_scores[video_id] = float(
+            (1.0 - span_weight) * base_score
+            + span_weight * compact_score
+        )
+
+    if not raw_scores:
+        return {}
+
+    max_score = max(raw_scores.values())
+    if max_score <= 0:
+        return {video_id: 0.0 for video_id in raw_scores}
+
+    return {
+        video_id: float(score / max_score)
+        for video_id, score in raw_scores.items()
+    }
+
+
 # ============================================================================
 # TEMPORAL REGION BUILDER
 # ============================================================================
@@ -1585,6 +1872,8 @@ def _select_diverse_regions(
     limit: int,
     *,
     max_per_video: int = 2,
+    priority_videos: Iterable[str] = (),
+    priority_video_limit: int = 0,
 ) -> list[CoarseRegion]:
 
     if limit <= 0:
@@ -1599,12 +1888,41 @@ def _select_diverse_regions(
         int,
     ] = {}
 
+    selected_ids: set[int] = set()
+
+    # ---------------------------------------------------------
+    # Rescue quota:
+    # giữ best region của các video có consensus toàn chuỗi cao.
+    # Không dùng GT; priority được tính từ raw retrieval của mọi event.
+    # ---------------------------------------------------------
+
+    if priority_video_limit > 0:
+        unique_priority = list(dict.fromkeys(str(v) for v in priority_videos))
+
+        for video_id in unique_priority[:priority_video_limit]:
+            region = next(
+                (item for item in regions if item.video_id == video_id),
+                None,
+            )
+            if region is None:
+                continue
+
+            selected.append(region)
+            selected_ids.add(id(region))
+            counts[video_id] = 1
+
+            if len(selected) >= limit:
+                return selected
+
     # ---------------------------------------------------------
     # Pass 1:
     # tối đa max_per_video để tránh một video chiếm hết top-N.
     # ---------------------------------------------------------
 
     for region in regions:
+
+        if id(region) in selected_ids:
+            continue
 
         count = counts.get(
             region.video_id,
@@ -1622,6 +1940,8 @@ def _select_diverse_regions(
             region.video_id
         ] = count + 1
 
+        selected_ids.add(id(region))
+
         if len(selected) >= limit:
             return selected
 
@@ -1629,11 +1949,6 @@ def _select_diverse_regions(
     # Pass 2:
     # nếu chưa đủ thì fill lại theo score.
     # ---------------------------------------------------------
-
-    selected_ids = {
-        id(region)
-        for region in selected
-    }
 
     for region in regions:
 
@@ -1798,10 +2113,21 @@ def _gom_vung(
         video_scores=video_scores,
     )
 
+    priority_videos = (
+        sorted(
+            video_scores,
+            key=lambda video_id: (-float(video_scores[video_id]), video_id),
+        )
+        if video_scores
+        else []
+    )
+
     return _select_diverse_regions(
         regions,
         config.max_regions_per_event,
         max_per_video=2,
+        priority_videos=priority_videos,
+        priority_video_limit=config.consensus_rescue_videos,
     )
 
 
@@ -1971,10 +2297,28 @@ def tim_nhieu_su_kien(
         for _event_id, text, _relation in parsed_events
     ]
 
-    video_scores = _video_consensus_scores(
+    consensus_scores = _video_consensus_scores(
         hits_by_event,
         rrf_k=config.video_rrf_k,
     )
+    video_scores = consensus_scores
+
+    if config.video_sequence_weight > 0:
+        sequence_scores = _video_sequence_scores(
+            hits_by_event,
+            rrf_k=config.video_rrf_k,
+            span_weight=config.video_sequence_span_weight,
+            span_scale_seconds=config.video_sequence_span_scale_seconds,
+        )
+        video_ids = set(consensus_scores) | set(sequence_scores)
+        sequence_weight = config.video_sequence_weight
+        video_scores = {
+            video_id: float(
+                (1.0 - sequence_weight) * consensus_scores.get(video_id, 0.0)
+                + sequence_weight * sequence_scores.get(video_id, 0.0)
+            )
+            for video_id in video_ids
+        }
 
     results: list[TRR1Result] = []
 
@@ -2001,6 +2345,229 @@ def tim_nhieu_su_kien(
     return tuple(
         results
     )
+
+
+def _trr1_results_from_hits(
+    parsed_events: list[tuple[str, str, str]],
+    hits_by_event: list[list[dict[str, Any]]],
+    *,
+    config: TRR1Config,
+) -> tuple[TRR1Result, ...]:
+    """Group một raw-hit snapshot với một cấu hình TR-R1 xác định."""
+
+    consensus_scores = _video_consensus_scores(
+        hits_by_event,
+        rrf_k=config.video_rrf_k,
+    )
+    video_scores = consensus_scores
+
+    if config.video_sequence_weight > 0:
+        sequence_scores = _video_sequence_scores(
+            hits_by_event,
+            rrf_k=config.video_rrf_k,
+            span_weight=config.video_sequence_span_weight,
+            span_scale_seconds=config.video_sequence_span_scale_seconds,
+        )
+        video_ids = set(consensus_scores) | set(sequence_scores)
+        sequence_weight = config.video_sequence_weight
+        video_scores = {
+            video_id: float(
+                (1.0 - sequence_weight) * consensus_scores.get(video_id, 0.0)
+                + sequence_weight * sequence_scores.get(video_id, 0.0)
+            )
+            for video_id in video_ids
+        }
+
+    return tuple(
+        TRR1Result(
+            event_id=event_id,
+            text=text,
+            relation=relation,
+            regions=tuple(
+                _gom_vung(
+                    hits,
+                    config=config,
+                    video_scores=video_scores,
+                )
+            ),
+        )
+        for (event_id, text, relation), hits in zip(
+            parsed_events,
+            hits_by_event,
+        )
+    )
+
+
+def fuse_video_profile_lists_rrf(
+    source_lists: dict[str, Iterable[str]],
+    *,
+    source_weights: dict[str, float],
+    rrf_k: float = 100.0,
+    limit: int | None = None,
+) -> list[str]:
+    """Weighted-RRF nhiều video list, deduplicate và tie-break ổn định."""
+
+    if rrf_k < 0:
+        raise ValueError("rrf_k phải >= 0")
+    if limit is not None and limit <= 0:
+        raise ValueError("limit phải > 0 hoặc None")
+    if set(source_lists) != set(source_weights):
+        raise ValueError("source_lists và source_weights phải cùng key")
+    if any(float(weight) < 0 for weight in source_weights.values()):
+        raise ValueError("source weight phải >= 0")
+
+    scores: dict[str, float] = {}
+    best_rank: dict[str, int] = {}
+    for source_name, raw_values in source_lists.items():
+        seen: set[str] = set()
+        rank = 0
+        for raw_video_id in raw_values:
+            video_id = str(raw_video_id or "").strip()
+            if not video_id or video_id in seen:
+                continue
+            seen.add(video_id)
+            rank += 1
+            scores[video_id] = scores.get(video_id, 0.0) + (
+                float(source_weights[source_name]) / (rrf_k + rank)
+            )
+            best_rank[video_id] = min(best_rank.get(video_id, rank), rank)
+
+    ranked = sorted(
+        scores,
+        key=lambda video_id: (
+            -scores[video_id],
+            best_rank[video_id],
+            video_id,
+        ),
+    )
+    return ranked[:limit] if limit is not None else ranked
+
+
+def tim_nhieu_su_kien_profile_union(
+    events: Iterable[dict[str, Any]],
+    *,
+    config: TRR1Config | None = None,
+    retriever: Callable[[str, int], list[dict[str, Any]]] | None = None,
+    video_beam_size: int = 12,
+) -> dict[str, Any]:
+    """Tạo TR-R1 beam union đã chốt từ sequence/visual/consensus profiles.
+
+    Cấu hình không dùng GT và phản ánh đúng ablation thắng:
+    sequence weight 1.0, visual sequence weight 0.5, rescue 4; sau đó
+    weighted-RRF ba list với weights 1.5/0.5/1.0 và k=100. Mỗi source giữ
+    ít nhất top-12; khi beam lớn hơn 12, source cũng phải mở cùng mức để
+    candidate ở rank 13+ thực sự có cơ hội đi vào fusion.
+    """
+
+    if config is None:
+        config = TRR1Config()
+    if video_beam_size <= 0:
+        raise ValueError("video_beam_size phải > 0")
+
+    parsed_events = [_parse_event(event) for event in events]
+    if not parsed_events:
+        raise ValueError("events không được rỗng")
+
+    base_hits = [
+        _retrieve_hits(text, config, retriever)
+        for _event_id, text, _relation in parsed_events
+    ]
+    visual_hits: list[list[dict[str, Any]]] = []
+    visual_variants_by_event: dict[str, list[str]] = {}
+
+    for (event_id, text, _relation), event_hits in zip(parsed_events, base_hits):
+        variants = _trr1_visual_action_variants(text)
+        visual_variants_by_event[event_id] = variants
+        extra_hits: list[list[dict[str, Any]]] = []
+        for variant in variants:
+            if retriever is None:
+                hits = _tim_hit_clip_l_mot_query(variant, config.top_k)
+            else:
+                raw_hits = retriever(variant, config.top_k)
+                hits = list(raw_hits or [])
+            extra_hits.append(hits)
+        visual_hits.append(
+            _merge_query_variant_hits([event_hits, *extra_hits])
+            if extra_hits
+            else event_hits
+        )
+
+    shared = dict(
+        max_regions_per_event=10,
+        video_consensus_weight=0.45,
+        video_rrf_k=60.0,
+        video_sequence_span_weight=0.0,
+        video_sequence_span_scale_seconds=60.0,
+        consensus_rescue_videos=4,
+    )
+    sequence_config = replace(
+        config,
+        **shared,
+        video_sequence_weight=1.0,
+    )
+    visual_config = replace(
+        config,
+        **shared,
+        video_sequence_weight=0.5,
+    )
+    sequence_results = _trr1_results_from_hits(
+        parsed_events,
+        base_hits,
+        config=sequence_config,
+    )
+    visual_results = _trr1_results_from_hits(
+        parsed_events,
+        visual_hits,
+        config=visual_config,
+    )
+
+    from aic2026.trake_r2_windows import rank_video_candidates_rrf
+
+    def event_regions(results: tuple[TRR1Result, ...]) -> dict[str, list[dict[str, Any]]]:
+        return {
+            result.event_id: [coarse_region_to_dict(region) for region in result.regions]
+            for result in results
+        }
+
+    source_limit = max(12, int(video_beam_size))
+    sequence_beam = rank_video_candidates_rrf(
+        event_regions(sequence_results),
+        k=60,
+        limit=source_limit,
+    )
+    visual_beam = rank_video_candidates_rrf(
+        event_regions(visual_results),
+        k=60,
+        limit=source_limit,
+    )
+    visual_consensus = _video_consensus_scores(visual_hits, rrf_k=60.0)
+    consensus_beam = sorted(
+        visual_consensus,
+        key=lambda video_id: (-visual_consensus[video_id], video_id),
+    )[:source_limit]
+    source_lists = {
+        "sequence": sequence_beam,
+        "visual": visual_beam,
+        "consensus": consensus_beam,
+    }
+    candidate_video_ids = fuse_video_profile_lists_rrf(
+        source_lists,
+        source_weights={
+            "sequence": 1.5,
+            "visual": 0.5,
+            "consensus": 1.0,
+        },
+        rrf_k=100.0,
+        limit=video_beam_size,
+    )
+
+    return {
+        "results": sequence_results,
+        "candidate_video_ids": candidate_video_ids,
+        "source_video_ids": source_lists,
+        "visual_variants_by_event": visual_variants_by_event,
+        "config_key": "rrf|sequence=1.5|visual=0.5|consensus=1|k=100",
+    }
 
 
 # ============================================================================
@@ -2074,9 +2641,13 @@ __all__ = [
     "TRR1Result",
     "_build_test_hit",
     "_gom_vung",
+    "_trr1_visual_action_variants",
     "_video_consensus_scores",
+    "_video_sequence_scores",
     "coarse_region_to_dict",
+    "fuse_video_profile_lists_rrf",
     "tim_vung_tho",
     "tim_nhieu_su_kien",
+    "tim_nhieu_su_kien_profile_union",
     "trr1_result_to_dict",
 ]

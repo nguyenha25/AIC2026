@@ -79,6 +79,8 @@ Không biến các window xa nhau thành một span lớn.
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -102,6 +104,10 @@ from aic2026.trake_retrieval import (
 
 DENSE_FRAMES_ROOT = Path(DATA_ROOT) / "derived" / "frames_dense"
 FRAME_MAP_PATH = Path(DATA_ROOT) / "index" / "frame_map.parquet"
+DENSE_FEATURE_CACHE_ROOT = (
+    Path(DATA_ROOT) / "derived" / "clip_l_dense_cache"
+)
+DENSE_FEATURE_CACHE_VERSION = 1
 
 DEFAULT_BATCH_SIZE = 16
 
@@ -527,6 +533,96 @@ def _encode_texts_with_runtime(
     return _normalize_embeddings(features.float())
 
 
+def _normalize_video_priors(
+    video_priors: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """Min-max normalize coarse video prior về [0, 1]."""
+
+    if not video_priors:
+        return {}
+
+    finite = {
+        str(video_id): float(value)
+        for video_id, value in video_priors.items()
+        if math.isfinite(float(value))
+    }
+
+    if not finite:
+        return {}
+
+    lo = min(finite.values())
+    hi = max(finite.values())
+
+    if hi - lo <= 1e-12:
+        return {video_id: 1.0 for video_id in finite}
+
+    return {
+        video_id: (value - lo) / (hi - lo)
+        for video_id, value in finite.items()
+    }
+
+
+def _region_prior_matrix(
+    event_ids: Sequence[str],
+    *,
+    video_id: str,
+    anchor_times: np.ndarray,
+    region_evidence: (
+        Mapping[
+            str,
+            Mapping[str, Sequence[Mapping[str, Any]]],
+        ]
+        | None
+    ),
+    decay_seconds: float,
+) -> np.ndarray:
+    """Soft temporal prior từ coarse regions của TR-R1.
+
+    Frame nằm trong region nhận prior bằng region score. Frame ngoài region
+    vẫn được phép chọn nhưng prior giảm mũ theo khoảng cách. Vì vậy TR-R2 giữ
+    được recall khi coarse boundary lệch, đồng thời không còn bỏ phí toàn bộ
+    temporal evidence của TR-R1 sau bước tạo video beam.
+    """
+
+    prior = np.zeros_like(anchor_times, dtype=np.float32)
+
+    if not region_evidence:
+        return prior
+
+    by_event = region_evidence.get(str(video_id), {})
+
+    for event_index, event_id in enumerate(event_ids):
+        regions = by_event.get(str(event_id), ())
+
+        for region in regions:
+            start = float(region.get("start_time", 0.0))
+            end = float(region.get("end_time", start))
+
+            if end < start:
+                start, end = end, start
+
+            region_score = float(region.get("score", 1.0))
+            region_score = min(1.0, max(0.0, region_score))
+            times = anchor_times[event_index]
+            distance = np.where(
+                times < start,
+                start - times,
+                np.where(times > end, times - end, 0.0),
+            )
+
+            if decay_seconds > 0:
+                values = region_score * np.exp(-distance / decay_seconds)
+            else:
+                values = region_score * (distance == 0.0)
+
+            prior[event_index] = np.maximum(
+                prior[event_index],
+                values.astype(np.float32, copy=False),
+            )
+
+    return prior
+
+
 def solve_sparse_video_paths(
     event_ids: Sequence[str],
     frames_by_video: Mapping[str, Sequence[SparseKeyframe]],
@@ -535,6 +631,20 @@ def solve_sparse_video_paths(
     min_gap: int = 1,
     candidate_order: Sequence[str] | None = None,
     anchor_time_matrices: Mapping[str, np.ndarray] | None = None,
+    video_priors: Mapping[str, float] | None = None,
+    region_evidence: (
+        Mapping[
+            str,
+            Mapping[str, Sequence[Mapping[str, Any]]],
+        ]
+        | None
+    ) = None,
+    region_prior_weight: float = 0.0,
+    region_decay_seconds: float = 8.0,
+    video_prior_weight: float = 0.0,
+    order_gain_weight: float = 0.0,
+    span_penalty_weight: float = 0.041,
+    span_scale_seconds: float = 60.0,
 ) -> dict[str, Any]:
     """Chạy strict-increasing DP trên từng video và chọn path tốt nhất.
 
@@ -551,6 +661,24 @@ def solve_sparse_video_paths(
     if min_gap < 1:
         raise ValueError("sparse min_gap phải >= 1")
 
+    if region_prior_weight < 0:
+        raise ValueError("region_prior_weight phải >= 0")
+
+    if region_decay_seconds < 0:
+        raise ValueError("region_decay_seconds phải >= 0")
+
+    if video_prior_weight < 0:
+        raise ValueError("video_prior_weight phải >= 0")
+
+    if order_gain_weight < 0:
+        raise ValueError("order_gain_weight phải >= 0")
+
+    if span_penalty_weight < 0:
+        raise ValueError("span_penalty_weight phải >= 0")
+
+    if span_scale_seconds <= 0:
+        raise ValueError("span_scale_seconds phải > 0")
+
     if candidate_order is None:
         ordered_video_ids = list(frames_by_video.keys())
     else:
@@ -560,6 +688,7 @@ def solve_sparse_video_paths(
         raise ValueError("Không có sparse video candidate")
 
     candidate_results: list[dict[str, Any]] = []
+    normalized_priors = _normalize_video_priors(video_priors)
 
     for beam_rank, video_id in enumerate(ordered_video_ids, start=1):
         if video_id not in frames_by_video:
@@ -646,8 +775,20 @@ def solve_sparse_video_paths(
                     f"pts_time={right_pts_time}"
                 )
 
+        region_prior = _region_prior_matrix(
+            normalized_event_ids,
+            video_id=video_id,
+            anchor_times=anchor_times,
+            region_evidence=region_evidence,
+            decay_seconds=region_decay_seconds,
+        )
+        adjusted_matrix = (
+            matrix
+            + float(region_prior_weight) * region_prior
+        ).astype(np.float32, copy=False)
+
         chosen_positions, total_score = solve_strict_increasing_path(
-            matrix.tolist(),
+            adjusted_matrix.tolist(),
             min_gap=min_gap,
         )
 
@@ -655,6 +796,58 @@ def solve_sparse_video_paths(
             frames[position]
             for position in chosen_positions
         ]
+
+        chosen_times_list = [
+            float(anchor_times[event_index, position])
+            for event_index, position in enumerate(chosen_positions)
+        ]
+        path_span_seconds = max(chosen_times_list) - min(chosen_times_list)
+        span_penalty = math.log1p(
+            max(0.0, path_span_seconds) / span_scale_seconds
+        )
+
+        mean_score = float(total_score) / len(normalized_event_ids)
+        clip_mean_score = float(
+            np.mean(
+                [
+                    matrix[event_index, position]
+                    for event_index, position in enumerate(chosen_positions)
+                ]
+            )
+        )
+        region_consistency = float(
+            np.mean(
+                [
+                    region_prior[event_index, position]
+                    for event_index, position in enumerate(chosen_positions)
+                ]
+            )
+        )
+
+        reverse_mean_score = mean_score
+        order_gain = 0.0
+
+        if len(normalized_event_ids) > 1:
+            _reverse_positions, reverse_total = (
+                solve_strict_increasing_path(
+                    adjusted_matrix[::-1].tolist(),
+                    min_gap=min_gap,
+                )
+            )
+            reverse_mean_score = float(reverse_total) / len(
+                normalized_event_ids
+            )
+            order_gain = mean_score - reverse_mean_score
+
+        normalized_video_prior = float(
+            normalized_priors.get(video_id, 0.0)
+        )
+        final_score = (
+            mean_score
+            + float(video_prior_weight) * normalized_video_prior
+            + float(order_gain_weight) * order_gain
+            - float(span_penalty_weight) * span_penalty
+        )
 
         candidate_results.append(
             {
@@ -670,13 +863,21 @@ def solve_sparse_video_paths(
                     for frame in chosen_frames
                 ],
                 "chosen_times": {
-                    event_id: float(anchor_times[event_index, position])
+                    event_id: chosen_times_list[event_index]
                     for event_index, (event_id, position) in enumerate(
                         zip(normalized_event_ids, chosen_positions)
                     )
                 },
                 "total_score": float(total_score),
-                "mean_score": float(total_score) / len(normalized_event_ids),
+                "mean_score": mean_score,
+                "clip_mean_score": clip_mean_score,
+                "region_consistency": region_consistency,
+                "video_prior": normalized_video_prior,
+                "reverse_mean_score": reverse_mean_score,
+                "order_gain": order_gain,
+                "path_span_seconds": float(path_span_seconds),
+                "span_penalty": float(span_penalty),
+                "final_score": float(final_score),
             }
         )
 
@@ -687,7 +888,7 @@ def solve_sparse_video_paths(
 
     candidate_results.sort(
         key=lambda item: (
-            -float(item["mean_score"]),
+            -float(item["final_score"]),
             int(item["beam_rank"]),
             str(item["video_id"]),
         )
@@ -701,6 +902,16 @@ def solve_sparse_video_paths(
             "num_sparse_frames": int(item["num_sparse_frames"]),
             "total_score": float(item["total_score"]),
             "mean_score": float(item["mean_score"]),
+            "clip_mean_score": float(item["clip_mean_score"]),
+            "region_consistency": float(item["region_consistency"]),
+            "video_prior": float(item["video_prior"]),
+            "reverse_mean_score": float(item["reverse_mean_score"]),
+            "order_gain": float(item["order_gain"]),
+            "path_span_seconds": float(item["path_span_seconds"]),
+            "span_penalty": float(item["span_penalty"]),
+            "final_score": float(item["final_score"]),
+            "chosen_frame_idx": list(item["chosen_frame_idx"]),
+            "chosen_times": dict(item["chosen_times"]),
         }
         for item in candidate_results
     ]
@@ -715,6 +926,20 @@ def select_video_by_sparse_dp(
     min_gap: int = 1,
     use_query_expansion: bool = True,
     max_query_variants: int = 4,
+    video_priors: Mapping[str, float] | None = None,
+    region_evidence: (
+        Mapping[
+            str,
+            Mapping[str, Sequence[Mapping[str, Any]]],
+        ]
+        | None
+    ) = None,
+    region_prior_weight: float = 0.0,
+    region_decay_seconds: float = 8.0,
+    video_prior_weight: float = 0.0,
+    order_gain_weight: float = 0.0,
+    span_penalty_weight: float = 0.041,
+    span_scale_seconds: float = 60.0,
 ) -> dict[str, Any]:
     """Rescore toàn bộ sparse CLIP-L keyframe trong candidate videos.
 
@@ -906,6 +1131,14 @@ def select_video_by_sparse_dp(
         min_gap=min_gap,
         candidate_order=candidate_video_ids,
         anchor_time_matrices=anchor_time_matrices,
+        video_priors=video_priors,
+        region_evidence=region_evidence,
+        region_prior_weight=region_prior_weight,
+        region_decay_seconds=region_decay_seconds,
+        video_prior_weight=video_prior_weight,
+        order_gain_weight=order_gain_weight,
+        span_penalty_weight=span_penalty_weight,
+        span_scale_seconds=span_scale_seconds,
     )
 
 
@@ -1116,7 +1349,7 @@ class DenseClipLScorer:
     # Image encoding
     # -----------------------------------------------------------------
 
-    def _encode_images(
+    def _encode_images_uncached(
         self,
         frames: Sequence[DenseFrame],
     ) -> torch.Tensor:
@@ -1187,6 +1420,159 @@ class DenseClipLScorer:
         return torch.cat(
             all_features,
             dim=0,
+        )
+
+    def _dense_feature_cache_path(self) -> Path:
+        return DENSE_FEATURE_CACHE_ROOT / f"{self.video_id}.npz"
+
+    def _load_dense_feature_cache(
+        self,
+    ) -> dict[int, tuple[int, int, np.ndarray]]:
+        """Đọc cache theo frame_idx, size và mtime; cache lỗi thì bỏ qua."""
+
+        path = self._dense_feature_cache_path()
+        if not path.exists():
+            return {}
+
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                version = int(np.asarray(data["version"]).reshape(-1)[0])
+                if version != DENSE_FEATURE_CACHE_VERSION:
+                    return {}
+
+                frame_idx = np.asarray(data["frame_idx"], dtype=np.int64)
+                file_size = np.asarray(data["file_size"], dtype=np.int64)
+                mtime_ns = np.asarray(data["mtime_ns"], dtype=np.int64)
+                features = np.asarray(data["features"], dtype=np.float32)
+
+            row_count = len(frame_idx)
+            if (
+                features.ndim != 2
+                or len(file_size) != row_count
+                or len(mtime_ns) != row_count
+                or len(features) != row_count
+                or not np.isfinite(features).all()
+            ):
+                return {}
+
+            return {
+                int(frame_idx[row]): (
+                    int(file_size[row]),
+                    int(mtime_ns[row]),
+                    features[row].copy(),
+                )
+                for row in range(row_count)
+            }
+        except (OSError, ValueError, KeyError, IndexError):
+            return {}
+
+    def _save_dense_feature_cache(
+        self,
+        entries: Mapping[int, tuple[int, int, np.ndarray]],
+    ) -> None:
+        """Ghi atomically để Ctrl+C không làm hỏng cache đã có."""
+
+        if not entries:
+            return
+
+        path = self._dense_feature_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        ordered = sorted(entries.items())
+
+        try:
+            with tmp_path.open("wb") as stream:
+                np.savez(
+                    stream,
+                    version=np.asarray(
+                        [DENSE_FEATURE_CACHE_VERSION], dtype=np.int64
+                    ),
+                    frame_idx=np.asarray(
+                        [frame_idx for frame_idx, _entry in ordered],
+                        dtype=np.int64,
+                    ),
+                    file_size=np.asarray(
+                        [entry[0] for _frame_idx, entry in ordered],
+                        dtype=np.int64,
+                    ),
+                    mtime_ns=np.asarray(
+                        [entry[1] for _frame_idx, entry in ordered],
+                        dtype=np.int64,
+                    ),
+                    features=np.stack(
+                        [entry[2] for _frame_idx, entry in ordered]
+                    ).astype(np.float32, copy=False),
+                )
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            print(
+                f"[WARN] Không ghi được dense feature cache "
+                f"video={self.video_id}: {exc}",
+                flush=True,
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _encode_images(
+        self,
+        frames: Sequence[DenseFrame],
+    ) -> torch.Tensor:
+        """Dùng cache bền vững; chỉ CLIP-encode frame mới hoặc đã thay đổi."""
+
+        cached_entries = self._load_dense_feature_cache()
+        output_features: list[np.ndarray | None] = [None] * len(frames)
+        missing_frames: list[DenseFrame] = []
+        missing_positions: list[int] = []
+
+        for position, frame in enumerate(frames):
+            stat = frame.path.stat()
+            cached = cached_entries.get(int(frame.frame_idx))
+            if (
+                cached is not None
+                and cached[0] == int(stat.st_size)
+                and cached[1] == int(stat.st_mtime_ns)
+            ):
+                output_features[position] = cached[2]
+            else:
+                missing_frames.append(frame)
+                missing_positions.append(position)
+
+        print(
+            f"[TR-R2-CACHE] video={self.video_id} "
+            f"hit={len(frames) - len(missing_frames)} "
+            f"missing={len(missing_frames)}",
+            flush=True,
+        )
+
+        if missing_frames:
+            encoded = (
+                self._encode_images_uncached(missing_frames)
+                .cpu()
+                .numpy()
+                .astype(np.float32, copy=False)
+            )
+
+            for offset, (position, frame) in enumerate(
+                zip(missing_positions, missing_frames)
+            ):
+                feature = encoded[offset].copy()
+                output_features[position] = feature
+                stat = frame.path.stat()
+                cached_entries[int(frame.frame_idx)] = (
+                    int(stat.st_size),
+                    int(stat.st_mtime_ns),
+                    feature,
+                )
+
+            self._save_dense_feature_cache(cached_entries)
+
+        if any(feature is None for feature in output_features):
+            raise RuntimeError("Dense feature cache thiếu output frame")
+
+        return torch.from_numpy(
+            np.stack(output_features).astype(np.float32, copy=False)
         )
 
     # -----------------------------------------------------------------

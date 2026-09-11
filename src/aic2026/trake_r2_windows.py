@@ -45,6 +45,39 @@ def rank_video_candidates_rrf(
     if limit is not None and limit <= 0:
         raise ValueError("limit phải > 0 hoặc None")
 
+    scores = score_video_candidates_rrf(
+        events_regions,
+        k=k,
+    )
+
+    ranked = sorted(
+        scores,
+        key=lambda video_id: (
+            -scores[video_id],
+            video_id,
+        ),
+    )
+
+    if limit is not None:
+        ranked = ranked[:limit]
+
+    return ranked
+
+
+def score_video_candidates_rrf(
+    events_regions: dict,
+    *,
+    k: int = 60,
+) -> dict[str, float]:
+    """Trả raw RRF score theo video, deduplicate trong từng event.
+
+    Hàm tách riêng phần score để TR-R2 có thể giữ lại coarse-video prior
+    khi rerank bằng sparse/dense DP. Trước đây prior này chỉ được dùng để
+    tạo beam rồi bị bỏ hoàn toàn ở bước chọn video cuối.
+    """
+    if k < 0:
+        raise ValueError("k phải >= 0")
+
     scores: dict[str, float] = {}
 
     for regions in events_regions.values():
@@ -67,18 +100,7 @@ def rank_video_candidates_rrf(
     if not scores:
         raise ValueError("Không có video ứng viên")
 
-    ranked = sorted(
-        scores,
-        key=lambda video_id: (
-            -scores[video_id],
-            video_id,
-        ),
-    )
-
-    if limit is not None:
-        ranked = ranked[:limit]
-
-    return ranked
+    return scores
 
 
 def chon_video_rrf(events_regions: dict, k: int = 60) -> str:

@@ -49,19 +49,24 @@ import argparse
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from aic2026.paths import DEV_DIR
+from aic2026.paths import DEV_DIR, RUNS_DIR
 from aic2026.semantic.parser import RuleBasedParser
 from aic2026.trake_e2_boundary import (
     refine_from_dense_scorer,
 )
 from aic2026.trake_r2_pipeline import (
+    align_dense_temporal_profiles,
+    build_sparse_ranked_candidates,
+    enumerate_binary_profile_hybrids,
     run_trake_r2_diagnostics,
+    run_trake_r2_sparse_selection,
 )
 from aic2026.trake_retrieval import (
     TRR1Config,
     tim_nhieu_su_kien,
+    tim_nhieu_su_kien_profile_union,
 )
 
 
@@ -85,6 +90,28 @@ TR_R2_MIN_GAP = 1
 TR_R2_RRF_K = 60
 TR_R2_WINDOW_PADDING_SECONDS = 0.0
 TR_R2_BATCH_SIZE = 16
+TR_R2_VIDEO_BEAM_SIZE = 12
+TR_R2_DENSE_RERANK_TOP_K = 3
+TR_R2_DENSE_RERANK_MARGIN = 0.015
+OUTPUT_PATH = RUNS_DIR / "trake_e2_ranked_results.json"
+
+# Hai profile Pareto được chốt từ ablation trên bốn query có GT trong video
+# beam. Wide đạt 6/20; narrow đạt 5/20; union hai path đạt 9/20. Cả hai dùng
+# lại cùng scorer/cache nên gần như không tăng inference cost.
+TR_R2_TEMPORAL_PROFILES = (
+    {
+        "name": "wide_forward",
+        "max_drift_seconds": 2.0,
+        "anchor_penalty_per_second": 0.005,
+        "forward_reward_per_second": 0.03,
+    },
+    {
+        "name": "narrow_forward",
+        "max_drift_seconds": 0.5,
+        "anchor_penalty_per_second": 0.0,
+        "forward_reward_per_second": 0.06,
+    },
+)
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +786,10 @@ def run_one_query(
     row: dict[str, Any],
     parser_s1: RuleBasedParser,
     trr1_config: TRR1Config,
+    video_beam_size: int = TR_R2_VIDEO_BEAM_SIZE,
+    dense_rerank_top_k: int = TR_R2_DENSE_RERANK_TOP_K,
+    dense_rerank_margin: float = TR_R2_DENSE_RERANK_MARGIN,
+    trr1_profile_union: bool = False,
 ) -> dict[str, Any]:
     query_id = str(
         row.get("id", "")
@@ -807,17 +838,44 @@ def run_one_query(
     print()
     print("[1/3] TR-R1 coarse retrieval...")
 
-    tr_r1_results = tim_nhieu_su_kien(
-        [
-            {
-                "event_id": event.event_id,
-                "text": event.text,
-                "relation": event.relation,
-            }
-            for event in plan.events
-        ],
-        config=trr1_config,
-    )
+    retrieval_events = [
+        {
+            "event_id": event.event_id,
+            "text": event.text,
+            "relation": event.relation,
+        }
+        for event in plan.events
+    ]
+    profile_union_info: dict[str, Any] | None = None
+    profile_union_metadata: dict[str, Any] | None = None
+    candidate_video_ids: list[str] | None = None
+
+    if trr1_profile_union:
+        profile_union_info = tim_nhieu_su_kien_profile_union(
+            retrieval_events,
+            config=trr1_config,
+            video_beam_size=video_beam_size,
+        )
+        tr_r1_results = profile_union_info["results"]
+        candidate_video_ids = list(profile_union_info["candidate_video_ids"])
+        profile_union_metadata = {
+            key: value
+            for key, value in profile_union_info.items()
+            if key != "results"
+        }
+        source_sizes = {
+            name: len(values)
+            for name, values in profile_union_info["source_video_ids"].items()
+        }
+        print(
+            "TR-R1 PROFILE UNION | "
+            f"beam={len(candidate_video_ids)} | sources={source_sizes}"
+        )
+    else:
+        tr_r1_results = tim_nhieu_su_kien(
+            retrieval_events,
+            config=trr1_config,
+        )
 
     if not tr_r1_results:
         raise ValueError(
@@ -837,8 +895,8 @@ def run_one_query(
     print()
     print("[2/3] TR-R2 dense alignment...")
 
-    diagnostics = (
-        run_trake_r2_diagnostics(
+    try:
+        diagnostics = run_trake_r2_diagnostics(
             tr_r1_results,
             step=TR_R2_STEP,
             min_gap=TR_R2_MIN_GAP,
@@ -847,8 +905,71 @@ def run_one_query(
                 TR_R2_WINDOW_PADDING_SECONDS
             ),
             batch_size=TR_R2_BATCH_SIZE,
+            video_beam_size=video_beam_size,
+            candidate_video_ids=candidate_video_ids,
+            dense_rerank_top_k=dense_rerank_top_k,
+            dense_rerank_margin=dense_rerank_margin,
         )
-    )
+    except (FileNotFoundError, ValueError) as exc:
+        dense_error = f"{type(exc).__name__}: {exc}"
+        dense_unavailable_markers = (
+            "Candidate sparse top-1 không có dense frame",
+            "Không tìm thấy dense frames",
+            "Không có dense frame trong local window",
+        )
+        if not any(marker in str(exc) for marker in dense_unavailable_markers):
+            raise
+
+        print(f"[TR-R2 FALLBACK] {dense_error}")
+        sparse_result = run_trake_r2_sparse_selection(
+            tr_r1_results,
+            rrf_k=TR_R2_RRF_K,
+            video_beam_size=video_beam_size,
+            candidate_video_ids=candidate_video_ids,
+        )
+        sparse_selection = sparse_result["selection"]
+        ranked_candidates = build_sparse_ranked_candidates(
+            sparse_selection,
+            event_ids,
+        )
+        if not ranked_candidates:
+            raise ValueError(
+                f"Query {query_id!r}: sparse fallback không có candidate hợp lệ"
+            ) from exc
+
+        selected_video_id = str(sparse_result["video_id"])
+        print(
+            "TR-R2 SPARSE FALLBACK OK | "
+            f"video={selected_video_id} | "
+            f"candidates={len(ranked_candidates)}"
+        )
+        print("[3/3] TR-E2 skipped: dense frame không khả dụng")
+
+        return {
+            "query_id": query_id,
+            "video_id": selected_video_id,
+            "events": [
+                {
+                    "event_id": event.event_id,
+                    "text": event.text,
+                    "relation": event.relation,
+                }
+                for event in plan.events
+            ],
+            "tr_r2": {
+                "status": "sparse_fallback",
+                "dense_error": dense_error,
+                "chosen_times": sparse_selection.get("chosen_times", {}),
+                "total_score": sparse_selection.get("total_score"),
+                "sparse_margin": None,
+                "dense_rerank_applied": False,
+                "temporal_profiles": [],
+                "temporal_profile_hybrid_count": 0,
+                "tr_r1_profile_union": profile_union_metadata,
+            },
+            "tr_e2": [],
+            "ranked_candidates": ranked_candidates,
+        }
 
     scorer = diagnostics.get(
         "scorer"
@@ -874,6 +995,33 @@ def run_one_query(
 
     chosen_times = get_chosen_times(
         alignment
+    )
+
+    selected_video_id = str(diagnostics.get("video_id"))
+    sparse_selection = diagnostics.get("sparse_selection", {})
+    dense_by_video = {
+        str(candidate["video_id"]): candidate
+        for candidate in diagnostics.get("dense_candidates", [])
+    }
+    selected_dense_candidate = dense_by_video.get(selected_video_id, {})
+    selected_sparse_candidate = selected_dense_candidate.get("sparse", {})
+    profile_anchor_times = selected_sparse_candidate.get("chosen_times")
+    if not isinstance(profile_anchor_times, Mapping):
+        profile_anchor_times = sparse_selection.get("chosen_times")
+    if not isinstance(profile_anchor_times, Mapping):
+        raise ValueError("Không tìm thấy sparse anchors cho temporal profiles")
+
+    profile_alignments = align_dense_temporal_profiles(
+        {
+            str(result.event_id): {}
+            for result in tr_r1_results
+        },
+        scorer,
+        video_id=selected_video_id,
+        windows=diagnostics.get("windows", []),
+        anchor_times=profile_anchor_times,
+        profiles=TR_R2_TEMPORAL_PROFILES,
+        min_gap=TR_R2_MIN_GAP,
     )
 
     print(
@@ -923,6 +1071,126 @@ def run_one_query(
             f"{result.confidence:.3f}"
         )
 
+    selected_frame_idx = [
+        int(result.representative_frame_idx)
+        for result in boundaries
+    ]
+    ranked_candidates: list[dict[str, Any]] = []
+    seen_ranked_paths: set[tuple[str, tuple[int, ...]]] = set()
+
+    def add_ranked_candidate(candidate: dict[str, Any]) -> None:
+        frame_idx = [int(value) for value in candidate.get("frame_idx", [])]
+        key = (str(candidate.get("video_id", "")), tuple(frame_idx))
+        if not key[0] or not frame_idx or key in seen_ranked_paths:
+            return
+        if len(frame_idx) != len(event_ids):
+            return
+        if any(left >= right for left, right in zip(frame_idx, frame_idx[1:])):
+            return
+        seen_ranked_paths.add(key)
+        normalized = dict(candidate)
+        normalized["frame_idx"] = frame_idx
+        ranked_candidates.append(normalized)
+
+    # Rank 1/2: hai temporal profile Pareto trên cùng selected video/scorer.
+    for profile_rank, profile in enumerate(profile_alignments, start=1):
+        profile_alignment = profile["alignment"]
+        add_ranked_candidate(
+            {
+                "video_id": selected_video_id,
+                "frame_idx": profile_alignment["chosen_frame_idx"],
+                "score": float(profile_alignment["total_score"]),
+                "source": f"dense_profile_{profile['name']}",
+                "profile_rank": profile_rank,
+                "profile_config": profile["config"],
+                "sparse_rank": 1,
+            }
+        )
+
+    profile_hybrids = enumerate_binary_profile_hybrids(
+        profile_alignments[0],
+        profile_alignments[1],
+        event_ids=event_ids,
+        max_hybrids=64,
+    )
+    primary_profile_score = float(
+        profile_alignments[0]["alignment"]["total_score"]
+    )
+    for hybrid_rank, hybrid in enumerate(profile_hybrids, start=1):
+        add_ranked_candidate(
+            {
+                "video_id": selected_video_id,
+                "frame_idx": hybrid["chosen_frame_idx"],
+                # Thứ tự thật được giữ bởi list; score chỉ là diagnostic.
+                "score": primary_profile_score - hybrid_rank * 1e-9,
+                "source": f"dense_profile_{hybrid['name']}",
+                "profile_choices": hybrid["profile_choices"],
+                "secondary_event_count": hybrid["secondary_event_count"],
+                "sparse_rank": 1,
+            }
+        )
+
+    # Giữ TR-E2 boundary và dense path mặc định làm fallback tiếp theo.
+    add_ranked_candidate(
+        {
+            "video_id": selected_video_id,
+            "frame_idx": selected_frame_idx,
+            "score": float(alignment.get("total_score", 0.0)),
+            "source": "tr_e2",
+            "sparse_rank": 1,
+        }
+    )
+
+    add_ranked_candidate(
+        {
+            "video_id": selected_video_id,
+            "frame_idx": alignment.get("chosen_frame_idx", []),
+            "score": float(alignment.get("total_score", 0.0)),
+            "source": "dense_dp_default",
+            "sparse_rank": 1,
+        }
+    )
+
+    for sparse_rank, candidate in enumerate(
+        sparse_selection.get("candidate_scores", []),
+        start=1,
+    ):
+        video_id = str(candidate["video_id"])
+        dense_candidate = dense_by_video.get(video_id)
+        frame_idx = list(candidate.get("chosen_frame_idx", []))
+        source = "sparse_dp"
+        score = float(candidate.get("final_score", candidate.get("mean_score", 0.0)))
+
+        if dense_candidate and dense_candidate.get("status") == "ok":
+            frame_idx = [int(value) for value in dense_candidate["chosen_frame_idx"]]
+            score = float(dense_candidate.get("rerank_score", score))
+            source = "dense_dp"
+
+        if video_id == selected_video_id:
+            # Selected video đã có wide/narrow/TR-E2/default ở đầu danh sách.
+            # Vẫn giữ sparse path như một fallback nếu nó khác thật sự.
+            frame_idx = [
+                int(value)
+                for value in candidate.get("chosen_frame_idx", [])
+            ]
+            score = float(
+                candidate.get(
+                    "final_score",
+                    candidate.get("mean_score", 0.0),
+                )
+            )
+            source = "sparse_dp_selected"
+
+        add_ranked_candidate(
+            {
+                "video_id": video_id,
+                "frame_idx": frame_idx,
+                "score": score,
+                "source": source,
+                "sparse_rank": sparse_rank,
+            }
+        )
+
     return {
         "query_id": query_id,
         "video_id": diagnostics.get(
@@ -941,11 +1209,29 @@ def run_one_query(
             "total_score": alignment.get(
                 "total_score"
             ),
+            "sparse_margin": diagnostics.get("sparse_margin"),
+            "dense_rerank_applied": diagnostics.get(
+                "dense_rerank_applied"
+            ),
+            "temporal_profiles": [
+                {
+                    "name": profile["name"],
+                    "config": profile["config"],
+                    "chosen_times": profile["alignment"]["chosen_times"],
+                    "chosen_frame_idx": profile["alignment"][
+                        "chosen_frame_idx"
+                    ],
+                }
+                for profile in profile_alignments
+            ],
+            "temporal_profile_hybrid_count": len(profile_hybrids),
+            "tr_r1_profile_union": profile_union_metadata,
         },
         "tr_e2": [
             asdict(result)
             for result in boundaries
         ],
+        "ranked_candidates": ranked_candidates,
     }
 
 
@@ -982,8 +1268,49 @@ def main() -> None:
             "--query-id 08 --query-id 15"
         ),
     )
+    cli.add_argument(
+        "--video-beam-size",
+        type=int,
+        default=TR_R2_VIDEO_BEAM_SIZE,
+        help="Kích thước video beam; mặc định 12.",
+    )
+    cli.add_argument(
+        "--dense-rerank-top-k",
+        type=int,
+        default=TR_R2_DENSE_RERANK_TOP_K,
+        help="Số candidate dense-rerank khi sparse margin thấp; mặc định 3.",
+    )
+    cli.add_argument(
+        "--dense-rerank-margin",
+        type=float,
+        default=TR_R2_DENSE_RERANK_MARGIN,
+        help="Ngưỡng top1-top2 để kích hoạt dense rerank; mặc định 0.015.",
+    )
+    cli.add_argument(
+        "--trr1-profile-union",
+        action="store_true",
+        help=(
+            "Dùng beam union sequence/visual/consensus đã chốt; "
+            "mặc định tắt để giữ baseline."
+        ),
+    )
+    cli.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT_PATH,
+        help="File JSON kết quả ranked dùng để xuất submission.",
+    )
 
     args = cli.parse_args()
+
+    if args.video_beam_size <= 0:
+        raise ValueError("--video-beam-size phải > 0")
+
+    if args.dense_rerank_top_k <= 0:
+        raise ValueError("--dense-rerank-top-k phải > 0")
+
+    if args.dense_rerank_margin < 0:
+        raise ValueError("--dense-rerank-margin phải >= 0")
 
     trr1_config = TRR1Config(
         top_k=TOP_K,
@@ -1088,6 +1415,10 @@ def main() -> None:
                 row=row,
                 parser_s1=parser_s1,
                 trr1_config=trr1_config,
+                video_beam_size=args.video_beam_size,
+                dense_rerank_top_k=args.dense_rerank_top_k,
+                dense_rerank_margin=args.dense_rerank_margin,
+                trr1_profile_union=args.trr1_profile_union,
             )
 
             outputs.append(
@@ -1125,6 +1456,13 @@ def main() -> None:
             indent=2,
         )
     )
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(outputs, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Saved: {args.output}")
 
     if failures:
         raise SystemExit(1)
