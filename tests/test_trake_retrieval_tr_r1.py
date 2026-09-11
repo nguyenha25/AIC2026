@@ -4,18 +4,83 @@ from dataclasses import fields
 
 import pytest
 
+from scripts.analyze_tr_r1_profile_union import round_robin, weighted_rrf
 from aic2026.trake_retrieval import (
     CoarseRegion,
     TRR1Config,
     TRR1Result,
     _build_test_hit,
     _gom_vung,
+    _trr1_visual_action_variants,
     _video_consensus_scores,
+    _video_sequence_scores,
     coarse_region_to_dict,
+    fuse_video_profile_lists_rrf,
     tim_nhieu_su_kien,
+    tim_nhieu_su_kien_profile_union,
     tim_vung_tho,
     trr1_result_to_dict,
 )
+
+
+def test_trr1_profile_union_is_deduplicated_and_deterministic():
+    source_lists = {
+        "sequence": ["V1", "V2", "V3"],
+        "visual": ["V2", "V4"],
+        "consensus": ["V4", "V1"],
+    }
+
+    assert round_robin(
+        source_lists,
+        ("sequence", "visual", "consensus"),
+    ) == ["V1", "V2", "V4", "V3"]
+    assert weighted_rrf(
+        source_lists,
+        weights={"sequence": 1.0, "visual": 1.0, "consensus": 1.0},
+        k=60.0,
+    ) == ["V1", "V2", "V4", "V3"]
+    assert fuse_video_profile_lists_rrf(
+        source_lists,
+        source_weights={
+            "sequence": 1.0,
+            "visual": 1.0,
+            "consensus": 1.0,
+        },
+        rrf_k=60.0,
+    ) == ["V1", "V2", "V4", "V3"]
+
+
+def test_production_profile_union_uses_visual_variants_without_gt():
+    calls = []
+
+    def retriever(text, _top_k):
+        calls.append(text)
+        if text == "Dao vừa chạm vào cây xả":
+            return [_build_test_hit("base_a", 1.0, 0.9)]
+        if text == "Cây xả bị cắt rời ra":
+            return [_build_test_hit("base_b", 2.0, 0.9)]
+        return [_build_test_hit("visual_shared", 3.0, 0.8)]
+
+    output = tim_nhieu_su_kien_profile_union(
+        [
+            {"event_id": "E1", "text": "Dao vừa chạm vào cây xả"},
+            {"event_id": "E2", "text": "Cây xả bị cắt rời ra"},
+        ],
+        config=TRR1Config(use_query_expansion=False),
+        retriever=retriever,
+        video_beam_size=3,
+    )
+
+    assert output["config_key"] == (
+        "rrf|sequence=1.5|visual=0.5|consensus=1|k=100"
+    )
+    assert "knife touching lemongrass stalk" in calls
+    assert "lemongrass stalk cutting apart" in calls
+    assert len(output["candidate_video_ids"]) <= 3
+    assert len(set(output["candidate_video_ids"])) == len(
+        output["candidate_video_ids"]
+    )
+    assert [result.event_id for result in output["results"]] == ["E1", "E2"]
 
 
 def test_queryplan_event_requires_exact_text_field():
@@ -63,6 +128,19 @@ def test_queryplan_event_does_not_stringify_missing_text():
         )
 
 
+def test_visual_action_variants_are_general_and_overlap_safe():
+    assert _trr1_visual_action_variants(
+        "Dao vừa chạm vào cây xả"
+    ) == ["knife touching lemongrass stalk"]
+    assert _trr1_visual_action_variants(
+        "Hai con rồng vàng đang xoay vòng"
+    ) == ["two golden dragons spinning around"]
+    assert _trr1_visual_action_variants(
+        "Dùi chạm vào kẻng đồng múa lân"
+    ) == ["mallet touching bronze gong Chinese lion dance"]
+    assert _trr1_visual_action_variants("một người đứng yên") == []
+
+
 def test_config_rejects_invalid_values():
     with pytest.raises(ValueError):
         TRR1Config(top_k=0)
@@ -80,6 +158,9 @@ def test_config_rejects_invalid_values():
         TRR1Config(min_region_duration_seconds=0)
 
     with pytest.raises(ValueError):
+        TRR1Config(consensus_rescue_videos=-1)
+
+    with pytest.raises(ValueError):
         TRR1Config(
             min_region_duration_seconds=11,
             max_region_duration_seconds=10,
@@ -87,6 +168,18 @@ def test_config_rejects_invalid_values():
 
     with pytest.raises(ValueError):
         TRR1Config(video_consensus_weight=1.1)
+
+    with pytest.raises(ValueError):
+        TRR1Config(video_sequence_weight=-0.1)
+
+    with pytest.raises(ValueError):
+        TRR1Config(video_sequence_weight=1.1)
+
+    with pytest.raises(ValueError):
+        TRR1Config(video_sequence_span_weight=1.1)
+
+    with pytest.raises(ValueError):
+        TRR1Config(video_sequence_span_scale_seconds=0)
 
 
 def test_coarse_region_has_no_best_frame_idx():
@@ -379,6 +472,77 @@ def test_video_consensus_is_length_invariant():
     assert scores["shared"] > scores["long_wrong"]
 
 
+def test_video_sequence_prior_prefers_ordered_full_coverage():
+    scores = _video_sequence_scores(
+        [
+            [
+                _build_test_hit("reverse", 30.0, 0.95),
+                _build_test_hit("ordered", 10.0, 0.80),
+            ],
+            [
+                _build_test_hit("reverse", 20.0, 0.95),
+                _build_test_hit("ordered", 20.0, 0.80),
+            ],
+            [
+                _build_test_hit("reverse", 10.0, 0.95),
+                _build_test_hit("ordered", 30.0, 0.80),
+            ],
+        ]
+    )
+
+    assert scores["ordered"] > scores["reverse"]
+    assert scores["ordered"] == pytest.approx(1.0)
+
+
+def test_video_sequence_prior_allows_missing_event_without_fake_hit():
+    scores = _video_sequence_scores(
+        [
+            [_build_test_hit("partial", 10.0, 0.80)],
+            [_build_test_hit("other", 20.0, 0.90)],
+            [_build_test_hit("partial", 30.0, 0.80)],
+        ]
+    )
+
+    assert scores["partial"] > scores["other"]
+
+
+def test_video_sequence_prior_validates_limits():
+    with pytest.raises(ValueError):
+        _video_sequence_scores([], rrf_k=-1)
+
+    with pytest.raises(ValueError):
+        _video_sequence_scores([], max_hits_per_video_event=0)
+
+    with pytest.raises(ValueError):
+        _video_sequence_scores([], span_weight=-0.1)
+
+    with pytest.raises(ValueError):
+        _video_sequence_scores([], span_scale_seconds=0)
+
+
+def test_video_sequence_compactness_prefers_shorter_full_path():
+    scores = _video_sequence_scores(
+        [
+            [
+                _build_test_hit("wide", 10.0, 0.8),
+                _build_test_hit("compact", 100.0, 0.8),
+            ],
+            [
+                _build_test_hit("wide", 110.0, 0.8),
+                _build_test_hit("compact", 105.0, 0.8),
+            ],
+            [
+                _build_test_hit("wide", 210.0, 0.8),
+                _build_test_hit("compact", 110.0, 0.8),
+            ],
+        ],
+        span_weight=1.0,
+        span_scale_seconds=60.0,
+    )
+
+    assert scores["compact"] > scores["wide"]
+
+
 def test_multiple_events_use_shared_video_consensus():
     events = [
         {"event_id": "E1", "text": "first event"},
@@ -405,6 +569,35 @@ def test_multiple_events_use_shared_video_consensus():
         "shared_video",
         "shared_video",
     ]
+
+
+def test_consensus_rescue_keeps_priority_video_without_using_gt():
+    events = [
+        {"event_id": "E1", "text": "first event"},
+        {"event_id": "E2", "text": "second event"},
+    ]
+
+    def retriever(text, _top_k):
+        local = "local_a" if text == "first event" else "local_b"
+        return [
+            _build_test_hit(local, 1.0, 0.99),
+            _build_test_hit("shared_video", 2.0, 0.30),
+        ]
+
+    results = tim_nhieu_su_kien(
+        events,
+        config=TRR1Config(
+            max_regions_per_event=2,
+            video_consensus_weight=0.0,
+            consensus_rescue_videos=1,
+        ),
+        retriever=retriever,
+    )
+
+    assert all(
+        result.regions[0].video_id == "shared_video"
+        for result in results
+    )
 
 
 def test_single_event_keeps_local_ranking_even_with_consensus_enabled():

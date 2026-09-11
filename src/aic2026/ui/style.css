@@ -1074,6 +1074,72 @@ div[data-testid="stDataFrame"] {
 
 /* Scrollbars and responsive layout */
 
+div[data-testid="stRadio"] {
+    margin: 0.25rem 0 0.85rem;
+    padding: 0.65rem 0.85rem;
+    border: 1px solid rgba(91, 1, 29, 0.1);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.qa-answer {
+    display: flex;
+    min-height: 82px;
+    margin: 0.7rem 0 0.45rem;
+    padding: 0.7rem 0.75rem;
+    flex-direction: column;
+    gap: 0.18rem;
+    border: 1px solid rgba(181, 42, 87, 0.18);
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(255, 246, 249, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.qa-answer span {
+    color: #9d204d;
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+}
+
+.qa-answer strong {
+    color: #3c1020;
+    font-size: 0.93rem;
+    line-height: 1.35;
+}
+
+.qa-answer small {
+    color: #866b74;
+    font-size: 0.72rem;
+}
+
+.trake-path {
+    display: grid;
+    margin-bottom: 0.85rem;
+    grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1fr) minmax(260px, 2fr);
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.trake-path strong {
+    color: #571226;
+    font-size: 1rem;
+}
+
+.trake-path span {
+    color: #80616b;
+    font-size: 0.78rem;
+}
+
+.trake-path code {
+    overflow-x: auto;
+    padding: 0.45rem 0.6rem;
+    border-radius: 8px;
+    background: #f6eef1;
+    color: #5b011d;
+    font-size: 0.76rem;
+    white-space: nowrap;
+}
+
 ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -1134,6 +1200,10 @@ div[data-testid="stDataFrame"] {
 
     .ai-mode-note span {
         white-space: normal;
+    }
+
+    .trake-path {
+        grid-template-columns: 1fr;
     }
 }
 

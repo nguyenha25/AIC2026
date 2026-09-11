@@ -14,10 +14,8 @@ Lướt tìm KHÔNG đụng đĩa. Chỉ ghi tệp khi bấm xuất.
 
 from __future__ import annotations
 
-import csv
 import html
 import inspect
-import io
 import json
 import os
 import re
@@ -124,6 +122,16 @@ from aic2026.rank.hop_nhat import NGUON_CAPTION, NGUON_CLIP_L
 from aic2026.rank.hop_nhat import (                                # noqa: E402
     NGUON_ASR, NGUON_CLIP, NGUON_OCR, NGUON_OCR_FTS,
     tim_ung_vien_gop,
+)
+from aic2026.semantic.parser import RuleBasedParser                 # noqa: E402
+from aic2026.submit import KIS, QA, TRAKE                           # noqa: E402
+from aic2026.ui.pipelines import (                                  # noqa: E402
+    dense_frame_path,
+    normalize_task,
+    parse_trake_event_lines,
+    run_qa_answer_rows,
+    run_trake_query,
+    submission_csv_bytes,
 )
 
 
@@ -461,44 +469,98 @@ def ghi_gio_nop(gio: dict) -> None:
         st.session_state["canh_bao"] = f"Không ghi được giỏ nộp: {loi}"
 
 
-def _khoa(video_id: str, frame_idx: int) -> str:
-    return f"{video_id}#{frame_idx}"
+def _task_cua_muc(muc: dict) -> str:
+    """Cart cũ không có task được xem là KIS để không làm mất lựa chọn."""
+
+    return normalize_task(str(muc.get("task") or KIS))
 
 
-def dang_trong_gio(ma_cau: str, video_id: str, frame_idx: int) -> bool:
+def _frame_ids_cua_muc(muc: dict) -> list[int]:
+    values = muc.get("frame_ids", muc.get("frame_idx"))
+    if isinstance(values, list):
+        return [int(value) for value in values]
+    return [int(values)]
 
+
+def _khoa_muc(muc: dict) -> str:
+    frames = ",".join(str(value) for value in _frame_ids_cua_muc(muc))
+    answer = str(muc.get("answer") or "").strip().lower()
+    return f"{_task_cua_muc(muc)}#{muc['video_id']}#{frames}#{answer}"
+
+
+def muc_gio_theo_task(ma_cau: str, task: str) -> list[dict]:
+    return [
+        muc
+        for muc in st.session_state["gio_nop"].get(ma_cau, [])
+        if _task_cua_muc(muc) == normalize_task(task)
+    ]
+
+
+def dang_trong_gio(
+    ma_cau: str,
+    video_id: str,
+    frame_idx: int,
+    *,
+    task: str = KIS,
+    answer: str | None = None,
+) -> bool:
+    candidate = {
+        "task": task,
+        "video_id": video_id,
+        "frame_ids": [int(frame_idx)],
+        "answer": answer,
+    }
+    key = _khoa_muc(candidate)
     return any(
-        _khoa(x["video_id"], x["frame_idx"]) == _khoa(video_id, frame_idx)
-        for x in st.session_state["gio_nop"].get(ma_cau, [])
+        _khoa_muc(item) == key
+        for item in st.session_state["gio_nop"].get(ma_cau, [])
     )
 
 
-def bat_tat_dap_an(ma_cau: str, video_id: str, frame_idx: int,
-                   pts_time: float, n: int, score: float, nguon: str) -> None:
+def bat_tat_dap_an(
+    ma_cau: str,
+    video_id: str,
+    frame_idx: int,
+    pts_time: float,
+    n: int,
+    score: float,
+    nguon: str,
+    task: str = KIS,
+    answer: str | None = None,
+) -> None:
 
     gio = st.session_state["gio_nop"]
     danh_sach = gio.setdefault(ma_cau, [])
 
-    khoa = _khoa(video_id, frame_idx)
+    candidate = {
+        "task": task,
+        "video_id": video_id,
+        "frame_ids": [int(frame_idx)],
+        "answer": answer,
+    }
+    khoa = _khoa_muc(candidate)
 
-    con_lai = [x for x in danh_sach if _khoa(x["video_id"], x["frame_idx"]) != khoa]
+    con_lai = [x for x in danh_sach if _khoa_muc(x) != khoa]
 
     if len(con_lai) == len(danh_sach):
 
         tran = cfg.so_dong_toi_da()
 
-        if len(danh_sach) >= tran:
+        if len(muc_gio_theo_task(ma_cau, task)) >= tran:
             st.session_state["canh_bao"] = f"Giỏ nộp đã đủ {tran} dòng."
             return
 
         danh_sach.append(
             {
+                "task": normalize_task(task),
                 "video_id": video_id,
                 "frame_idx": int(frame_idx),
+                "frame_ids": [int(frame_idx)],
                 "pts_time": float(pts_time),
                 "n": int(n),
                 "score": float(score),
                 "nguon": nguon,
+                "answer": answer,
             }
         )
 
@@ -508,27 +570,76 @@ def bat_tat_dap_an(ma_cau: str, video_id: str, frame_idx: int,
     ghi_gio_nop(gio)
 
 
-def xuat_csv_gio_nop(ma_cau: str) -> bytes:
-    """
-    TODO — cần Ngân chốt.
-
-    submit/formatter.py mới là nơi định nghĩa định dạng bài nộp, nhưng nó
-    nhận kết quả từ run_query() chứ không nhận danh sách người chọn tay.
-    Tạm xuất video_id,frame_idx ở đây. Đối chiếu lại trước khi nộp thật.
-    """
-
-    danh_sach = sorted(
-        st.session_state["gio_nop"].get(ma_cau, []),
-        key=lambda x: -x["score"],
+def dang_trong_gio_trake(
+    ma_cau: str,
+    video_id: str,
+    frame_ids: list[int],
+) -> bool:
+    khoa = _khoa_muc(
+        {"task": TRAKE, "video_id": video_id, "frame_ids": frame_ids}
+    )
+    return any(
+        _khoa_muc(item) == khoa
+        for item in st.session_state["gio_nop"].get(ma_cau, [])
     )
 
-    dem = io.StringIO()
-    ghi = csv.writer(dem, lineterminator="\n")
 
-    for muc in danh_sach[:cfg.so_dong_toi_da()]:
-        ghi.writerow([muc["video_id"], muc["frame_idx"]])
+def bat_tat_dap_an_trake(
+    ma_cau: str,
+    video_id: str,
+    frame_ids: list[int],
+    score: float,
+    nguon: str,
+) -> None:
+    gio = st.session_state["gio_nop"]
+    danh_sach = gio.setdefault(ma_cau, [])
+    candidate = {
+        "task": TRAKE,
+        "video_id": str(video_id),
+        "frame_ids": [int(value) for value in frame_ids],
+        "score": float(score),
+        "nguon": str(nguon),
+    }
+    khoa = _khoa_muc(candidate)
+    con_lai = [item for item in danh_sach if _khoa_muc(item) != khoa]
 
-    return dem.getvalue().encode("utf-8")
+    if len(con_lai) == len(danh_sach):
+        if len(muc_gio_theo_task(ma_cau, TRAKE)) >= cfg.so_dong_toi_da():
+            st.session_state["canh_bao"] = "Giỏ TRAKE đã đủ 100 dòng."
+            return
+        danh_sach.append(candidate)
+    else:
+        gio[ma_cau] = con_lai
+    ghi_gio_nop(gio)
+
+
+def xuat_csv_gio_nop(ma_cau: str, task: str) -> bytes:
+    """Xuất giỏ hiện tại qua formatter dùng chung của submission."""
+
+    return submission_csv_bytes(
+        task,
+        muc_gio_theo_task(ma_cau, task),
+        limit=cfg.so_dong_toi_da(),
+    )
+
+
+def xuat_csv_ket_qua(ket_qua: dict) -> bytes:
+    """Xuất trực tiếp danh sách tự động, giữ nguyên thứ tự xếp hạng."""
+
+    task = normalize_task(ket_qua.get("task", KIS))
+    if task == TRAKE:
+        items = ket_qua.get("ranked_candidates", [])
+    elif task == QA:
+        items = ket_qua.get("qa_rows", [])
+    else:
+        items = [
+            {
+                "video_id": hit.video_id,
+                "frame_ids": [int(hit.frame_idx)],
+            }
+            for hit in ket_qua.get("hits", [])
+        ]
+    return submission_csv_bytes(task, items, limit=cfg.so_dong_toi_da())
 
 
 # ============================================================
@@ -748,8 +859,16 @@ class NhatKyBuoc:
 # nhưng sau khi gộp chỉ còn 0.40. Khi một nguồn trả rất ít ứng viên, ít ứng viên
 # là dấu hiệu ĐỘ CHÍNH XÁC CAO chứ không phải yếu — trọng số đang phạt nhầm.
 
-def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
-                  diem_toi_thieu: float, nhat_ky: NhatKyBuoc | None = None) -> dict:
+def chay_tim_kiem(
+    cau_hoi: str,
+    cac_nguon: set,
+    cua_so_giay: float,
+    diem_toi_thieu: float,
+    nhat_ky: NhatKyBuoc | None = None,
+    *,
+    dang_cau: str = KIS,
+    so_ung_vien_override: int | None = None,
+) -> dict:
     """
     Lướt tìm — KHÔNG ghi tệp. Chỉ ghi khi người dùng bấm xuất.
 
@@ -761,7 +880,8 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
 
     nhat_ky = nhat_ky or NhatKyBuoc()
 
-    so_ung_vien = cfg.so_ung_vien_moi_nguon()
+    dang_cau = normalize_task(dang_cau)
+    so_ung_vien = int(so_ung_vien_override or cfg.so_ung_vien_moi_nguon())
     tran_moi_video = cfg.so_anh_toi_da_moi_video()
 
     so_bo_qua = 0
@@ -827,6 +947,7 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         dung_caption=NGUON_CAPTION in cac_nguon,
         mo_rong_truy_van=NGUON_CLIP in cac_nguon,
         nguon_mo_rong=("marian" if NGUON_CLIP in cac_nguon else None),
+        dang_cau=dang_cau,
         # VIỆC 6: để None thì đọc config/rrf_weights.yaml. Truyền cứng
         # TRONG_SO_MAC_DINH như bản cũ là đè lên tệp đó, và mọi con số đo
         # được ở Việc 6 không tới được giao diện.
@@ -897,6 +1018,99 @@ def chay_tim_kiem(cau_hoi: str, cac_nguon: set, cua_so_giay: float,
         "che_do": "+".join(sorted(cac_nguon)),
         "cua_so_giay": cua_so_giay,
         "so_ung_vien": so_ung_vien,
+        "task": dang_cau,
+    }
+
+
+@st.cache_resource(show_spinner=False)
+def lay_parser() -> RuleBasedParser:
+    return RuleBasedParser()
+
+
+@st.cache_resource(show_spinner="Đang nạp bộ đọc ảnh Q&A...")
+def lay_bo_doc_anh():
+    from aic2026.qa_answer import BoDocAnh
+
+    return BoDocAnh()
+
+
+def chay_qa_ui(
+    ma_cau: str,
+    cau_hoi: str,
+    cac_nguon: set,
+    cua_so_giay: float,
+    diem_toi_thieu: float,
+    *,
+    dung_vlm: bool,
+) -> dict:
+    """Semantic routing + adaptive retrieval K + answer generation."""
+
+    plan = lay_parser().parse_qa(ma_cau, cau_hoi)
+    ket_qua = chay_tim_kiem(
+        cau_hoi,
+        cac_nguon,
+        cua_so_giay,
+        diem_toi_thieu,
+        nhat_ky=NhatKyBuoc(),
+        dang_cau=QA,
+        so_ung_vien_override=int(plan.semantic_k_hint),
+    )
+    bo_doc = lay_bo_doc_anh() if dung_vlm else None
+    qa = run_qa_answer_rows(
+        cau_hoi,
+        ket_qua["hits"],
+        use_vlm=dung_vlm,
+        image_reader=bo_doc,
+        max_rows=cfg.so_dong_toi_da(),
+        vlm_rows=5,
+    )
+    ket_qua["hits"] = [row["hit"] for row in qa["rows"]]
+    ket_qua["qa_rows"] = qa["rows"]
+    ket_qua["qa_by_key"] = {
+        f"{row['video_id']}#{row['frame_ids'][0]}": row
+        for row in qa["rows"]
+    }
+    ket_qua["so_sach"] = len(qa["rows"])
+    ket_qua["dem_tinh_trang"] = {"co": 0, "chua_tai": 0, "thieu_anh": 0}
+    for hit in ket_qua["hits"]:
+        ket_qua["dem_tinh_trang"][tinh_trang_anh(hit.video_id, hit.n)] += 1
+    ket_qua["do_tre_ms"] += float(qa["latency_ms"])
+    ket_qua["qa_plan"] = (
+        plan.model_dump() if hasattr(plan, "model_dump") else plan.dict()
+    )
+    ket_qua["qa_vlm_enabled"] = bool(dung_vlm)
+    ket_qua["task"] = QA
+    return ket_qua
+
+
+def chay_trake_ui(
+    ma_cau: str,
+    noi_dung_su_kien: str,
+    *,
+    video_beam_size: int,
+    dense_rerank_top_k: int,
+) -> dict:
+    """Run the frozen TRAKE path and normalize it for Streamlit rendering."""
+
+    events = parse_trake_event_lines(noi_dung_su_kien)
+    result = run_trake_query(
+        ma_cau,
+        noi_dung_su_kien,
+        video_beam_size=video_beam_size,
+        dense_rerank_top_k=dense_rerank_top_k,
+        dense_rerank_margin=0.015,
+    )
+    candidates = list(result.get("ranked_candidates", []))[:cfg.so_dong_toi_da()]
+    return {
+        "task": TRAKE,
+        "cau_hoi": noi_dung_su_kien,
+        "events": events,
+        "ranked_candidates": candidates,
+        "so_sach": len(candidates),
+        "do_tre_ms": float(result.get("ui_latency_ms", 0.0)),
+        "trake_result": result,
+        "che_do": "TR-R1 profile-union + TR-R2 dual-profile + TR-E2",
+        "dem_tinh_trang": {},
     }
 
 
@@ -909,7 +1123,9 @@ if "gio_nop" not in st.session_state:
 
 for khoa_mac_dinh, gia_tri in (
     ("ma_cau", "cau_01"),
+    ("loai_truy_van", KIS),
     ("trang", 0),
+    ("trake_trang", 0),
     ("cau_hoi_dien_san", ""),
 ):
     if khoa_mac_dinh not in st.session_state:
@@ -952,11 +1168,16 @@ def _ten_nguon(che_do: str) -> str:
 
 def _xoa_gio_hien_tai() -> None:
     ma_cau_hien_tai = str(st.session_state.get("ma_cau", "")).strip()
+    task_hien_tai = normalize_task(st.session_state.get("loai_truy_van", KIS))
 
     if not ma_cau_hien_tai:
         return
 
-    st.session_state["gio_nop"][ma_cau_hien_tai] = []
+    st.session_state["gio_nop"][ma_cau_hien_tai] = [
+        muc
+        for muc in st.session_state["gio_nop"].get(ma_cau_hien_tai, [])
+        if _task_cua_muc(muc) != task_hien_tai
+    ]
     ghi_gio_nop(st.session_state["gio_nop"])
 
 
@@ -969,7 +1190,8 @@ if "cau_hoi_input" not in st.session_state:
 # ============================================================
 
 ma_cau = str(st.session_state.get("ma_cau", "")).strip() or "cau_01"
-so_da_chon = len(st.session_state["gio_nop"].get(ma_cau, []))
+loai_truy_van = normalize_task(st.session_state.get("loai_truy_van", KIS))
+so_da_chon = len(muc_gio_theo_task(ma_cau, loai_truy_van))
 
 st.markdown(
     '<div class="app-nav">'
@@ -988,7 +1210,7 @@ st.markdown(
     '<p>Một không gian làm việc gọn cho truy vấn, kiểm tra lân cận và xuất đáp án.</p>'
     '</div>'
     f'<div class="hero-progress"><strong>{so_da_chon}</strong>'
-    f'<span>frame đã chọn · {html.escape(ma_cau)}</span></div>'
+    f'<span>dòng {loai_truy_van.upper()} đã chọn · {html.escape(ma_cau)}</span></div>'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -1013,10 +1235,64 @@ if _canh_bao_he_thong:
         for canh_bao in _canh_bao_he_thong:
             st.warning(canh_bao)
 
+with st.sidebar:
+    st.title("AIC 2026")
+    st.caption("Điều khiển và số liệu kỹ thuật")
+    st.code(str(GOC_DU_LIEU), language=None)
+
+    with st.expander("Trạng thái mô-đun", expanded=False):
+        for ten, tinh_trang in TRANG_THAI_MO_DUN.items():
+            st.write(f"{'✅' if tinh_trang == 'OK' else '⚠️'} {ten}: {tinh_trang}")
+
+    tep_metrics = THU_MUC_RUNS / "trake_complete_offline_metrics.json"
+    if tep_metrics.exists():
+        try:
+            bao_cao_metrics = json.loads(tep_metrics.read_text(encoding="utf-8-sig"))
+            tom_tat_metrics = bao_cao_metrics.get("summary", {})
+            st.subheader("TRAKE offline dev")
+            cot_a, cot_b = st.columns(2)
+            cot_a.metric(
+                "Video Acc@1",
+                f"{float(tom_tat_metrics.get('video_accuracy_at_1', 0)):.2%}",
+            )
+            cot_b.metric(
+                "Official-style",
+                f"{float(tom_tat_metrics.get('official_style_trake_score', 0)):.4f}",
+            )
+            st.caption("12-query tuned dev; không phải blind holdout/leaderboard.")
+        except (OSError, ValueError, TypeError):
+            st.caption("Không đọc được báo cáo TRAKE offline hiện có.")
+
+    lich_su = doc_lich_su(5)
+    if lich_su:
+        with st.expander("5 lần chạy gần nhất", expanded=False):
+            for ban_ghi in lich_su:
+                task = str(ban_ghi.get("task", KIS)).upper()
+                st.caption(
+                    f"{ban_ghi.get('luc', '')} · {task} · "
+                    f"{ban_ghi.get('ma_cau', '')} · "
+                    f"{ban_ghi.get('so_sach', 0)} candidate"
+                )
+
 
 # ============================================================
 # 13. KHUNG TÌM KIẾM
 # ============================================================
+
+NHAN_TASK = {
+    KIS: "KIS · Tìm khoảnh khắc",
+    QA: "Q&A · Trả lời từ video",
+    TRAKE: "TRAKE · Chuỗi sự kiện",
+}
+
+loai_truy_van = st.radio(
+    "Dạng truy vấn",
+    options=[KIS, QA, TRAKE],
+    key="loai_truy_van",
+    format_func=lambda value: NHAN_TASK[value],
+    horizontal=True,
+    help="Mỗi dạng dùng pipeline và định dạng CSV riêng của ban tổ chức.",
+)
 
 co_kho_chu = _TextSearchIndex is not None and TEP_FTS.exists()
 co_kho_caption = lay_kho_caption() is not None
@@ -1028,6 +1304,22 @@ if not co_kho_caption:
     st.session_state["ng_caption"] = False
 
 with st.form("form_tim_kiem", clear_on_submit=False):
+    la_trake = loai_truy_van == TRAKE
+    la_qa = loai_truy_van == QA
+    nhan_noi_dung = "Chuỗi sự kiện" if la_trake else (
+        "Cảnh cần tìm và câu hỏi" if la_qa else "Mô tả cần tìm"
+    )
+    goi_y_noi_dung = (
+        "Mỗi sự kiện một dòng, ví dụ:\n"
+        "E1: Đặt nồi lên bếp\nE2: Mở lửa\nE3: Cho dầu vào nồi"
+        if la_trake
+        else (
+            "Ví dụ: Trong cảnh người dẫn chương trình đứng trước bảng điểm, "
+            "con số hiển thị là bao nhiêu?"
+            if la_qa
+            else "Ví dụ: Một người phụ nữ mặc áo dài đỏ đang phát biểu trên bục"
+        )
+    )
     st.markdown(
         '<div class="form-intro">'
         '<span class="form-step">01</span>'
@@ -1049,109 +1341,131 @@ with st.form("form_tim_kiem", clear_on_submit=False):
 
     with cot_cau_hoi:
         cau_hoi = st.text_area(
-            "Mô tả cần tìm",
+            nhan_noi_dung,
             key="cau_hoi_input",
-            placeholder=(
-                "Ví dụ: Một người phụ nữ mặc áo dài đỏ đang phát biểu "
-                "trên bục, phía sau có nhiều cây xanh"
-            ),
-            height=88,
+            placeholder=goi_y_noi_dung,
+            height=122 if la_trake else 88,
         )
 
     with cot_tim:
         st.markdown('<div class="submit-spacer"></div>', unsafe_allow_html=True)
         da_gui = st.form_submit_button(
-            "Tìm kiếm",
+            "Chạy TRAKE" if la_trake else ("Tìm & trả lời" if la_qa else "Tìm kiếm"),
             type="primary",
             **KW_NUT,
         )
 
     with st.expander("Tùy chọn tìm kiếm", expanded=False):
-        st.caption("Nguồn dữ liệu")
+        video_beam_size = 24
+        dense_rerank_top_k = 3
+        dung_vlm = False
 
-        cot_clip, cot_caption = st.columns(2)
+        if la_trake:
+            st.caption("Pipeline đã khóa")
+            cot_beam, cot_dense = st.columns(2)
+            video_beam_size = cot_beam.select_slider(
+                "Video beam TR-R1",
+                options=[12, 24, 36, 72],
+                value=24,
+                help="24 là cấu hình cân bằng; 72 dùng khi cần cứu recall nhưng chậm hơn.",
+            )
+            dense_rerank_top_k = cot_dense.selectbox(
+                "Dense rerank top-k",
+                options=[1, 3],
+                index=1,
+                help="Chạy dense alignment trên tối đa 3 video đứng đầu.",
+            )
+            st.info(
+                "TR-R1 profile-union → TR-R2 dual-profile → TR-E2. "
+                "Boundary TR-E2 đang đóng băng theo baseline đã chốt."
+            )
+        else:
+            st.caption("Nguồn dữ liệu")
 
-        bat_clip = cot_clip.checkbox(
-            "Hình ảnh mạnh (CLIP-L)",
-            value=True,
-            key="ng_clip",
-            help="Tìm theo độ tương đồng ngữ nghĩa hình ảnh - văn bản.",
-        )
-        bat_caption = cot_caption.checkbox(
-            "Caption AI",
-            value=False,
-            key="ng_caption",
-            disabled=not co_kho_caption,
-            help=(
-                "Chế độ thử nghiệm: gộp CLIP-L 1.0, CLIP B/32 0.2 và "
-                "caption 0.6. Mặc định tắt vì mức tăng trên dev còn nhỏ."
-            ),
-        )
+            cot_clip, cot_caption = st.columns(2)
 
-        st.caption("Nguồn chữ hỗ trợ")
-        cot_ocr, cot_fts, cot_asr = st.columns(3)
-
-        bat_ocr = cot_ocr.checkbox(
-            "OCR từ khoá",
-            value=False,
-            key="ng_ocr",
-            disabled=bat_caption,
-            help="Khớp từ khoá xuất hiện trong khung hình.",
-        )
-        bat_ocr_fts = cot_fts.checkbox(
-            "OCR BM25",
-            value=co_kho_chu,
-            key="ng_ocr_fts",
-            disabled=not co_kho_chu or bat_caption,
-            help="Tìm văn bản trên ảnh bằng chỉ mục BM25.",
-        )
-        bat_asr = cot_asr.checkbox(
-            "Lời nói (ASR)",
-            value=co_kho_chu,
-            key="ng_asr",
-            disabled=not co_kho_chu or bat_caption,
-            help="Tìm nội dung được nói trong video.",
-        )
-
-        if bat_caption:
-            st.markdown(
-                '<div class="ai-mode-note"><strong>Caption AI đang bật</strong>'
-                '<span>Chế độ cứu hộ · CLIP-L 1.0 + CLIP 0.2 + caption 0.6</span>'
-                '</div>',
-                unsafe_allow_html=True,
+            bat_clip = cot_clip.checkbox(
+                "Hình ảnh mạnh (CLIP-L)", value=True, key="ng_clip",
+                help="Tìm theo độ tương đồng ngữ nghĩa hình ảnh - văn bản.",
+            )
+            bat_caption = cot_caption.checkbox(
+                "Caption AI", value=False, key="ng_caption",
+                disabled=not co_kho_caption,
+                help="Gộp CLIP-L 1.0, CLIP B/32 0.2 và caption 0.6.",
             )
 
-        cot_loc, cot_nguong = st.columns(2)
+            st.caption("Nguồn chữ hỗ trợ")
+            cot_ocr, cot_fts, cot_asr = st.columns(3)
 
-        cua_so_giay = cot_loc.slider(
-            "Khoảng gộp các frame gần nhau",
-            min_value=0.0,
-            max_value=30.0,
-            value=float(cfg.cua_so_giay()),
-            step=0.5,
-            format="%.1f giây",
-            help="Giảm các kết quả gần như trùng nhau trong cùng video.",
-        )
-        diem_toi_thieu = cot_nguong.slider(
-            "Ngưỡng CLIP tối thiểu",
-            min_value=0.0,
-            max_value=0.5,
-            value=0.0,
-            step=0.01,
-            help="Chỉ áp dụng khi tìm bằng riêng nguồn CLIP.",
-        )
-
-        if not co_kho_chu:
-            st.caption("Kho chữ chưa sẵn sàng nên OCR BM25 và ASR đang tắt.")
-        if not co_kho_caption:
-            st.caption(
-                "Caption AI chưa sẵn sàng; chạy "
-                "python -u -m scripts.run_caption_batch --chi-nap."
+            bat_ocr = cot_ocr.checkbox(
+                "OCR từ khoá",
+                value=False,
+                key="ng_ocr",
+                disabled=bat_caption,
+                help="Khớp từ khoá xuất hiện trong khung hình.",
             )
+            bat_ocr_fts = cot_fts.checkbox(
+                "OCR BM25",
+                value=co_kho_chu,
+                key="ng_ocr_fts",
+                disabled=not co_kho_chu or bat_caption,
+                help="Tìm văn bản trên ảnh bằng chỉ mục BM25.",
+            )
+            bat_asr = cot_asr.checkbox(
+                "Lời nói (ASR)",
+                value=co_kho_chu,
+                key="ng_asr",
+                disabled=not co_kho_chu or bat_caption,
+                help="Tìm nội dung được nói trong video.",
+            )
+
+            if bat_caption:
+                st.markdown(
+                    '<div class="ai-mode-note"><strong>Caption AI đang bật</strong>'
+                    '<span>Chế độ cứu hộ · CLIP-L 1.0 + CLIP 0.2 + caption 0.6</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+            cot_loc, cot_nguong = st.columns(2)
+
+            cua_so_giay = cot_loc.slider(
+                "Khoảng gộp các frame gần nhau",
+                min_value=0.0,
+                max_value=30.0,
+                value=float(cfg.cua_so_giay()),
+                step=0.5,
+                format="%.1f giây",
+                help="Giảm các kết quả gần như trùng nhau trong cùng video.",
+            )
+            diem_toi_thieu = cot_nguong.slider(
+                "Ngưỡng CLIP tối thiểu",
+                min_value=0.0,
+                max_value=0.5,
+                value=0.0,
+                step=0.01,
+                help="Chỉ áp dụng khi tìm bằng riêng nguồn CLIP.",
+            )
+
+            if la_qa:
+                dung_vlm = st.checkbox(
+                    "Dùng VLM cho 5 candidate đầu",
+                    value=False,
+                    help="Chính xác hơn với câu hỏi thị giác nhưng tốn thêm thời gian.",
+                )
+            if not co_kho_chu:
+                st.caption("Kho chữ chưa sẵn sàng nên OCR BM25 và ASR đang tắt.")
+            if not co_kho_caption:
+                st.caption(
+                    "Caption AI chưa sẵn sàng; chạy "
+                    "python -u -m scripts.run_caption_batch --chi-nap."
+                )
 
     cac_nguon = set()
 
-    if bat_caption:
+    if la_trake:
+        pass
+    elif bat_caption:
         # Công tắc là một CHẾ ĐỘ đã đo, không phải nhánh caption đứng riêng.
         cac_nguon.update({NGUON_CLIP_L, NGUON_CLIP, NGUON_CAPTION})
     else:
@@ -1174,24 +1488,51 @@ if da_gui:
         st.warning("Hãy nhập mã câu trước khi tìm kiếm.")
 
     elif not cau_hoi.strip():
-        st.warning("Hãy nhập mô tả khoảnh khắc cần tìm.")
+        st.warning("Hãy nhập nội dung truy vấn.")
 
-    elif not cac_nguon:
+    elif loai_truy_van != TRAKE and not cac_nguon:
         st.warning("Hãy bật ít nhất một nguồn tìm kiếm.")
 
     else:
         try:
-            with st.spinner("Đang tìm và xếp hạng các keyframe phù hợp..."):
-                ket_qua_moi = chay_tim_kiem(
-                    cau_hoi.strip(),
-                    cac_nguon,
-                    cua_so_giay,
-                    diem_toi_thieu,
-                    nhat_ky=NhatKyBuoc(),
-                )
+            if loai_truy_van == TRAKE:
+                parse_trake_event_lines(cau_hoi)
+                thong_bao = "Đang chạy TR-R1 → TR-R2 → TR-E2..."
+            elif loai_truy_van == QA:
+                thong_bao = "Đang tìm cảnh và sinh câu trả lời theo từng frame..."
+            else:
+                thong_bao = "Đang tìm và xếp hạng các keyframe phù hợp..."
+
+            with st.spinner(thong_bao):
+                if loai_truy_van == TRAKE:
+                    ket_qua_moi = chay_trake_ui(
+                        ma_cau_nhap.strip(),
+                        cau_hoi.strip(),
+                        video_beam_size=int(video_beam_size),
+                        dense_rerank_top_k=int(dense_rerank_top_k),
+                    )
+                elif loai_truy_van == QA:
+                    ket_qua_moi = chay_qa_ui(
+                        ma_cau_nhap.strip(),
+                        cau_hoi.strip(),
+                        cac_nguon,
+                        cua_so_giay,
+                        diem_toi_thieu,
+                        dung_vlm=bool(dung_vlm),
+                    )
+                else:
+                    ket_qua_moi = chay_tim_kiem(
+                        cau_hoi.strip(),
+                        cac_nguon,
+                        cua_so_giay,
+                        diem_toi_thieu,
+                        nhat_ky=NhatKyBuoc(),
+                        dang_cau=KIS,
+                    )
 
             st.session_state["ket_qua"] = ket_qua_moi
             st.session_state["trang"] = 0
+            st.session_state["trake_trang"] = 0
             st.session_state.pop("lan_can", None)
             st.session_state.pop("phong_to", None)
 
@@ -1199,23 +1540,25 @@ if da_gui:
                 {
                     "luc": datetime.now().isoformat(timespec="seconds"),
                     "ma_cau": ma_cau_nhap.strip(),
+                    "task": ket_qua_moi["task"],
                     "cau_hoi": ket_qua_moi["cau_hoi"],
                     "che_do": ket_qua_moi["che_do"],
-                    "cua_so_giay": ket_qua_moi["cua_so_giay"],
-                    "so_ung_vien": ket_qua_moi["so_ung_vien"],
-                    "so_tho": ket_qua_moi["so_tho"],
+                    "cua_so_giay": ket_qua_moi.get("cua_so_giay"),
+                    "so_ung_vien": ket_qua_moi.get("so_ung_vien"),
+                    "so_tho": ket_qua_moi.get("so_tho"),
                     "so_sach": ket_qua_moi["so_sach"],
                     "dem_tinh_trang": ket_qua_moi["dem_tinh_trang"],
                     "do_tre_ms": round(ket_qua_moi["do_tre_ms"], 1),
                     "cac_buoc": [
                         {"nhan": buoc["nhan"], "ms": round(buoc["ms"], 1)}
-                        for buoc in ket_qua_moi["cac_buoc"]
+                        for buoc in ket_qua_moi.get("cac_buoc", [])
                     ],
                 }
             )
 
             st.success(
-                f"Đã tìm thấy {ket_qua_moi['so_sach']} kết quả "
+                f"{ket_qua_moi['task'].upper()}: đã tạo "
+                f"{ket_qua_moi['so_sach']} candidate "
                 f"trong {ket_qua_moi['do_tre_ms'] / 1000:.2f} giây."
             )
 
@@ -1242,7 +1585,7 @@ if "canh_bao" in st.session_state:
 # ============================================================
 
 ma_cau = str(st.session_state.get("ma_cau", "")).strip() or "cau_01"
-danh_sach_nop = st.session_state["gio_nop"].get(ma_cau, [])
+danh_sach_nop = muc_gio_theo_task(ma_cau, loai_truy_van)
 
 with st.container(border=True):
     st.markdown('<div class="selection-panel-marker"></div>', unsafe_allow_html=True)
@@ -1253,8 +1596,8 @@ with st.container(border=True):
         '<div class="section-heading">'
         '<span class="form-step">02</span>'
         '<div><strong>Đáp án đã chọn</strong>'
-        f'<small>{html.escape(ma_cau)} · {len(danh_sach_nop)} / '
-        f'{cfg.so_dong_toi_da()} frame</small></div></div>',
+        f'<small>{html.escape(ma_cau)} · {loai_truy_van.upper()} · '
+        f'{len(danh_sach_nop)} / {cfg.so_dong_toi_da()} dòng</small></div></div>',
         unsafe_allow_html=True,
     )
 
@@ -1269,8 +1612,8 @@ with st.container(border=True):
 
     cot_tai.download_button(
         "Tải CSV",
-        data=xuat_csv_gio_nop(ma_cau),
-        file_name=f"{ma_cau}.csv",
+        data=xuat_csv_gio_nop(ma_cau, loai_truy_van),
+        file_name=f"query-{ma_cau}-{loai_truy_van}.csv",
         mime="text/csv",
         disabled=not danh_sach_nop,
         help="Xuất đúng các frame đang được chọn, không chạy lại tìm kiếm.",
@@ -1278,20 +1621,25 @@ with st.container(border=True):
     )
 
     if danh_sach_nop:
-        with st.expander(f"Xem {len(danh_sach_nop)} frame đã chọn", expanded=False):
-            bang_gio = [
-                {
+        with st.expander(f"Xem {len(danh_sach_nop)} dòng đã chọn", expanded=False):
+            bang_gio = []
+            for muc in danh_sach_nop:
+                dong = {
                     "video_id": muc["video_id"],
-                    "frame_idx": muc["frame_idx"],
-                    "thời điểm": f"{muc['pts_time']:.2f}s",
-                    "keyframe": muc["n"],
-                    "nguồn": muc["nguon"],
+                    "frame_idx": ",".join(
+                        str(frame) for frame in _frame_ids_cua_muc(muc)
+                    ),
+                    "nguồn": muc.get("nguon", "thủ công"),
                 }
-                for muc in sorted(danh_sach_nop, key=lambda x: -x["score"])
-            ]
+                if loai_truy_van == QA:
+                    dong["câu trả lời"] = muc.get("answer", "")
+                elif loai_truy_van == KIS:
+                    dong["thời điểm"] = f"{float(muc.get('pts_time', 0)):.2f}s"
+                    dong["keyframe"] = muc.get("n", "")
+                bang_gio.append(dong)
             st.dataframe(bang_gio, hide_index=True, **KW_BANG)
     else:
-        st.caption("Chọn một kết quả bên dưới để thêm frame vào đáp án.")
+        st.caption("Chọn một candidate bên dưới để thêm vào đáp án.")
 
 
 # ============================================================
@@ -1350,7 +1698,14 @@ if "phong_to" in st.session_state:
         ve_phong_to(muc_phong_to)
 
 
-if "lan_can" in st.session_state:
+ket_qua_hien_tai = st.session_state.get("ket_qua")
+if ket_qua_hien_tai and normalize_task(
+    ket_qua_hien_tai.get("task", KIS)
+) != loai_truy_van:
+    ket_qua_hien_tai = None
+
+
+if "lan_can" in st.session_state and loai_truy_van != TRAKE:
     thong_tin = st.session_state["lan_can"]
     bang = lay_frame_map()
 
@@ -1412,10 +1767,15 @@ if "lan_can" in st.session_state:
                             unsafe_allow_html=True,
                         )
 
+                        qa_row = None
+                        if loai_truy_van == QA and ket_qua_hien_tai:
+                            qa_row = ket_qua_hien_tai.get("qa_by_key", {}).get(
+                                f"{dong['video_id']}#{int(dong['frame_idx'])}"
+                            )
+                        qa_answer = qa_row.get("answer") if qa_row else None
                         da_chon = dang_trong_gio(
-                            ma_cau,
-                            str(dong["video_id"]),
-                            int(dong["frame_idx"]),
+                            ma_cau, str(dong["video_id"]), int(dong["frame_idx"]),
+                            task=loai_truy_van, answer=qa_answer,
                         )
 
                         st.button(
@@ -1431,7 +1791,10 @@ if "lan_can" in st.session_state:
                                 int(dong["n"]),
                                 0.0,
                                 "lân cận",
+                                loai_truy_van,
+                                qa_answer,
                             ),
+                            disabled=loai_truy_van == QA and qa_row is None,
                             **KW_NUT,
                         )
 
@@ -1440,11 +1803,13 @@ if "lan_can" in st.session_state:
 # 17. LƯỚI KẾT QUẢ
 # ============================================================
 
-if "ket_qua" in st.session_state:
-    ket_qua = st.session_state["ket_qua"]
+if ket_qua_hien_tai and loai_truy_van != TRAKE:
+    ket_qua = ket_qua_hien_tai
     dem = ket_qua.get("dem_tinh_trang", {})
 
-    cot_tieu_de, cot_bo_loc = st.columns([6, 1.7], **KW_CANH)
+    cot_tieu_de, cot_tai_tu_dong, cot_bo_loc = st.columns(
+        [5.2, 1.45, 1.7], **KW_CANH
+    )
 
     cot_tieu_de.markdown(
         '<div class="results-heading">'
@@ -1454,6 +1819,15 @@ if "ket_qua" in st.session_state:
         f'{ket_qua["so_sach"]} kết quả · '
         f'{ket_qua["do_tre_ms"] / 1000:.2f}s</small></div></div>',
         unsafe_allow_html=True,
+    )
+
+    cot_tai_tu_dong.download_button(
+        "CSV Top-100",
+        data=xuat_csv_ket_qua(ket_qua),
+        file_name=f"query-{ma_cau}-{loai_truy_van}-top100.csv",
+        mime="text/csv",
+        help="Xuất trực tiếp thứ tự tự động, không cần chọn thủ công.",
+        **KW_TAI,
     )
 
     chi_video_co_anh = cot_bo_loc.toggle(
@@ -1490,6 +1864,24 @@ if "ket_qua" in st.session_state:
         unsafe_allow_html=True,
     )
 
+    if loai_truy_van == QA:
+        plan = ket_qua.get("qa_plan", {})
+        with st.expander("Chẩn đoán Q&A", expanded=False):
+            cot_1, cot_2, cot_3, cot_4 = st.columns(4)
+            cot_1.metric("Intent", plan.get("intent", "general_qa"))
+            cot_2.metric("Loại đáp án", plan.get("answer_type", "short_text"))
+            cot_3.metric("Adaptive K", plan.get("semantic_k_hint", "—"))
+            cot_4.metric(
+                "VLM top-5", "Bật" if ket_qua.get("qa_vlm_enabled") else "Tắt"
+            )
+            st.caption(
+                "Modalities: "
+                + ", ".join(
+                    f"{key}={float(value):.2f}"
+                    for key, value in plan.get("preferred_modalities", {}).items()
+                )
+            )
+
     if dem.get("thieu_anh", 0):
         st.warning(
             f"{dem['thieu_anh']} kết quả thuộc video đã tải nhưng thiếu ảnh tương ứng."
@@ -1509,10 +1901,20 @@ if "ket_qua" in st.session_state:
                 zip(cac_cot, hits_trang[khoi:khoi + SO_COT])
             ):
                 hang = dau + khoi + lech + 1
+                qa_row = ket_qua.get("qa_by_key", {}).get(
+                    f"{hit.video_id}#{int(hit.frame_idx)}"
+                )
+                qa_input_key = f"qa_answer_{hang}_{hit.video_id}_{int(hit.frame_idx)}"
+                qa_answer = (
+                    st.session_state.get(qa_input_key, qa_row.get("answer"))
+                    if qa_row else None
+                )
                 da_chon = dang_trong_gio(
                     ma_cau,
                     hit.video_id,
                     int(hit.frame_idx),
+                    task=loai_truy_van,
+                    answer=qa_answer,
                 )
                 trang_thai_anh = tinh_trang_anh(hit.video_id, hit.n)
 
@@ -1525,6 +1927,26 @@ if "ket_qua" in st.session_state:
                         f'<div class="result-card-marker{lop_chon}"></div>',
                         unsafe_allow_html=True,
                     )
+
+                    if qa_row:
+                        st.markdown(
+                            '<div class="qa-answer">'
+                            '<span>CÂU TRẢ LỜI</span>'
+                            '<small>'
+                            f'{html.escape(str(qa_row["answer_source"]))} · '
+                            f'{float(qa_row["answer_confidence"]):.1%}'
+                            '</small></div>',
+                            unsafe_allow_html=True,
+                        )
+                        qa_answer = st.text_input(
+                            "Sửa câu trả lời",
+                            value=str(qa_row["answer"]),
+                            key=qa_input_key,
+                            label_visibility="collapsed",
+                            help="Có thể sửa thủ công trước khi thêm vào giỏ Q&A.",
+                        ).strip()
+                        if not qa_answer:
+                            st.warning("Câu trả lời rỗng sẽ không được xuất CSV.")
 
                     if trang_thai_anh == "co":
                         hien_anh(duong_dan_thumbnail(hit.video_id, hit.n))
@@ -1614,7 +2036,10 @@ if "ket_qua" in st.session_state:
                             int(hit.n),
                             float(hit.score),
                             hit.source,
+                            loai_truy_van,
+                            qa_answer,
                         ),
+                        disabled=loai_truy_van == QA and not qa_answer,
                         **KW_NUT,
                     )
 
@@ -1690,6 +2115,165 @@ if "ket_qua" in st.session_state:
                 on_click=_toi_trang,
                 **KW_NUT,
             )
+
+elif ket_qua_hien_tai and loai_truy_van == TRAKE:
+    ket_qua = ket_qua_hien_tai
+    trake = ket_qua["trake_result"]
+    candidates = list(ket_qua.get("ranked_candidates", []))
+
+    cot_tieu_de, cot_tai_tu_dong = st.columns([6, 1.5], **KW_CANH)
+    cot_tieu_de.markdown(
+        '<div class="results-heading">'
+        '<span class="form-step">03</span>'
+        '<div><strong>Candidate chuỗi sự kiện</strong>'
+        f'<small>{len(candidates)} path · '
+        f'{ket_qua["do_tre_ms"] / 1000:.2f}s · boundary frozen</small>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+    cot_tai_tu_dong.download_button(
+        "CSV Top-100",
+        data=xuat_csv_ket_qua(ket_qua),
+        file_name=f"query-{ma_cau}-trake-top100.csv",
+        mime="text/csv",
+        **KW_TAI,
+    )
+
+    tr_r2 = trake.get("tr_r2", {})
+    ui_config = trake.get("ui_config", {})
+    with st.expander("Chẩn đoán pipeline", expanded=False):
+        cot_1, cot_2, cot_3, cot_4 = st.columns(4)
+        cot_1.metric("Video đã chọn", trake.get("video_id", "—"))
+        cot_2.metric("Video beam", ui_config.get("video_beam_size", "—"))
+        cot_3.metric("Sparse margin", f"{float(tr_r2.get('sparse_margin', 0)):.4f}")
+        cot_4.metric(
+            "Dense rerank",
+            "Có" if tr_r2.get("dense_rerank_applied") else "Không",
+        )
+        st.caption(
+            "TR-R1 profile-union · TR-R2 dual-profile · "
+            "TR-E2 boundary giữ nguyên baseline"
+        )
+        chosen_times = tr_r2.get("chosen_times", {})
+        st.dataframe(
+            [
+                {
+                    "event": f"E{i}",
+                    "mô tả": event,
+                    "thời điểm TR-R2": chosen_times.get(f"E{i}"),
+                }
+                for i, event in enumerate(ket_qua["events"], start=1)
+            ],
+            hide_index=True,
+            **KW_BANG,
+        )
+
+    if not candidates:
+        st.info("Pipeline không tạo được candidate TRAKE hợp lệ.")
+    else:
+        so_trang_trake = max(
+            1,
+            (len(candidates) + 9) // 10,
+        )
+        st.session_state["trake_trang"] = min(
+            int(st.session_state.get("trake_trang", 0)),
+            so_trang_trake - 1,
+        )
+        dau_trake = st.session_state["trake_trang"] * 10
+        candidates_trang = candidates[dau_trake:dau_trake + 10]
+
+        for lech, candidate in enumerate(candidates_trang):
+            hang = dau_trake + lech + 1
+            frames = [int(value) for value in candidate.get("frame_idx", [])]
+            video_id = str(candidate.get("video_id", ""))
+            source = str(candidate.get("source", "trake"))
+            score = float(candidate.get("score") or 0.0)
+            da_chon = dang_trong_gio_trake(ma_cau, video_id, frames)
+
+            with st.expander(
+                f"#{hang} · {video_id} · {source} · {score:.4f}",
+                expanded=hang <= 2,
+            ):
+                st.markdown(
+                    '<div class="trake-path">'
+                    f'<strong>{html.escape(video_id)}</strong>'
+                    f'<span>{html.escape(source)}</span>'
+                    f'<code>{html.escape(",".join(str(frame) for frame in frames))}</code>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+                for bat_dau in range(0, len(frames), 4):
+                    cac_cot = st.columns(4, gap="small")
+                    for cot, event_index, frame_idx in zip(
+                        cac_cot,
+                        range(bat_dau, min(bat_dau + 4, len(frames))),
+                        frames[bat_dau:bat_dau + 4],
+                    ):
+                        with cot:
+                            duong_dan = dense_frame_path(
+                                GOC_DU_LIEU, video_id, frame_idx
+                            )
+                            if duong_dan.exists():
+                                hien_anh(duong_dan)
+                            else:
+                                st.markdown(
+                                    '<div class="image-placeholder">'
+                                    '<span>Chưa có dense frame</span></div>',
+                                    unsafe_allow_html=True,
+                                )
+                            mo_ta = (
+                                ket_qua["events"][event_index]
+                                if event_index < len(ket_qua["events"])
+                                else ""
+                            )
+                            st.caption(
+                                f"E{event_index + 1} · frame {frame_idx} · {mo_ta}"
+                            )
+
+                st.button(
+                    "✓ Đã chọn path" if da_chon else "Chọn toàn bộ path",
+                    key=f"chon_trake_{hang}_{video_id}_{'_'.join(map(str, frames))}",
+                    type="secondary" if da_chon else "primary",
+                    on_click=bat_tat_dap_an_trake,
+                    args=(ma_cau, video_id, frames, score, source),
+                    **KW_NUT,
+                )
+
+        if so_trang_trake > 1:
+            def _lui_trang_trake() -> None:
+                st.session_state["trake_trang"] = max(
+                    0, st.session_state["trake_trang"] - 1
+                )
+
+            def _toi_trang_trake() -> None:
+                st.session_state["trake_trang"] = min(
+                    so_trang_trake - 1, st.session_state["trake_trang"] + 1
+                )
+
+            cot_truoc, cot_so_trang, cot_sau = st.columns(
+                [1.25, 2.4, 1.25], **KW_CANH
+            )
+            cot_truoc.button(
+                "← Trang trước", key="trake_trang_lui",
+                disabled=st.session_state["trake_trang"] <= 0,
+                on_click=_lui_trang_trake, **KW_NUT,
+            )
+            cot_so_trang.markdown(
+                '<div class="page-indicator">Trang '
+                f'{st.session_state["trake_trang"] + 1} / {so_trang_trake}</div>',
+                unsafe_allow_html=True,
+            )
+            cot_sau.button(
+                "Trang sau →", key="trake_trang_toi",
+                disabled=st.session_state["trake_trang"] >= so_trang_trake - 1,
+                on_click=_toi_trang_trake, **KW_NUT,
+            )
+
+elif "ket_qua" in st.session_state:
+    st.info(
+        "Kết quả gần nhất thuộc dạng truy vấn khác. Hãy chạy truy vấn để xem "
+        f"kết quả {loai_truy_van.upper()}."
+    )
 
 else:
     st.markdown(

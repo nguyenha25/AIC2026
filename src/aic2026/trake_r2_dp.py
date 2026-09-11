@@ -36,6 +36,11 @@ def solve_strict_increasing_path(
     if n_events == 0:
         return [], 0.0
 
+    if min_gap < 1:
+        raise ValueError(
+            "TRAKE yêu cầu min_gap >= 1 để frame tăng nghiêm ngặt"
+        )
+
     n_frames = len(S[0])
     for row in S:
         if len(row) != n_frames:

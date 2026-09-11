@@ -1,11 +1,89 @@
+import inspect
+from types import SimpleNamespace
+
+import numpy as np
+
 from aic2026.trake_r2_dp import solve_strict_increasing_path
-from aic2026.trake_r2_windows import generate_dense_time_grid, chon_video_rrf, gop_cua_so_theo_video
-from aic2026.trake_r2_pipeline import align_trake_query
+from aic2026.trake_r2_score import (
+    SparseKeyframe,
+    select_video_by_sparse_dp,
+    solve_sparse_video_paths,
+)
+from aic2026.trake_r2_windows import (
+    chon_video_rrf,
+    generate_dense_time_grid,
+    gop_cua_so_theo_video,
+    rank_video_candidates_rrf,
+    windows_from_anchor_times,
+)
+from aic2026.trake_r2_pipeline import (
+    _align_prepared_dense_scorer,
+    align_dense_temporal_profiles,
+    enumerate_binary_profile_hybrids,
+    align_trake_query,
+    run_trake_r2,
+    run_trake_r2_sparse_selection,
+)
 
 
 # ---------------------------------------------------------------------
 # DP
 # ---------------------------------------------------------------------
+
+
+def test_sparse_defaults_keep_only_calibrated_span_penalty():
+    functions = (
+        solve_sparse_video_paths,
+        select_video_by_sparse_dp,
+        run_trake_r2_sparse_selection,
+        run_trake_r2,
+    )
+
+    for function in functions:
+        parameters = inspect.signature(function).parameters
+        assert parameters["region_prior_weight"].default == 0.0
+        assert parameters["video_prior_weight"].default == 0.0
+        assert parameters["order_gain_weight"].default == 0.0
+        assert parameters["span_penalty_weight"].default == 0.041
+
+
+def test_default_span_penalty_prefers_compact_temporal_path():
+    frames = {
+        "V_LONG": [
+            SparseKeyframe(n=1, frame_idx=0, pts_time=0.0),
+            SparseKeyframe(n=2, frame_idx=2500, pts_time=100.0),
+        ],
+        "V_COMPACT": [
+            SparseKeyframe(n=1, frame_idx=250, pts_time=10.0),
+            SparseKeyframe(n=2, frame_idx=500, pts_time=20.0),
+        ],
+    }
+    scores = {
+        "V_LONG": np.asarray(
+            [[0.31, 0.0], [0.0, 0.31]],
+            dtype=np.float32,
+        ),
+        "V_COMPACT": np.asarray(
+            [[0.30, 0.0], [0.0, 0.30]],
+            dtype=np.float32,
+        ),
+    }
+
+    without_penalty = solve_sparse_video_paths(
+        ["E1", "E2"],
+        frames,
+        scores,
+        span_penalty_weight=0.0,
+    )
+    calibrated = solve_sparse_video_paths(
+        ["E1", "E2"],
+        frames,
+        scores,
+    )
+
+    assert without_penalty["video_id"] == "V_LONG"
+    assert calibrated["video_id"] == "V_COMPACT"
+    assert calibrated["path_span_seconds"] == 10.0
 
 def test_dp_picks_best_valid_increasing_sequence():
     S = [[1, 2, 3], [5, 4, 1]]
@@ -35,10 +113,181 @@ def test_dp_raises_on_infeasible_min_gap():
         pass
 
 
+def test_dense_anchor_constraint_prevents_dp_collapse():
+    frames = [
+        SimpleNamespace(frame_idx=i * 25, pts_time=float(i))
+        for i in range(11)
+    ]
+    # Nếu dùng raw CLIP score, cả ba event đều muốn cụm frame đầu tiên.
+    scorer = SimpleNamespace(
+        frames=frames,
+        score_matrix=np.asarray(
+            [
+                [1.00, 0.99, 0.98, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+                [1.00, 0.99, 0.98, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+                [1.00, 0.99, 0.98, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+    result = _align_prepared_dense_scorer(
+        {"E1": {}, "E2": {}, "E3": {}},
+        scorer,
+        video_id="V1",
+        windows=[(0.0, 10.0)],
+        anchor_times={"E1": 1.0, "E2": 5.0, "E3": 9.0},
+        anchor_max_drift_seconds=1.0,
+        anchor_penalty_per_second=0.01,
+    )
+
+    assert result["chosen_times"] == {"E1": 1.0, "E2": 5.0, "E3": 9.0}
+    assert result["chosen_frame_idx"] == [25, 125, 225]
+    assert result["anchor_constraint"]["applied"] is True
+    assert max(result["anchor_constraint"]["chosen_drift_seconds"].values()) <= 1.0
+
+
+def test_dense_forward_reward_can_prefer_later_frame_inside_anchor_band():
+    frames = [
+        SimpleNamespace(frame_idx=i * 25, pts_time=float(i))
+        for i in range(3)
+    ]
+    scorer = SimpleNamespace(
+        frames=frames,
+        score_matrix=np.asarray([[0.5, 0.5, 0.5]], dtype=np.float32),
+    )
+
+    result = _align_prepared_dense_scorer(
+        {"E1": {}},
+        scorer,
+        video_id="V1",
+        windows=[(0.0, 2.0)],
+        anchor_times={"E1": 1.0},
+        anchor_max_drift_seconds=1.0,
+        anchor_penalty_per_second=0.0,
+        anchor_forward_reward_per_second=0.1,
+    )
+
+    assert result["chosen_times"] == {"E1": 2.0}
+    assert result["anchor_constraint"]["forward_reward_per_second"] == 0.1
+
+
+def test_dense_temporal_profiles_reuse_scorer_and_return_distinct_paths():
+    frames = [
+        SimpleNamespace(frame_idx=i * 25, pts_time=float(i))
+        for i in range(6)
+    ]
+    scorer = SimpleNamespace(
+        frames=frames,
+        score_matrix=np.full((2, 6), 0.5, dtype=np.float32),
+    )
+
+    profiles = align_dense_temporal_profiles(
+        {"E1": {}, "E2": {}},
+        scorer,
+        video_id="V1",
+        windows=[(0.0, 5.0)],
+        anchor_times={"E1": 1.0, "E2": 4.0},
+        profiles=[
+            {
+                "name": "wide",
+                "max_drift_seconds": 2.0,
+                "anchor_penalty_per_second": 0.0,
+                "forward_reward_per_second": 0.1,
+            },
+            {
+                "name": "narrow",
+                "max_drift_seconds": 0.5,
+                "anchor_penalty_per_second": 0.0,
+                "forward_reward_per_second": 0.1,
+            },
+        ],
+    )
+
+    assert [profile["name"] for profile in profiles] == ["wide", "narrow"]
+    assert profiles[0]["alignment"]["chosen_frame_idx"] == [75, 125]
+    assert profiles[1]["alignment"]["chosen_frame_idx"] == [25, 100]
+
+    hybrids = enumerate_binary_profile_hybrids(
+        profiles[0],
+        profiles[1],
+        event_ids=["E1", "E2"],
+    )
+    assert [hybrid["chosen_frame_idx"] for hybrid in hybrids] == [
+        [25, 125],
+        [75, 100],
+    ]
+    assert all(
+        hybrid["chosen_frame_idx"][0] < hybrid["chosen_frame_idx"][1]
+        for hybrid in hybrids
+    )
+
+
+def test_dense_feature_cache_reuses_unchanged_frames(monkeypatch, tmp_path):
+    import aic2026.trake_r2_score as score_module
+
+    frame_paths = [tmp_path / "10.jpg", tmp_path / "20.jpg"]
+    for position, path in enumerate(frame_paths):
+        path.write_bytes(bytes([position + 1]))
+
+    frames = [
+        score_module.DenseFrame(
+            frame_idx=10 * (position + 1),
+            pts_time=float(position),
+            path=path,
+        )
+        for position, path in enumerate(frame_paths)
+    ]
+
+    monkeypatch.setattr(
+        score_module,
+        "DENSE_FEATURE_CACHE_ROOT",
+        tmp_path / "cache",
+    )
+
+    scorer = score_module.DenseClipLScorer(
+        "V1",
+        {"E1": "event"},
+        windows=[(0.0, 1.0)],
+    )
+    encoded = np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    monkeypatch.setattr(
+        scorer,
+        "_encode_images_uncached",
+        lambda missing: score_module.torch.from_numpy(encoded[: len(missing)]),
+    )
+    first = scorer._encode_images(frames).numpy()
+
+    scorer_again = score_module.DenseClipLScorer(
+        "V1",
+        {"E1": "event"},
+        windows=[(0.0, 1.0)],
+    )
+    monkeypatch.setattr(
+        scorer_again,
+        "_encode_images_uncached",
+        lambda _missing: (_ for _ in ()).throw(
+            AssertionError("cache hit không được encode lại")
+        ),
+    )
+    second = scorer_again._encode_images(frames).numpy()
+
+    np.testing.assert_allclose(first, encoded)
+    np.testing.assert_allclose(second, encoded)
+
+
 def test_dp_raises_on_uneven_rows():
     S = [[1, 2, 3], [1, 2]]
     try:
         solve_strict_increasing_path(S)
+        assert False
+    except ValueError:
+        pass
+
+
+def test_dp_rejects_non_strict_min_gap():
+    try:
+        solve_strict_increasing_path([[1.0], [1.0]], min_gap=0)
         assert False
     except ValueError:
         pass
@@ -96,12 +345,47 @@ def test_rrf_prefers_video_consistently_ranked_across_events():
     assert chon_video_rrf(events_regions) == "V_TARGET"
 
 
+def test_rrf_counts_each_video_once_per_event():
+    events_regions = {
+        "E1": [
+            *[_region("V_NOISE", i, i + 1) for i in range(10)],
+            _region("V_TARGET", 20, 21),
+        ],
+        "E2": [_region("V_TARGET", 30, 31)],
+        "E3": [_region("V_TARGET", 40, 41)],
+    }
+
+    assert chon_video_rrf(events_regions) == "V_TARGET"
+
+
 def test_rrf_raises_when_no_candidates():
     try:
         chon_video_rrf({})
         assert False
     except ValueError:
         pass
+
+
+def test_rrf_returns_candidate_beam_in_score_order():
+    events_regions = {
+        "E1": [_region("V1", 0, 1), _region("V2", 0, 1)],
+        "E2": [_region("V2", 1, 2), _region("V3", 1, 2)],
+    }
+
+    assert rank_video_candidates_rrf(
+        events_regions,
+        limit=2,
+    ) == ["V2", "V1"]
+
+
+def test_anchor_windows_merge_and_clamp_at_zero():
+    assert windows_from_anchor_times(
+        [2.0, 4.0, 20.0],
+        padding_seconds=3.0,
+    ) == [
+        (0.0, 7.0),
+        (17.0, 23.0),
+    ]
 
 
 def test_gop_cua_so_merges_only_matching_video():
@@ -121,6 +405,230 @@ def test_gop_cua_so_raises_if_video_not_present():
         assert False
     except ValueError:
         pass
+
+
+# ---------------------------------------------------------------------
+# Video-local sparse DP
+# ---------------------------------------------------------------------
+
+def test_sparse_dp_can_override_wrong_rrf_video():
+    event_ids = ["E1", "E2", "E3"]
+
+    frames_by_video = {
+        "V_NOISE": [
+            SparseKeyframe(n=i + 1, frame_idx=i, pts_time=float(i))
+            for i in range(4)
+        ],
+        "V_TARGET": [
+            SparseKeyframe(n=i + 1, frame_idx=i, pts_time=float(i))
+            for i in range(4)
+        ],
+    }
+
+    # V_NOISE có peak mạnh riêng lẻ nhưng không thể xếp cả ba peak theo
+    # đúng thứ tự. V_TARGET có path E1@0 < E2@1 < E3@2 tốt hơn.
+    score_matrices = {
+        "V_NOISE": np.asarray(
+            [
+                [0.1, 0.1, 0.9, 0.1],
+                [0.1, 0.9, 0.1, 0.1],
+                [0.9, 0.1, 0.1, 0.1],
+            ],
+            dtype=np.float32,
+        ),
+        "V_TARGET": np.asarray(
+            [
+                [0.8, 0.1, 0.1, 0.1],
+                [0.1, 0.8, 0.1, 0.1],
+                [0.1, 0.1, 0.8, 0.1],
+            ],
+            dtype=np.float32,
+        ),
+    }
+
+    result = solve_sparse_video_paths(
+        event_ids,
+        frames_by_video,
+        score_matrices,
+        candidate_order=["V_NOISE", "V_TARGET"],
+    )
+
+    assert result["video_id"] == "V_TARGET"
+    assert result["chosen_positions"] == [0, 1, 2]
+    assert result["chosen_frame_idx"] == [0, 1, 2]
+    assert list(result["chosen_times"]) == event_ids
+
+
+def test_sparse_dp_rejects_non_increasing_frame_metadata():
+    frames = {
+        "V1": [
+            SparseKeyframe(n=1, frame_idx=10, pts_time=2.0),
+            SparseKeyframe(n=2, frame_idx=20, pts_time=1.0),
+        ]
+    }
+
+    try:
+        solve_sparse_video_paths(
+            ["E1"],
+            frames,
+            {"V1": np.asarray([[0.1, 0.2]], dtype=np.float32)},
+        )
+        assert False
+    except ValueError:
+        pass
+
+
+def test_sparse_dp_allows_equal_pts_time_when_frame_idx_increases():
+    frames = {
+        "V1": [
+            SparseKeyframe(n=1, frame_idx=10, pts_time=1.0),
+            SparseKeyframe(n=2, frame_idx=20, pts_time=1.0),
+            SparseKeyframe(n=3, frame_idx=30, pts_time=2.0),
+        ]
+    }
+
+    result = solve_sparse_video_paths(
+        ["E1", "E2"],
+        frames,
+        {
+            "V1": np.asarray(
+                [
+                    [0.9, 0.1, 0.0],
+                    [0.0, 0.1, 0.9],
+                ],
+                dtype=np.float32,
+            )
+        },
+    )
+
+    assert result["chosen_frame_idx"] == [10, 30]
+    assert result["chosen_times"] == {"E1": 1.0, "E2": 2.0}
+
+
+def test_sparse_dp_uses_soft_region_prior_to_break_clip_tie():
+    frames = {
+        video_id: [
+            SparseKeyframe(n=i + 1, frame_idx=i * 10, pts_time=float(i))
+            for i in range(3)
+        ]
+        for video_id in ["V_NOISE", "V_TARGET"]
+    }
+    tied = np.full((2, 3), 0.2, dtype=np.float32)
+    region_evidence = {
+        "V_TARGET": {
+            "E1": [{"start_time": 0.0, "end_time": 0.0, "score": 1.0}],
+            "E2": [{"start_time": 2.0, "end_time": 2.0, "score": 1.0}],
+        }
+    }
+
+    result = solve_sparse_video_paths(
+        ["E1", "E2"],
+        frames,
+        {"V_NOISE": tied, "V_TARGET": tied},
+        candidate_order=["V_NOISE", "V_TARGET"],
+        region_evidence=region_evidence,
+        region_prior_weight=0.1,
+        video_prior_weight=0.0,
+        order_gain_weight=0.0,
+        span_penalty_weight=0.0,
+    )
+
+    assert result["video_id"] == "V_TARGET"
+    assert result["region_consistency"] == 1.0
+    assert result["candidate_scores"][0]["chosen_frame_idx"] == [0, 20]
+
+
+def test_sparse_selector_rescores_all_video_keyframes(monkeypatch):
+    import pandas as pd
+
+    import aic2026.trake_r2_score as score_module
+    from aic2026.index import clip_l_index
+
+    ids = pd.DataFrame(
+        [
+            {
+                "video_id": video_id,
+                "n": n,
+                # Regression thật: hai keyframe khác n/pts_time có thể
+                # quy đổi về cùng frame_idx. Selector phải gộp chúng trước
+                # DP để output vẫn tăng nghiêm ngặt.
+                "frame_idx": (
+                    10
+                    if video_id == "V_TARGET" and n in (1, 2)
+                    else n * 10
+                ),
+                "pts_time": float(n),
+            }
+            for video_id in ["V_NOISE", "V_TARGET"]
+            for n in [1, 2, 3]
+        ]
+    )
+
+    features = {
+        # E1 peak nằm sau E2 peak nên strict DP không lấy được cả hai.
+        "V_NOISE": np.asarray(
+            [[0.0, 1.0], [1.0, 0.0], [0.1, 0.1]],
+            dtype=np.float32,
+        ),
+        # E1@frame10 < E2@frame30 là path đúng và mạnh.
+        "V_TARGET": np.asarray(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+    }
+
+    class FakeTensor:
+        def __init__(self, value):
+            self.value = np.asarray(value, dtype=np.float32)
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.value
+
+    fake_model = SimpleNamespace(eval=lambda: None)
+
+    monkeypatch.setattr(
+        score_module,
+        "_get_trr1_clip_l_runtime",
+        lambda: (fake_model, object(), "cpu", object(), ids),
+    )
+    monkeypatch.setattr(
+        score_module,
+        "_query_variants",
+        lambda text, **kwargs: [text],
+    )
+    monkeypatch.setattr(
+        score_module,
+        "_encode_texts_with_runtime",
+        lambda *args, **kwargs: FakeTensor(
+            [[1.0, 0.0], [0.0, 1.0]]
+        ),
+    )
+    monkeypatch.setattr(
+        clip_l_index,
+        "doc_dac_trung",
+        lambda video_id, so_hang_can=None: features[video_id],
+    )
+
+    result = score_module.select_video_by_sparse_dp(
+        {"E1": "first", "E2": "second"},
+        ["V_NOISE", "V_TARGET"],
+        use_query_expansion=False,
+    )
+
+    assert result["video_id"] == "V_TARGET"
+    assert result["chosen_frame_idx"] == [10, 30]
+    # E1 lấy score từ keyframe n=2 (time=2.0), dù n=1 có cùng frame_idx.
+    assert result["chosen_times"] == {"E1": 2.0, "E2": 3.0}
 
 
 # ---------------------------------------------------------------------
@@ -206,25 +714,29 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
 
     captured = {}
 
-    # Fake scores dùng cho DP.
-    scores = {
-        "E1": {
-            1.0: 1.0,
-            1.5: 0.5,
-            2.0: 0.1,
-            2.5: 0.0,
-            3.0: 0.0,
-            3.5: 0.0,
-        },
-        "E2": {
-            1.0: 0.0,
-            1.5: 0.0,
-            2.0: 0.0,
-            2.5: 0.2,
-            3.0: 1.0,
-            3.5: 0.5,
-        },
-    }
+    def fake_select_video_by_sparse_dp(
+        event_texts,
+        video_ids,
+        **kwargs,
+    ):
+        captured["sparse_event_texts"] = event_texts
+        captured["candidate_video_ids"] = video_ids
+        captured["sparse_kwargs"] = kwargs
+
+        return {
+            "video_id": "L26_V315",
+            "beam_rank": 1,
+            "num_sparse_frames": 20,
+            "chosen_positions": [2, 8],
+            "chosen_frame_idx": [25, 75],
+            "chosen_times": {
+                "E1": 1.0,
+                "E2": 3.0,
+            },
+            "total_score": 1.8,
+            "mean_score": 0.9,
+            "candidate_scores": [],
+        }
 
     def fake_build_dense_score_fn(
         video_id,
@@ -240,10 +752,29 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
         captured["windows"] = windows
         captured["batch_size"] = batch_size
 
-        def fake_score_fn(event_id, pts_time):
-            return scores[event_id][pts_time]
+        scorer = SimpleNamespace(
+            frames=[
+                SimpleNamespace(frame_idx=25, pts_time=1.0),
+                SimpleNamespace(frame_idx=50, pts_time=2.0),
+                SimpleNamespace(frame_idx=75, pts_time=3.0),
+                SimpleNamespace(frame_idx=100, pts_time=4.0),
+            ],
+            score_matrix=np.asarray(
+                [
+                    [1.0, 0.5, 0.1, 0.0],
+                    [0.0, 0.2, 1.0, 0.5],
+                ],
+                dtype=np.float32,
+            ),
+        )
 
-        return object(), fake_score_fn
+        return scorer, None
+
+    monkeypatch.setattr(
+        pipeline,
+        "select_video_by_sparse_dp",
+        fake_select_video_by_sparse_dp,
+    )
 
     monkeypatch.setattr(
         pipeline,
@@ -253,8 +784,15 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
 
     result = pipeline.run_trake_r2(
         tr_r1_results,
-        step=0.5,
         min_gap=1,
+        sparse_window_padding_seconds=0.5,
+        video_beam_size=2,
+        candidate_video_ids=[
+            "V_EXTERNAL",
+            "",
+            "V_EXTERNAL",
+            "L26_V315",
+        ],
     )
 
     # -------------------------------------------------------------
@@ -262,6 +800,10 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
     # -------------------------------------------------------------
 
     assert captured["video_id"] == "L26_V315"
+    assert captured["candidate_video_ids"] == [
+        "V_EXTERNAL",
+        "L26_V315",
+    ]
 
     # -------------------------------------------------------------
     # Verify TR-R1 event text được truyền xuống dense scorer
@@ -271,20 +813,16 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
         "E1": "Dao chạm vào cây xả",
         "E2": "Dao cắt cây xả",
     }
+    assert captured["sparse_event_texts"] == captured["event_texts"]
 
     # -------------------------------------------------------------
     # Verify API mới: multi-window
     #
-    # Hai region:
-    #   E1 -> [1.0, 2.0]
-    #   E2 -> [2.5, 3.5]
-    #
-    # Chúng không overlap/touch nên phải giữ thành
-    # hai window riêng biệt.
+    # Sparse anchors E1=1.0, E2=3.0 với padding=0.5 tạo hai local windows.
     # -------------------------------------------------------------
 
     assert captured["windows"] == [
-        (1.0, 2.0),
+        (0.5, 1.5),
         (2.5, 3.5),
     ]
 
@@ -299,6 +837,44 @@ def test_run_trake_r2_wires_tr_r1_text_into_dense_scorer(monkeypatch):
     # -------------------------------------------------------------
 
     assert result["video_id"] == "L26_V315"
-
     assert result["chosen_times"]["E1"] == 1.0
     assert result["chosen_times"]["E2"] == 3.0
+    assert result["chosen_frame_idx"] == [25, 75]
+    assert result["sparse_selection"]["video_id"] == "L26_V315"
+
+
+def test_sparse_ranked_fallback_preserves_selected_video_and_filters_paths():
+    from aic2026.trake_r2_pipeline import build_sparse_ranked_candidates
+
+    selection = {
+        "video_id": "V_TOP1",
+        "chosen_frame_idx": [10, 20, 30],
+        "final_score": 0.9,
+        "candidate_scores": [
+            {
+                "video_id": "V_TOP1",
+                "chosen_frame_idx": [10, 20, 30],
+                "final_score": 0.9,
+            },
+            {
+                "video_id": "V_BAD_ORDER",
+                "chosen_frame_idx": [10, 10, 30],
+                "final_score": 0.8,
+            },
+            {
+                "video_id": "V_TOP2",
+                "chosen_frame_idx": [11, 21, 31],
+                "final_score": 0.7,
+            },
+        ],
+    }
+
+    ranked = build_sparse_ranked_candidates(selection, ["E1", "E2", "E3"])
+
+    assert [candidate["video_id"] for candidate in ranked] == [
+        "V_TOP1",
+        "V_TOP2",
+    ]
+    assert ranked[0]["source"] == "sparse_dp_selected_no_dense"
+    assert ranked[1]["source"] == "sparse_dp_no_dense"
+    assert ranked[1]["sparse_rank"] == 3
