@@ -374,3 +374,13 @@ Nghiệm thu chỉ báo `ĐẠT` khi tên ảnh hợp lệ, manifest phủ đủ
 0,5 giây. Nếu máy có `raw/keyframes`, script còn đối chiếu ảnh ở cùng
 `frame_idx` để bắt lỗi đánh số; thiếu keyframe BTC chỉ tạo cảnh báo vì đầu vào
 bắt buộc của Việc 9 là video gốc và map-keyframes.
+
+---
+
+# Q&A bằng Gemini Cloud
+
+UI có thêm `Gemini Cloud` để đọc tối đa 12 keyframe gốc cùng OCR/ASR trong một
+request. Nhánh này không thay CLIP-L/FAISS và tự fallback về local khi thiếu
+key, lỗi mạng hoặc hết quota. API key chỉ đặt trong `.env`, không đặt trong mã.
+
+Thiết lập và kiểm thử theo [docs/GEMINI_QA.md](docs/GEMINI_QA.md).

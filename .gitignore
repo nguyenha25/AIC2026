@@ -31,3 +31,10 @@ Thumbs.db
 *.egg-info/
 __editable__*
 .venv-qwen/
+
+CHANGES_TR_E2_OPTIMIZED.md
+artifacts/
+baselines/
+docs/TR_E2_OPTIMIZED_RUNBOOK.md
+
+.env
