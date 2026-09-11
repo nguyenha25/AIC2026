@@ -24,6 +24,10 @@ _EVENT_PREFIX = re.compile(
     r"^\s*(?:[-*•]\s*)?(?:(?:E\s*)?\d+\s*[.):\-]\s*|\(\d+\)\s*)",
     flags=re.IGNORECASE,
 )
+_EXPLICIT_EVENT_LINE = re.compile(
+    r"^\s*(?:[-*•]\s*)?E\s*\d+\s*[.):\-]\s*(?P<text>.+?)\s*$",
+    flags=re.IGNORECASE,
+)
 
 
 def ensure_repo_root_importable() -> Path:
@@ -57,13 +61,22 @@ def normalize_task(value: str) -> str:
 
 
 def parse_trake_event_lines(text: str) -> list[str]:
-    """Parse one-event-per-line TRAKE input and remove common list prefixes."""
+    """Parse TRAKE events, tolerating an optional natural-language preamble."""
 
-    events: list[str] = []
-    for raw_line in str(text or "").splitlines():
-        line = _EVENT_PREFIX.sub("", raw_line).strip()
-        if line:
-            events.append(line)
+    raw_lines = [line for line in str(text or "").splitlines() if line.strip()]
+    explicit_events = []
+    for raw_line in raw_lines:
+        match = _EXPLICIT_EVENT_LINE.match(raw_line)
+        if match:
+            explicit_events.append(match.group("text").strip())
+
+    # Khi có ít nhất hai dòng E1/E2..., xem chúng là danh sách có chủ đích và
+    # bỏ phần mô tả bối cảnh phía trước. Nếu không, vẫn hỗ trợ dạng (1), 2., ...
+    events = explicit_events if len(explicit_events) >= 2 else [
+        line
+        for raw_line in raw_lines
+        if (line := _EVENT_PREFIX.sub("", raw_line).strip())
+    ]
 
     if len(events) < 2:
         raise ValueError("TRAKE cần ít nhất 2 sự kiện, mỗi sự kiện một dòng.")

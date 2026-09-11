@@ -33,6 +33,21 @@ def test_parse_trake_event_lines_rejects_single_event():
         parse_trake_event_lines("chỉ có một sự kiện")
 
 
+def test_parse_trake_event_lines_ignores_preamble_when_e_lines_exist():
+    text = """Video về một khu vườn cây ăn trái ở miền Tây Nam Bộ.
+Đây là chuỗi liên tiếp các cảnh quay về 4 loại trái cây trong vườn.
+E1: Cảnh đầu tiên có trái sầu riêng.
+E2: Cảnh đầu tiên có trái măng cụt.
+E3: Cảnh đầu tiên có trái bưởi.
+E4: Cảnh đầu tiên có trái dâu bòn bon."""
+    assert parse_trake_event_lines(text) == [
+        "Cảnh đầu tiên có trái sầu riêng.",
+        "Cảnh đầu tiên có trái măng cụt.",
+        "Cảnh đầu tiên có trái bưởi.",
+        "Cảnh đầu tiên có trái dâu bòn bon.",
+    ]
+
+
 def test_make_trake_inference_row_contains_no_real_gt():
     row = make_trake_inference_row("32", ["đặt nồi", "mở lửa"])
     assert row["id"] == "32"
