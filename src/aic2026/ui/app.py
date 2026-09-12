@@ -32,6 +32,43 @@ import streamlit as st
 # 1. GỐC DỮ LIỆU
 # ============================================================
 
+def _nap_env_repo() -> None:
+    """Nạp .env cho cả UI, đặc biệt là GEMINI_API_KEY.
+
+    Script kiểm tra Gemini đã dùng python-dotenv nhưng Streamlit trước đây
+    không nạp .env, nên check API có thể OK trong khi UI âm thầm fallback về
+    OCR/ASR local. Giữ đường đọc thủ công để UI vẫn chạy nếu dotenv vắng mặt.
+    """
+
+    tep_env = Path(__file__).resolve().parents[3] / ".env"
+    if not tep_env.is_file():
+        return
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(tep_env, override=False)
+        return
+    except ImportError:
+        pass
+
+    try:
+        cac_dong = tep_env.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+
+    for dong in cac_dong:
+        dong = dong.strip()
+        if not dong or dong.startswith("#") or "=" not in dong:
+            continue
+        khoa, gia_tri = dong.split("=", 1)
+        khoa = khoa.strip()
+        if khoa:
+            os.environ.setdefault(khoa, gia_tri.strip().strip('"').strip("'"))
+
+
+_nap_env_repo()
+
 def _doc_env_thu_cong(ten_bien: str) -> str | None:
     """Đọc một biến từ .env ở gốc repo khi chưa có python-dotenv."""
 
@@ -129,7 +166,7 @@ from aic2026.ui.pipelines import (                                  # noqa: E402
     dense_frame_path,
     normalize_task,
     parse_trake_event_lines,
-    run_qa_answer_rows,
+    run_qa_with_provider,
     run_trake_query,
     submission_csv_bytes,
 )
@@ -1034,6 +1071,13 @@ def lay_bo_doc_anh():
     return BoDocAnh()
 
 
+@st.cache_resource(show_spinner=False)
+def lay_bo_doc_gemini():
+    from aic2026.gemini_qa import GeminiQAReader
+
+    return GeminiQAReader()
+
+
 def chay_qa_ui(
     ma_cau: str,
     cau_hoi: str,
@@ -1041,7 +1085,7 @@ def chay_qa_ui(
     cua_so_giay: float,
     diem_toi_thieu: float,
     *,
-    dung_vlm: bool,
+    qa_reader_mode: str,
 ) -> dict:
     """Semantic routing + adaptive retrieval K + answer generation."""
 
@@ -1055,14 +1099,20 @@ def chay_qa_ui(
         dang_cau=QA,
         so_ung_vien_override=int(plan.semantic_k_hint),
     )
-    bo_doc = lay_bo_doc_anh() if dung_vlm else None
-    qa = run_qa_answer_rows(
+    bo_doc_local = lay_bo_doc_anh() if qa_reader_mode == "local" else None
+    bo_doc_cloud = (
+        lay_bo_doc_gemini()
+        if qa_reader_mode in {"gemini", "gemini_rerank"}
+        else None
+    )
+    qa = run_qa_with_provider(
         cau_hoi,
         ket_qua["hits"],
-        use_vlm=dung_vlm,
-        image_reader=bo_doc,
+        provider=qa_reader_mode,
+        local_image_reader=bo_doc_local,
+        cloud_reader=bo_doc_cloud,
         max_rows=cfg.so_dong_toi_da(),
-        vlm_rows=5,
+        local_vlm_rows=5,
     )
     ket_qua["hits"] = [row["hit"] for row in qa["rows"]]
     ket_qua["qa_rows"] = qa["rows"]
@@ -1078,7 +1128,9 @@ def chay_qa_ui(
     ket_qua["qa_plan"] = (
         plan.model_dump() if hasattr(plan, "model_dump") else plan.dict()
     )
-    ket_qua["qa_vlm_enabled"] = bool(dung_vlm)
+    ket_qua["qa_reader_mode"] = str(qa.get("provider", qa_reader_mode))
+    ket_qua["qa_reader_meta"] = dict(qa.get("provider_meta", {}))
+    ket_qua["qa_vlm_enabled"] = qa_reader_mode != "none"
     ket_qua["task"] = QA
     return ket_qua
 
@@ -1358,7 +1410,7 @@ with st.form("form_tim_kiem", clear_on_submit=False):
     with st.expander("Tùy chọn tìm kiếm", expanded=False):
         video_beam_size = 24
         dense_rerank_top_k = 3
-        dung_vlm = False
+        qa_reader_mode = "gemini"
 
         if la_trake:
             st.caption("Pipeline đã khóa")
@@ -1448,11 +1500,33 @@ with st.form("form_tim_kiem", clear_on_submit=False):
             )
 
             if la_qa:
-                dung_vlm = st.checkbox(
-                    "Dùng VLM cho 5 candidate đầu",
-                    value=False,
-                    help="Chính xác hơn với câu hỏi thị giác nhưng tốn thêm thời gian.",
+                qa_reader_label = st.selectbox(
+                    "Bộ đọc và trả lời Q&A",
+                    options=[
+                        "Gemini Cloud",
+                        "Gemini Cloud + rerank (thử nghiệm)",
+                        "BLIP local",
+                        "Chỉ OCR/ASR local",
+                    ],
+                    index=0,
+                    help=(
+                        "Gemini gửi tối đa 12 keyframe gốc cùng OCR/ASR trong "
+                        "một request. Lỗi mạng/quota sẽ tự fallback về local."
+                    ),
                 )
+                qa_reader_mode = {
+                    "Gemini Cloud": "gemini",
+                    "Gemini Cloud + rerank (thử nghiệm)": "gemini_rerank",
+                    "BLIP local": "local",
+                    "Chỉ OCR/ASR local": "none",
+                }[qa_reader_label]
+                if qa_reader_mode.startswith("gemini") and not os.getenv(
+                    "GEMINI_API_KEY"
+                ):
+                    st.caption(
+                        "Chưa thấy GEMINI_API_KEY trong .env; khi chạy sẽ "
+                        "fallback an toàn về OCR/ASR local."
+                    )
             if not co_kho_chu:
                 st.caption("Kho chữ chưa sẵn sàng nên OCR BM25 và ASR đang tắt.")
             if not co_kho_caption:
@@ -1518,7 +1592,7 @@ if da_gui:
                         cac_nguon,
                         cua_so_giay,
                         diem_toi_thieu,
-                        dung_vlm=bool(dung_vlm),
+                        qa_reader_mode=qa_reader_mode,
                     )
                 else:
                     ket_qua_moi = chay_tim_kiem(
@@ -1866,14 +1940,13 @@ if ket_qua_hien_tai and loai_truy_van != TRAKE:
 
     if loai_truy_van == QA:
         plan = ket_qua.get("qa_plan", {})
+        reader_meta = ket_qua.get("qa_reader_meta", {})
         with st.expander("Chẩn đoán Q&A", expanded=False):
             cot_1, cot_2, cot_3, cot_4 = st.columns(4)
             cot_1.metric("Intent", plan.get("intent", "general_qa"))
             cot_2.metric("Loại đáp án", plan.get("answer_type", "short_text"))
             cot_3.metric("Adaptive K", plan.get("semantic_k_hint", "—"))
-            cot_4.metric(
-                "VLM top-5", "Bật" if ket_qua.get("qa_vlm_enabled") else "Tắt"
-            )
+            cot_4.metric("QA Reader", ket_qua.get("qa_reader_mode", "none"))
             st.caption(
                 "Modalities: "
                 + ", ".join(
@@ -1881,6 +1954,34 @@ if ket_qua_hien_tai and loai_truy_van != TRAKE:
                     for key, value in plan.get("preferred_modalities", {}).items()
                 )
             )
+            if reader_meta.get("provider") == "gemini":
+                st.caption(
+                    f"Gemini {reader_meta.get('model', '')} · "
+                    f"{reader_meta.get('selected_images', 0)} ảnh · "
+                    f"{reader_meta.get('selected_videos', 0)} video · "
+                    f"cache={'hit' if reader_meta.get('cache_hit') else 'miss'} · "
+                    f"API calls={reader_meta.get('api_calls', 0)}"
+                )
+                if int(reader_meta.get("selected_images", 0)) < 3:
+                    st.warning(
+                        "Gemini đang nhận quá ít ảnh. Kiểm tra "
+                        "AIC_GEMINI_MAX_IMAGES=12 và dữ liệu keyframe."
+                    )
+                if reader_meta.get("json_recovery") == "retry":
+                    st.info(
+                        "Phản hồi JSON đầu tiên bị lỗi; hệ thống đã tự gọi "
+                        "lại và phục hồi thành công."
+                    )
+                elif reader_meta.get("json_recovery") == "partial_first_response":
+                    st.warning(
+                        "Gemini chỉ trả được một phần candidate; nên chạy lại "
+                        "truy vấn để lấy kết quả đầy đủ."
+                    )
+            if reader_meta.get("fallback_reason"):
+                st.warning(
+                    "Gemini không khả dụng, kết quả đang dùng local: "
+                    + str(reader_meta["fallback_reason"])
+                )
 
     if dem.get("thieu_anh", 0):
         st.warning(

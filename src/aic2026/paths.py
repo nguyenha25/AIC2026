@@ -233,7 +233,9 @@ def captions_file(video_id: str) -> Path:
 
 
 def thumbnail_image(video_id: str, keyframe_n: int) -> Path:
-    return THUMBNAILS_DIR / video_id / f"{keyframe_n:04d}.jpg"
+    """Thumbnail của keyframe, chịu được 212.jpg / 0212.jpg / 00212.jpg."""
+    base = THUMBNAILS_DIR / video_id
+    return _tep_theo_so(base, keyframe_n, ".jpg")
 
 
 def run_dir(tag: str) -> Path:

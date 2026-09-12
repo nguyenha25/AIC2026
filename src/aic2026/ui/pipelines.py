@@ -19,6 +19,7 @@ from aic2026.submit import KIS, QA, TRAKE, Answer, SubmissionBudget
 
 
 SUPPORTED_TASKS = (KIS, QA, TRAKE)
+QA_READER_MODES = ("none", "local", "gemini", "gemini_rerank")
 
 _EVENT_PREFIX = re.compile(
     r"^\s*(?:[-*•]\s*)?(?:(?:E\s*)?\d+\s*[.):\-]\s*|\(\d+\)\s*)",
@@ -166,6 +167,7 @@ def run_qa_answer_rows(
     image_reader=None,
     max_rows: int = 100,
     vlm_rows: int = 5,
+    expand_neighbors: bool = True,
 ) -> dict[str, Any]:
     """Generate a non-empty answer for every ranked QA frame."""
 
@@ -179,7 +181,7 @@ def run_qa_answer_rows(
         so_hang_vlm=int(vlm_rows),
         bo_doc_anh=image_reader,
         dung_vlm=bool(use_vlm),
-        mo_rong_lan_can=True,
+        mo_rong_lan_can=bool(expand_neighbors),
     )
     rows: list[dict[str, Any]] = []
     for hit, answer in pairs:
@@ -200,6 +202,93 @@ def run_qa_answer_rows(
         "rows": rows,
         "latency_ms": (time.perf_counter() - started) * 1000.0,
     }
+
+
+def normalize_qa_reader_mode(value: str) -> str:
+    mode = str(value or "none").strip().lower()
+    if mode not in QA_READER_MODES:
+        raise ValueError(f"QA reader không hỗ trợ: {value!r}")
+    return mode
+
+
+def run_qa_with_provider(
+    question: str,
+    hits: Sequence,
+    *,
+    provider: str,
+    local_image_reader=None,
+    cloud_reader=None,
+    max_rows: int = 100,
+    local_vlm_rows: int = 5,
+) -> dict[str, Any]:
+    """Run local QA and optionally enhance its exact frame-answer rows.
+
+    Gemini failures are intentionally converted to diagnostics and the fully
+    valid local rows are returned.  A cloud outage must never break the UI or
+    produce an empty answer column.
+    """
+    mode = normalize_qa_reader_mode(provider)
+    if mode == "local":
+        result = run_qa_answer_rows(
+            question,
+            hits,
+            use_vlm=True,
+            image_reader=local_image_reader,
+            max_rows=max_rows,
+            vlm_rows=local_vlm_rows,
+        )
+        result["provider"] = "local"
+        result["provider_meta"] = {
+            "provider": "local",
+            "model": getattr(local_image_reader, "ten_mo_hinh", "BLIP-VQA"),
+            "fallback_reason": None,
+        }
+        return result
+
+    base = run_qa_answer_rows(
+        question,
+        hits,
+        use_vlm=False,
+        image_reader=None,
+        max_rows=max_rows,
+        vlm_rows=0,
+    )
+    if mode == "none":
+        base["provider"] = "none"
+        base["provider_meta"] = {
+            "provider": "none",
+            "model": "OCR/ASR local",
+            "fallback_reason": None,
+        }
+        return base
+
+    from aic2026.gemini_qa import (
+        GeminiQAError,
+        GeminiQAReader,
+        apply_gemini_assessments,
+    )
+
+    reader = cloud_reader or GeminiQAReader()
+    try:
+        assessments, meta = reader.assess(question, base["rows"])
+        base["rows"] = apply_gemini_assessments(
+            base["rows"], assessments, rerank=mode == "gemini_rerank"
+        )
+        base["latency_ms"] += float(meta.get("latency_ms", 0.0))
+        base["provider"] = mode
+        base["provider_meta"] = meta
+    except GeminiQAError as exc:
+        base["provider"] = "local_fallback"
+        base["provider_meta"] = {
+            "provider": "local_fallback",
+            "model": getattr(reader, "model", "Gemini"),
+            "selected_images": 0,
+            "assessed_rows": 0,
+            "cache_hit": False,
+            "api_calls": 0,
+            "fallback_reason": str(exc),
+        }
+    return base
 
 
 def run_trake_query(

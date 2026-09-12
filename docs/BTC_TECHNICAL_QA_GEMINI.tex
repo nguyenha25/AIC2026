@@ -1,0 +1,55 @@
+% Đoạn LaTeX có thể chèn trực tiếp vào báo cáo kỹ thuật AIC 2026.
+% Yêu cầu preamble gợi ý: \usepackage[utf8]{inputenc}, \usepackage{booktabs}.
+
+\subsection{Truy vấn hỏi--đáp đa phương thức}
+
+Nhánh hỏi--đáp (Q\&A) được thiết kế theo hai tầng độc lập: truy xuất bằng chứng
+và đọc câu trả lời. Trước hết, bộ phân tích luật nhận diện ý định của câu hỏi
+(chẳng hạn đếm đối tượng, đọc văn bản, nhận diện người hoặc địa điểm) và kiểu
+đáp án mong đợi. Hệ thống sau đó hợp nhất tín hiệu CLIP-L, OCR, ASR và caption
+để xếp hạng các khung hình ứng viên; ngân sách truy xuất được điều chỉnh theo
+độ khó của truy vấn. Mỗi ứng viên luôn giữ cặp \texttt{video\_id} và
+\texttt{frame\_idx} thật từ bảng ánh xạ keyframe, tránh nhầm số thứ tự ảnh
+\texttt{n} với chỉ số khung hình cần nộp.
+
+Ở tầng đọc, hệ thống hỗ trợ hai chế độ. Chế độ cục bộ khai thác OCR, ASR và bộ
+đọc ảnh nhẹ. Chế độ đám mây tùy chọn gửi tối đa một tập nhỏ ảnh ứng viên cùng
+ngữ cảnh OCR/ASR/caption đến Gemini để ước lượng độ liên quan và sinh câu trả
+lời ngắn cho từng ảnh. Kết quả được ép theo JSON schema, kiểm tra ánh xạ ngược
+về đúng ứng viên, sửa lỗi JSON có kiểm soát và thử lại tối đa một lần. Phản hồi
+được cache theo câu hỏi, model, phiên bản prompt và định danh bằng chứng. Khi
+dịch vụ không khả dụng, pipeline trả về nhánh cục bộ và gắn cờ fallback thay vì
+dừng toàn bộ giao diện. API key chỉ được đọc từ biến môi trường và không được
+ghi vào mã nguồn, manifest hay báo cáo.
+
+\subsubsection{Đánh giá và chống rò rỉ dữ liệu}
+
+Chúng tôi tách hai chế độ đánh giá. Chế độ \texttt{r4} đo toàn tuyến từ danh
+sách ứng viên QA-R4 đến công thức R@K của Ban Tổ chức; ground truth chỉ được mở
+sau khi đã sinh tệp submission. Chế độ \texttt{oracle\_gt} chỉ dùng vị trí
+video và khoảng frame chuẩn để chọn ảnh, nhưng không truyền câu trả lời chuẩn
+vào prompt hoặc reader. Chế độ thứ hai chỉ dùng chẩn đoán năng lực đọc ảnh và
+luôn được đánh dấu \texttt{diagnostic\_only}; nó không phải điểm end-to-end.
+Các request bị lỗi API hoặc chuyển sang local fallback không được đưa vào điểm
+trung bình của cấu hình Gemini. Tương tự, truy vấn không có keyframe trích sẵn
+nằm trong khoảng GT được ghi nhận là \texttt{oracle\_keyframe\_gap} và loại
+khỏi mẫu đánh giá reader.
+
+\subsubsection{Kết quả chẩn đoán hiện tại}
+
+Trên 18 truy vấn Q\&A của tập phát triển, artifact QA-R4 hiện tại đạt video
+recall $5/18$ (27.78\%) và frame recall $1/18$ (5.56\%), cho thấy nút thắt
+chính vẫn nằm ở truy xuất bằng chứng. Trong thí nghiệm oracle trên tập tune,
+10/12 truy vấn có ít nhất một keyframe nằm trong khoảng GT; hai truy vấn còn
+lại được phân loại là lỗi coverage. Một phép thử đơn lẻ trên truy vấn 44 cho
+điểm 1.0 khi Gemini nhận đúng khung hình. Ở bốn truy vấn oracle được xử lý
+thành công trước khi chạm quota dịch vụ, cấu hình 4 ảnh và 12 ảnh cùng đạt
+3/4 câu đúng, trong khi cấu hình 8 ảnh đạt 1/4. Do kích thước mẫu đám mây còn
+nhỏ, các con số này chỉ là kết quả chẩn đoán sơ bộ và chưa được dùng để khẳng
+định cấu hình cuối cùng.
+
+Kết quả trên dẫn đến quyết định kỹ thuật an toàn: giữ reader đám mây như một
+thành phần tùy chọn có kiểm soát, không phụ thuộc vào nó để đảm bảo pipeline
+hoạt động, và ưu tiên cải thiện video/frame retrieval trước khi mở rộng số lần
+gọi API. Việc lựa chọn 4 hay 12 ảnh chỉ được khóa sau khi toàn bộ mẫu hợp lệ
+được đánh giá mà không có fallback.
