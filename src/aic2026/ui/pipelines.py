@@ -167,6 +167,7 @@ def run_qa_answer_rows(
     image_reader=None,
     max_rows: int = 100,
     vlm_rows: int = 5,
+    expand_neighbors: bool = True,
 ) -> dict[str, Any]:
     """Generate a non-empty answer for every ranked QA frame."""
 
@@ -180,7 +181,7 @@ def run_qa_answer_rows(
         so_hang_vlm=int(vlm_rows),
         bo_doc_anh=image_reader,
         dung_vlm=bool(use_vlm),
-        mo_rong_lan_can=True,
+        mo_rong_lan_can=bool(expand_neighbors),
     )
     rows: list[dict[str, Any]] = []
     for hit, answer in pairs:

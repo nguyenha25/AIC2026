@@ -32,6 +32,43 @@ import streamlit as st
 # 1. GỐC DỮ LIỆU
 # ============================================================
 
+def _nap_env_repo() -> None:
+    """Nạp .env cho cả UI, đặc biệt là GEMINI_API_KEY.
+
+    Script kiểm tra Gemini đã dùng python-dotenv nhưng Streamlit trước đây
+    không nạp .env, nên check API có thể OK trong khi UI âm thầm fallback về
+    OCR/ASR local. Giữ đường đọc thủ công để UI vẫn chạy nếu dotenv vắng mặt.
+    """
+
+    tep_env = Path(__file__).resolve().parents[3] / ".env"
+    if not tep_env.is_file():
+        return
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(tep_env, override=False)
+        return
+    except ImportError:
+        pass
+
+    try:
+        cac_dong = tep_env.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+
+    for dong in cac_dong:
+        dong = dong.strip()
+        if not dong or dong.startswith("#") or "=" not in dong:
+            continue
+        khoa, gia_tri = dong.split("=", 1)
+        khoa = khoa.strip()
+        if khoa:
+            os.environ.setdefault(khoa, gia_tri.strip().strip('"').strip("'"))
+
+
+_nap_env_repo()
+
 def _doc_env_thu_cong(ten_bien: str) -> str | None:
     """Đọc một biến từ .env ở gốc repo khi chưa có python-dotenv."""
 
@@ -1921,9 +1958,25 @@ if ket_qua_hien_tai and loai_truy_van != TRAKE:
                 st.caption(
                     f"Gemini {reader_meta.get('model', '')} · "
                     f"{reader_meta.get('selected_images', 0)} ảnh · "
+                    f"{reader_meta.get('selected_videos', 0)} video · "
                     f"cache={'hit' if reader_meta.get('cache_hit') else 'miss'} · "
                     f"API calls={reader_meta.get('api_calls', 0)}"
                 )
+                if int(reader_meta.get("selected_images", 0)) < 3:
+                    st.warning(
+                        "Gemini đang nhận quá ít ảnh. Kiểm tra "
+                        "AIC_GEMINI_MAX_IMAGES=12 và dữ liệu keyframe."
+                    )
+                if reader_meta.get("json_recovery") == "retry":
+                    st.info(
+                        "Phản hồi JSON đầu tiên bị lỗi; hệ thống đã tự gọi "
+                        "lại và phục hồi thành công."
+                    )
+                elif reader_meta.get("json_recovery") == "partial_first_response":
+                    st.warning(
+                        "Gemini chỉ trả được một phần candidate; nên chạy lại "
+                        "truy vấn để lấy kết quả đầy đủ."
+                    )
             if reader_meta.get("fallback_reason"):
                 st.warning(
                     "Gemini không khả dụng, kết quả đang dùng local: "

@@ -25,7 +25,14 @@ from aic2026.gemini_qa import GeminiQAError, GeminiQAReader  # noqa: E402
 
 
 def main() -> int:
-    reader = GeminiQAReader(model=os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'), max_images=1, retries=0)
+    # Dùng đúng biến cấu hình mà UI/GeminiQAReader sử dụng. GEMINI_MODEL chỉ
+    # được giữ làm alias tương thích với các tệp .env cũ.
+    model = (
+        os.getenv("AIC_GEMINI_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or "gemini-3.6-flash"
+    )
+    reader = GeminiQAReader(model=model, max_images=1, retries=0)
     if not reader.configured:
         print("FAIL: thieu GEMINI_API_KEY trong .env")
         return 2
@@ -54,6 +61,10 @@ def main() -> int:
         return 1
 
     print(f"OK: model={reader.model}")
+    print(
+        "UI config: "
+        f"AIC_GEMINI_MAX_IMAGES={os.getenv('AIC_GEMINI_MAX_IMAGES', '12')}"
+    )
     print(json.dumps(parsed, ensure_ascii=False))
     print("Key khong duoc in ra va khong nam trong cache.")
     return 0

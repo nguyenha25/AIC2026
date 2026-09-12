@@ -7,13 +7,17 @@ environment stays unchanged.  Every answer remains attached to the exact row
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import json
 import mimetypes
 import os
+import re
 import socket
 import time
+import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -23,7 +27,7 @@ from urllib import request as urlrequest
 
 
 DEFAULT_MODEL = "gemini-3.6-flash"
-PROMPT_VERSION = "aic2026-gemini-qa-v1"
+PROMPT_VERSION = "aic2026-gemini-qa-v2.1-json-recovery"
 FALLBACK_ANSWER = "khong ro"
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
@@ -50,7 +54,10 @@ class GeminiAssessment:
 
 Transport = Callable[[str, Mapping[str, str], dict[str, Any], float], dict[str, Any]]
 ImagePathResolver = Callable[[str, int], Path]
-EvidenceProvider = Callable[[str, int, float], tuple[str, str]]
+EvidenceProvider = Callable[
+    [str, int, float],
+    tuple[str, str] | tuple[str, str, str],
+]
 
 
 def _clamp01(value: Any) -> float:
@@ -96,10 +103,13 @@ def _default_image_path(video_id: str, n: int) -> Path:
     return keyframe
 
 
-def _default_evidence(video_id: str, n: int, pts_time: float) -> tuple[str, str]:
-    """Load concise OCR and ASR context for a candidate."""
+def _default_evidence(
+    video_id: str, n: int, pts_time: float
+) -> tuple[str, str, str]:
+    """Load concise OCR, ASR and caption context for a candidate."""
     ocr_text = ""
     asr_text = ""
+    caption_text = ""
     try:
         from .qa_answer import _doc_ocr_cua_khung
 
@@ -143,7 +153,90 @@ def _default_evidence(video_id: str, n: int, pts_time: float) -> tuple[str, str]
         asr_text = " ".join(text for _, text in nearby[:5])[:1000]
     except Exception:
         pass
-    return ocr_text, asr_text
+
+    try:
+        from .paths import captions_file
+
+        path = captions_file(video_id)
+        nearby_captions: list[tuple[int, str]] = []
+        if path.is_file():
+            with path.open("r", encoding="utf-8-sig") as stream:
+                for line in stream:
+                    try:
+                        item = json.loads(line)
+                        item_n = int(item.get("n", -1))
+                        text = " ".join(str(item.get("caption", "")).split())
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        continue
+                    if text and abs(item_n - int(n)) <= 2:
+                        nearby_captions.append((abs(item_n - int(n)), text))
+        nearby_captions.sort(key=lambda item: item[0])
+        caption_text = " | ".join(text for _, text in nearby_captions[:3])[:700]
+    except Exception:
+        pass
+
+    return ocr_text, asr_text, caption_text
+
+
+def _fold_text(value: Any) -> str:
+    text = unicodedata.normalize("NFD", str(value or "").casefold())
+    return " ".join(
+        "".join(char for char in text if unicodedata.category(char) != "Mn").split()
+    )
+
+
+def _is_abstention(value: Any) -> bool:
+    folded = _fold_text(value).strip(" .,:;!?-_'")
+    return folded in {
+        "khong ro",
+        "khong biet",
+        "khong xac dinh",
+        "unknown",
+        "unclear",
+        "cannot determine",
+    }
+
+
+def _target_question(question: str) -> str:
+    """Tách câu hỏi đích khỏi phần mô tả dài, nhưng vẫn giữ full query."""
+    clean = " ".join(str(question).split())
+    interrogatives = re.findall(r"[^.!?]*\?", clean)
+    if interrogatives:
+        return interrogatives[-1].strip()
+    chunks = [chunk.strip() for chunk in re.split(r"[.!?]+", clean) if chunk.strip()]
+    return chunks[-1] if chunks else clean
+
+
+def _query_context(question: str) -> dict[str, Any]:
+    """Semantic hints for the cloud reader; never reads ground truth."""
+    context: dict[str, Any] = {"target_question": _target_question(question)}
+    try:
+        from .semantic.parser import RuleBasedParser
+
+        plan = RuleBasedParser().parse_qa("gemini-ui", question)
+        context.update({
+            "intent": plan.intent,
+            "answer_type": plan.answer_type,
+            "entities": list(plan.entities),
+            "attributes": list(plan.attributes),
+            "actions": list(plan.actions),
+            "temporal_relation": plan.temporal_relation,
+        })
+    except Exception:
+        context.update({"intent": "general_qa", "answer_type": "short_text"})
+
+    folded = _fold_text(context["target_question"])
+    if re.search(r"\b(ai|nguoi nao|nhan vat nao)\b", folded):
+        context["answer_type"] = "person_or_name"
+    elif re.search(r"\b(mau gi|mau nao)\b", folded):
+        context["answer_type"] = "color"
+    elif re.search(r"\b(bao nhieu|may)\b", folded):
+        context["answer_type"] = "number"
+    elif re.search(r"\b(o dau|noi nao|dia diem nao)\b", folded):
+        context["answer_type"] = "place"
+    elif re.search(r"\b(vat gi|mon gi|con gi|loai gi|cai gi)\b", folded):
+        context["answer_type"] = "object_or_class"
+    return context
 
 
 def select_candidate_indices(
@@ -262,6 +355,12 @@ class GeminiQAReader:
                     "frame_idx": item["frame_idx"],
                     "image_size": item["image_path"].stat().st_size,
                     "image_mtime_ns": item["image_path"].stat().st_mtime_ns,
+                    # OCR/ASR/caption có thể được dựng lại mà ảnh không đổi.
+                    # Đưa evidence vào cache identity để không tái dùng đáp án
+                    # cũ sau khi pipeline enrich được cải thiện.
+                    "ocr": item["ocr"],
+                    "asr": item["asr"],
+                    "caption": item["caption"],
                 }
                 for item in candidates
             ],
@@ -316,7 +415,10 @@ class GeminiQAReader:
             if prepared and total_bytes + size > max_bytes:
                 break
             total_bytes += size
-            ocr_text, asr_text = self.evidence_provider(video_id, n, pts_time)
+            evidence = tuple(self.evidence_provider(video_id, n, pts_time))
+            ocr_text = str(evidence[0] or "") if len(evidence) >= 1 else ""
+            asr_text = str(evidence[1] or "") if len(evidence) >= 2 else ""
+            caption_text = str(evidence[2] or "") if len(evidence) >= 3 else ""
             prepared.append({
                 "candidate_id": candidate_id,
                 "row_index": row_index,
@@ -327,6 +429,7 @@ class GeminiQAReader:
                 "image_path": image_path,
                 "ocr": ocr_text,
                 "asr": asr_text,
+                "caption": caption_text,
             })
         return prepared
 
@@ -359,41 +462,109 @@ class GeminiQAReader:
     def _build_payload(
         self, question: str, candidates: Sequence[dict[str, Any]]
     ) -> dict[str, Any]:
+        context = _query_context(question)
         prompt = (
-            "Bạn đang xử lý Video Question Answering cho AIC 2026.\n"
-            "Mỗi candidate_id là một ứng viên độc lập. Đánh giá đúng ảnh gắn "
-            "ngay sau nhãn của candidate đó. Không lấy đáp án của candidate "
-            "này gắn sang candidate khác.\n"
-            "Với MỖI candidate: (1) chấm relevance 0..1 so với toàn bộ truy "
-            "vấn; (2) trả lời tiếng Việt thật ngắn, ưu tiên 1-8 từ; (3) chỉ "
-            "dùng ảnh, OCR, ASR được cung cấp; (4) nếu chưa đủ bằng chứng thì "
-            "answer='khong ro'. Không thay đổi candidate_id.\n\n"
-            f"TRUY VẤN: {question}\n"
+            "Bạn là bộ đọc Video Question Answering cho AIC 2026. Hãy hiểu "
+            "đúng ĐỐI TƯỢNG được hỏi, không chỉ trích chữ gần ảnh.\n\n"
+            "QUY TRÌNH SUY LUẬN (không in các bước này):\n"
+            "1. Tách phần mô tả dùng để tìm cảnh khỏi câu hỏi đích.\n"
+            "2. Xác định đối tượng/thuộc tính/hành động cần trả lời theo "
+            "QUERY_CONTEXT.\n"
+            "3. Chọn đúng VIDEO_GROUP. Các ảnh trong cùng VIDEO_GROUP là một "
+            "chuỗi theo thời gian và ĐƯỢC kết hợp để hiểu cảnh. Tuyệt đối "
+            "không ghép bằng chứng giữa hai video khác nhau.\n"
+            "4. Ảnh là bằng chứng chính; OCR, ASR và CAPTION là bằng chứng hỗ "
+            "trợ, có thể sai. Đừng trả một chữ/số chỉ vì nó xuất hiện trong "
+            "OCR nếu không trả lời đúng câu hỏi đích.\n"
+            "5. Được dùng kiến thức phổ thông để nhận dạng hoặc trả lời một "
+            "sự thật về người/vật/địa danh đã được ảnh, OCR hay ASR nhận diện "
+            "đủ rõ. Không dùng kiến thức ngoài để bịa chi tiết riêng của cảnh "
+            "hoặc đoán danh tính khi bằng chứng mơ hồ.\n\n"
+            "ĐẦU RA: Với MỖI candidate_id, chấm relevance 0..1 và trả lời "
+            "đúng loại đáp án. Câu trả lời tiếng Việt ngắn, tự nhiên, thường "
+            "1-12 từ; câu kiến thức có thể dài hơn nếu cần. Các frame cùng "
+            "video có thể nhận cùng đáp án khi toàn chuỗi hỗ trợ đáp án đó. "
+            "Nếu không đủ bằng chứng, answer phải đúng chuỗi 'khong ro'. "
+            "Không thay đổi candidate_id. evidence nêu bằng chứng quyết định "
+            "và nói rõ nếu có dùng kiến thức phổ thông, tối đa 12 từ. Chỉ "
+            "xuất JSON đúng schema, không dùng Markdown và không thêm lời "
+            "giải thích ngoài JSON.\n\n"
+            "QUERY_CONTEXT: "
+            + json.dumps(context, ensure_ascii=False, sort_keys=True)
+            + "\n"
+            f"TRUY VẤN ĐẦY ĐỦ: {question}\n"
         )
         parts: list[dict[str, Any]] = [{"text": prompt}]
+
+        # Giữ thứ tự video theo ranking ban đầu, nhưng xếp frame trong từng
+        # video theo thời gian để Gemini thực sự thấy được ngữ cảnh chuyển động.
+        groups: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         for item in candidates:
-            label = (
-                f"candidate_id={item['candidate_id']}; "
-                f"video_id={item['video_id']}; frame_idx={item['frame_idx']}\n"
-                f"OCR: {item['ocr'] or '(không có)'}\n"
-                f"ASR quanh thời điểm: {item['asr'] or '(không có)'}"
+            groups.setdefault(str(item["video_id"]), []).append(item)
+
+        for group_rank, (video_id, items) in enumerate(groups.items(), start=1):
+            ordered = sorted(
+                items,
+                key=lambda item: (float(item["pts_time"]), int(item["frame_idx"])),
             )
-            mime = mimetypes.guess_type(item["image_path"].name)[0] or "image/jpeg"
-            encoded = base64.b64encode(item["image_path"].read_bytes()).decode("ascii")
-            parts.extend([
-                {"text": label},
-                {"inline_data": {"mime_type": mime, "data": encoded}},
-            ])
+            parts.append({
+                "text": (
+                    f"\n=== VIDEO_GROUP {group_rank}: video_id={video_id}; "
+                    f"{len(ordered)} frame theo thứ tự thời gian ==="
+                )
+            })
+            for temporal_index, item in enumerate(ordered, start=1):
+                label = (
+                    f"candidate_id={item['candidate_id']}; "
+                    f"temporal_position={temporal_index}/{len(ordered)}; "
+                    f"frame_idx={item['frame_idx']}; pts_time={item['pts_time']:.3f}s\n"
+                    f"OCR: {item['ocr'] or '(không có)'}\n"
+                    f"ASR quanh thời điểm: {item['asr'] or '(không có)'}\n"
+                    f"CAPTION lân cận: {item['caption'] or '(không có)'}"
+                )
+                mime = (
+                    mimetypes.guess_type(item["image_path"].name)[0]
+                    or "image/jpeg"
+                )
+                encoded = base64.b64encode(
+                    item["image_path"].read_bytes()
+                ).decode("ascii")
+                parts.extend([
+                    {"text": label},
+                    {"inline_data": {"mime_type": mime, "data": encoded}},
+                ])
 
         return {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {
                 "temperature": 0,
-                "maxOutputTokens": 2048,
+                # 12 assessment có thể vượt 2K token nếu evidence dài. Khi bị
+                # cắt giữa object, json.loads báo Expecting value/EOF và UI
+                # trước đây rơi thẳng về local.
+                "maxOutputTokens": 4096,
                 "responseMimeType": "application/json",
                 "responseSchema": self._response_schema(),
             },
         }
+
+    @staticmethod
+    def _strict_retry_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Tạo request thứ hai ngắn gọn hơn khi JSON lần đầu bị hỏng."""
+        retry = json.loads(json.dumps(payload))
+        parts = retry.get("contents", [{}])[0].get("parts", [])
+        if parts and isinstance(parts[0], dict) and "text" in parts[0]:
+            parts[0]["text"] = (
+                "LẦN TRƯỚC ĐẦU RA BỊ LỖI JSON. Lần này bắt buộc hoàn thành "
+                "một JSON object hợp lệ đúng response schema. Không code "
+                "fence, không chú thích, không dấu phẩy thừa. evidence tối "
+                "đa 8 từ.\n\n" + str(parts[0]["text"])
+            )
+        generation = retry.setdefault("generationConfig", {})
+        generation["temperature"] = 0
+        generation["maxOutputTokens"] = max(
+            4096, int(generation.get("maxOutputTokens", 4096))
+        )
+        return retry
 
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
@@ -453,23 +624,88 @@ class GeminiQAReader:
     def _extract_json(response: Mapping[str, Any]) -> dict[str, Any]:
         try:
             parts = response["candidates"][0]["content"]["parts"]
-            text = "".join(str(part.get("text", "")) for part in parts).strip()
+            texts = [
+                str(part.get("text", "")).strip()
+                for part in parts
+                if isinstance(part, Mapping) and str(part.get("text", "")).strip()
+            ]
         except (KeyError, IndexError, TypeError):
             feedback = response.get("promptFeedback", {})
             raise GeminiQAError(f"Gemini không trả nội dung: {feedback}") from None
 
-        if text.startswith("```"):
-            lines = text.splitlines()[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines)
+        if not texts:
+            feedback = response.get("promptFeedback", {})
+            raise GeminiQAError(f"Gemini không trả nội dung: {feedback}")
+
+        def variants(raw: str) -> list[str]:
+            raw = raw.strip().lstrip("\ufeff")
+            values = [raw]
+            if raw.startswith("```"):
+                lines = raw.splitlines()[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                values.append("\n".join(lines).strip())
+            first, last = raw.find("{"), raw.rfind("}")
+            if 0 <= first < last:
+                values.append(raw[first:last + 1])
+
+            output: list[str] = []
+            for value in values:
+                if value and value not in output:
+                    output.append(value)
+                # Hai lỗi phổ biến khi schema bị model bỏ qua.
+                repaired = re.sub(r",\s*([}\]])", r"\1", value)
+                repaired = re.sub(r"(:\s*)\.(\d+)", r"\g<1>0.\2", repaired)
+                if repaired and repaired not in output:
+                    output.append(repaired)
+            return output
+
+        # JSON hoàn chỉnh thường nằm ở part cuối; thử từng part trước để không
+        # nối thinking/prose với JSON, rồi mới thử toàn bộ chuỗi ghép.
+        raw_candidates = list(reversed(texts)) + ["".join(texts)]
+        last_error: Exception | None = None
+        all_variants: list[str] = []
+        for raw in raw_candidates:
+            for text in variants(raw):
+                if text not in all_variants:
+                    all_variants.append(text)
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+                    try:
+                        value = ast.literal_eval(text)
+                    except (ValueError, SyntaxError):
+                        continue
+                if isinstance(value, dict):
+                    return value
+
+        # Nếu output bị cắt ở object cuối, cứu các item đã hoàn tất. assess()
+        # sẽ yêu cầu lại một lần để lấy đủ; phần này là lưới an toàn cuối cùng.
+        decoder = json.JSONDecoder()
+        recovered: dict[int, dict[str, Any]] = {}
+        for text in all_variants:
+            for match in re.finditer(r"\{", text):
+                try:
+                    value, _ = decoder.raw_decode(text[match.start():])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(value, dict) or "candidate_id" not in value:
+                    continue
+                candidate_id = _safe_int(value.get("candidate_id"))
+                if candidate_id >= 0:
+                    recovered[candidate_id] = value
+        if recovered:
+            return {"items": [recovered[key] for key in sorted(recovered)]}
+
+        detail = str(last_error or "không tìm thấy JSON object")
+        finish_reason = ""
         try:
-            value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise GeminiQAError(f"Gemini trả JSON không hợp lệ: {exc}") from None
-        if not isinstance(value, dict):
-            raise GeminiQAError("Gemini JSON phải là một object.")
-        return value
+            finish_reason = str(response["candidates"][0].get("finishReason", ""))
+        except (KeyError, IndexError, TypeError):
+            pass
+        suffix = f"; finishReason={finish_reason}" if finish_reason else ""
+        raise GeminiQAError(f"Gemini trả JSON không hợp lệ: {detail}{suffix}")
 
     def assess(
         self, question: str, rows: Sequence[Mapping[str, Any]]
@@ -482,9 +718,46 @@ class GeminiQAReader:
         cache_key = self._cache_key(question, candidates)
         cached = self._read_cache(cache_key)
         cache_hit = cached is not None
+        api_calls = 0
+        json_recovery = "cache" if cache_hit else "none"
         if cached is None:
-            raw_response = self._call(self._build_payload(question, candidates))
-            cached = self._extract_json(raw_response)
+            payload = self._build_payload(question, candidates)
+            raw_response = self._call(payload)
+            api_calls = 1
+            first_value: dict[str, Any] | None = None
+            first_error: GeminiQAError | None = None
+            try:
+                first_value = self._extract_json(raw_response)
+            except GeminiQAError as exc:
+                first_error = exc
+
+            expected_ids = {item["candidate_id"] for item in candidates}
+            first_ids = {
+                _safe_int(item.get("candidate_id"))
+                for item in (first_value or {}).get("items", [])
+                if isinstance(item, dict)
+            }
+            need_retry = first_error is not None or not expected_ids.issubset(first_ids)
+
+            if need_retry:
+                try:
+                    retry_response = self._call(self._strict_retry_payload(payload))
+                    api_calls += 1
+                    cached = self._extract_json(retry_response)
+                    json_recovery = "retry"
+                except GeminiQAError as retry_error:
+                    if first_value and first_ids:
+                        cached = first_value
+                        json_recovery = "partial_first_response"
+                    else:
+                        reason = first_error or GeminiQAError(
+                            "Gemini không trả đủ candidate."
+                        )
+                        raise GeminiQAError(
+                            f"{reason}; retry thất bại: {retry_error}"
+                        ) from None
+            else:
+                cached = first_value
             self._write_cache(cache_key, cached)
 
         by_candidate = {item["candidate_id"]: item for item in candidates}
@@ -512,9 +785,17 @@ class GeminiQAReader:
             "provider": "gemini",
             "model": self.model,
             "selected_images": len(candidates),
+            "selected_videos": len({item["video_id"] for item in candidates}),
             "assessed_rows": len(assessments),
+            "prompt_version": PROMPT_VERSION,
+            "evidence": {
+                "ocr": sum(bool(item["ocr"]) for item in candidates),
+                "asr": sum(bool(item["asr"]) for item in candidates),
+                "caption": sum(bool(item["caption"]) for item in candidates),
+            },
             "cache_hit": cache_hit,
-            "api_calls": 0 if cache_hit else 1,
+            "api_calls": 0 if cache_hit else api_calls,
+            "json_recovery": json_recovery,
             "latency_ms": (time.perf_counter() - started) * 1000.0,
             "fallback_reason": None,
         }
@@ -535,7 +816,7 @@ def apply_gemini_assessments(
         row["gemini_relevance"] = assessment.relevance
         row["gemini_confidence"] = assessment.confidence
         row["gemini_evidence"] = assessment.evidence
-        if assessment.answer.casefold() != FALLBACK_ANSWER:
+        if not _is_abstention(assessment.answer):
             row["answer"] = assessment.answer
             row["answer_confidence"] = assessment.confidence
             row["answer_source"] = "gemini"

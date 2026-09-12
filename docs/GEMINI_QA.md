@@ -10,7 +10,7 @@ Mở tệp `.env` ở gốc repository và thêm các dòng riêng biệt:
 
 ```env
 GEMINI_API_KEY=dan-api-key-cua-ban-vao-day
-AIC_GEMINI_MODEL=gemini-2.5-flash
+AIC_GEMINI_MODEL=gemini-3.6-flash
 AIC_GEMINI_MAX_IMAGES=12
 AIC_GEMINI_TIMEOUT_SECONDS=25
 AIC_GEMINI_RETRIES=2
@@ -36,8 +36,10 @@ Không cần cài thêm Google SDK. Mã dùng REST API và thư viện chuẩn c
 python -u -m scripts.check_gemini_api
 ```
 
-Kết quả hợp lệ bắt đầu bằng `OK: model=gemini-2.5-flash`. Lệnh này dùng đúng
-một request văn bản nhỏ và không in API key.
+Kết quả hợp lệ bắt đầu bằng `OK: model=...`. Lệnh này dùng đúng một request
+văn bản nhỏ và không in API key. Đây chỉ là kiểm tra kết nối; để xác nhận UI
+thực sự dùng Gemini, mở `Chẩn đoán Q&A` và kiểm tra provider, số ảnh, cache và
+số API call.
 
 ## 3. Chạy UI
 
@@ -54,8 +56,12 @@ Trong `Tùy chọn tìm kiếm` của Q&A:
 - `Chỉ OCR/ASR local`: không dùng VLM.
 
 Mỗi truy vấn Gemini dùng tối đa một API call cho tối đa 12 ảnh: tối đa ba
-keyframe ở mỗi trong bốn video đứng đầu. OCR và ASR quanh từng frame được gửi
-kèm nhưng đáp án vẫn gắn với chính frame đó.
+keyframe ở mỗi trong bốn video đứng đầu. Các frame cùng video được xếp theo
+thời gian để model hiểu chuỗi cảnh. OCR, ASR và caption lân cận được gửi kèm,
+nhưng đáp án vẫn gắn với frame thuộc đúng video đó.
+
+UI tự nạp `.env` ở gốc repository. Sau khi sửa `.env`, cần dừng và chạy lại
+Streamlit vì Gemini reader được cache theo tiến trình.
 
 ## 4. Cache và fallback
 
@@ -66,7 +72,8 @@ D:/aic-data/runs/gemini_qa_cache
 ```
 
 Có thể đổi bằng `AIC_GEMINI_CACHE_DIR`. Cache không chứa API key. Cùng câu hỏi,
-model và các ảnh không đổi sẽ không gọi API lần nữa.
+model, ảnh và evidence OCR/ASR/caption không đổi sẽ không gọi API lần nữa.
+Mỗi lần thay đổi prompt phải tăng `PROMPT_VERSION` để vô hiệu cache cũ.
 
 Các lỗi sau tự fallback về local:
 
@@ -76,6 +83,10 @@ Các lỗi sau tự fallback về local:
 - timeout hoặc mất mạng;
 - phản hồi JSON không hợp lệ;
 - keyframe gốc chưa được tải.
+
+Nếu phản hồi đầu tiên bị cắt hoặc sai JSON, reader sẽ tự sửa các lỗi JSON đơn
+giản và gọi lại tối đa một lần với chỉ dẫn định dạng nghiêm ngặt. Chỉ fallback
+về local khi cả lần đầu lẫn lần phục hồi đều không dùng được.
 
 Chẩn đoán Q&A trên UI hiển thị model, số ảnh, cache hit/miss, số API call và lý
 do fallback.
